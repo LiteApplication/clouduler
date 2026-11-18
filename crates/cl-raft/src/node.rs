@@ -110,6 +110,17 @@ pub async fn restore(
     Ok(())
 }
 
+/// Offline, after `restore`: refills the terraform modules and sealed states.
+pub async fn restore_terraform(
+    data_dir: &std::path::Path,
+    modules: BTreeMap<String, BTreeMap<String, crate::terraform::TerraformModule>>,
+    states: BTreeMap<String, crate::terraform::TerraformState>,
+) -> Result<()> {
+    let store = Store::open(data_dir.join("raft.redb"))?;
+    store.restore_terraform(modules, states).await?;
+    Ok(())
+}
+
 impl ClusterNode {
     pub async fn start(options: Options) -> Result<Self> {
         let id = node_id(options.id);

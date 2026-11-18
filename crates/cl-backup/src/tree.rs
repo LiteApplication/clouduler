@@ -8,6 +8,8 @@
 //! stacks/<name>.yaml
 //! configs/<name>
 //! secrets/<name>.age
+//! terraform/<stack>/<service>.tf
+//! terraform/<stack>/<service>.tfstate.age
 //! ```
 //!
 //! `build` is a full rebuild every tick, so there are no stale files after a rename or delete.
@@ -56,7 +58,23 @@ impl SecretCache {
     pub fn seed(&mut self, name: String, revision: u64, ciphertext: Vec<u8>) {
         self.0.insert(name, (revision, ciphertext));
     }
+
+    /// Like `seed`, for a terraform state (`key` is `"stack/service"`, `serial` its
+    /// raft serial). Kept in the same map under a prefix no secret name can
+    /// have, so the persisted cache format is unchanged.
+    pub fn seed_tfstate(&mut self, key: String, serial: u64, ciphertext: Vec<u8>) {
+        self.0
+            .insert(format!("{TFSTATE_PREFIX}{key}"), (serial, ciphertext));
+    }
 }
+
+/// Cache-key prefix for terraform states inside `SecretCache`.
+const TFSTATE_PREFIX: &str = "/tfstate/";
+
+/// Root-level file recording the raft serial each
+/// `terraform/<stack>/<service>.tfstate.age` was encrypted from
+/// (`{"stack/service": serial}`); the terraform twin of `SECRET_REVISIONS_PATH`.
+pub const TERRAFORM_REVISIONS_PATH: &str = ".clouduler-terraform-revisions.json";
 
 /// Root-level file recording the raft revision each `secrets/<name>.age` was
 /// encrypted from (`{"name": revision}`). It is what lets a node that just
@@ -145,7 +163,9 @@ pub fn build(
             contents: ciphertext,
         });
     }
-    cache.0.retain(|name, _| state.secrets.contains_key(name));
+    cache
+        .0
+        .retain(|name, _| name.starts_with(TFSTATE_PREFIX) || state.secrets.contains_key(name));
 
     let revisions: BTreeMap<&str, u64> = state
         .secrets
@@ -164,8 +184,84 @@ pub fn build(
         });
     }
 
+    export_terraform(state, key, recipient, cache, &mut files);
+
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
+}
+
+/// Adds `terraform/<stack>/<service>.tf` (plain) and `.tfstate.age` (the state
+/// unsealed with the cluster key, age-encrypted to `recipient`, reused from
+/// `cache` while the serial has not moved), plus the serial bookkeeping file.
+fn export_terraform(
+    state: &ClusterState,
+    key: &ClusterKey,
+    recipient: &age::x25519::Recipient,
+    cache: &mut SecretCache,
+    files: &mut Vec<TreeFile>,
+) {
+    let mut serials: BTreeMap<String, u64> = BTreeMap::new();
+    let mut live = std::collections::BTreeSet::new();
+    for (stack, modules) in &state.terraform_modules {
+        if stack.contains('/') || stack.is_empty() {
+            tracing::error!(stack = %stack, "git backup: skipping terraform modules of a stack whose name contains '/'");
+            continue;
+        }
+        for (service, module) in modules {
+            if service.contains('/') || service.is_empty() {
+                continue;
+            }
+            files.push(TreeFile {
+                path: format!("terraform/{stack}/{service}.tf"),
+                contents: module.source.clone().into_bytes(),
+            });
+            let tf_key = cl_raft::terraform::terraform_key(stack, service);
+            let Some(entry) = state.terraform_states.get(&tf_key) else {
+                continue;
+            };
+            let cache_key = format!("{TFSTATE_PREFIX}{tf_key}");
+            let ciphertext = match cache.0.get(&cache_key) {
+                Some((serial, ciphertext)) if *serial == entry.serial => ciphertext.clone(),
+                _ => {
+                    let plaintext = match Sealed::from_blob(entry.sealed.clone()).open(key, &tf_key)
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(terraform = %tf_key, error = %e, "git backup: skipping undecryptable terraform state");
+                            continue;
+                        }
+                    };
+                    match crate::age::encrypt(recipient, &plaintext) {
+                        Ok(ciphertext) => {
+                            cache
+                                .0
+                                .insert(cache_key.clone(), (entry.serial, ciphertext.clone()));
+                            ciphertext
+                        }
+                        Err(e) => {
+                            tracing::warn!(terraform = %tf_key, error = %e, "git backup: skipping terraform state that failed to re-encrypt");
+                            continue;
+                        }
+                    }
+                }
+            };
+            live.insert(cache_key);
+            serials.insert(tf_key, entry.serial);
+            files.push(TreeFile {
+                path: format!("terraform/{stack}/{service}.tfstate.age"),
+                contents: ciphertext,
+            });
+        }
+    }
+    cache
+        .0
+        .retain(|name, _| !name.starts_with(TFSTATE_PREFIX) || live.contains(name));
+    if !serials.is_empty() {
+        files.push(TreeFile {
+            path: TERRAFORM_REVISIONS_PATH.to_string(),
+            contents: format!("{:#}", serde_json::Value::from_iter(serials)).into_bytes(),
+        });
+    }
 }
 
 /// The reverse of `build`, read from a checked-out working tree. Used only by
@@ -179,6 +275,11 @@ pub struct ParsedTree {
     pub configs: BTreeMap<String, Vec<u8>>,
     /// Secret name -> age ciphertext.
     pub secrets: BTreeMap<String, Vec<u8>>,
+    /// Stack name -> service name -> module source (`terraform/<stack>/<service>.tf`).
+    pub terraform: BTreeMap<String, BTreeMap<String, String>>,
+    /// `"stack/service"` -> age ciphertext of the tofu state
+    /// (`terraform/<stack>/<service>.tfstate.age`).
+    pub terraform_states: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn parse_dir(root: &Path) -> Result<ParsedTree> {
@@ -209,11 +310,42 @@ pub fn parse_dir(root: &Path) -> Result<ParsedTree> {
         secrets.insert(name.to_string(), bytes);
     }
 
+    let mut terraform: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut terraform_states = BTreeMap::new();
+    let tf_root = root.join("terraform");
+    if let Ok(stack_dirs) = std::fs::read_dir(&tf_root) {
+        for stack_dir in stack_dirs {
+            let stack_dir = stack_dir.map_err(|source| BackupError::Io {
+                path: tf_root.clone(),
+                source,
+            })?;
+            let stack_path = stack_dir.path();
+            if !stack_path.is_dir() {
+                continue;
+            }
+            let Some(stack) = stack_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            for (name, bytes) in list_dir(&stack_path)? {
+                if let Some(service) = name.strip_suffix(".tfstate.age") {
+                    terraform_states.insert(format!("{stack}/{service}"), bytes);
+                } else if let Some(service) = name.strip_suffix(".tf") {
+                    terraform.entry(stack.to_string()).or_default().insert(
+                        service.to_string(),
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    );
+                }
+            }
+        }
+    }
+
     Ok(ParsedTree {
         cluster_yaml,
         stacks,
         configs,
         secrets,
+        terraform,
+        terraform_states,
     })
 }
 
@@ -346,6 +478,102 @@ mod tests {
         let oid = crate::git::build_git_tree(&repo, &files).expect("build tree");
         let parsed = crate::git::parse_tree(&repo, oid).expect("parse tree");
         assert!(parsed.stacks["b"].contains("real"));
+    }
+
+    fn state_with_terraform(key: &ClusterKey, serial: u64, plaintext: &[u8]) -> ClusterState {
+        use cl_raft::terraform::{TerraformModule, TerraformState};
+        let mut state = state_with_everything(key);
+        state.terraform_modules.insert(
+            "web".into(),
+            BTreeMap::from([(
+                "app".to_string(),
+                TerraformModule {
+                    source: "variable \"x\" {}\n".into(),
+                    revision: 1,
+                },
+            )]),
+        );
+        let sealed = Sealed::seal(key, "web/app", plaintext).expect("seal");
+        state.terraform_states.insert(
+            "web/app".into(),
+            TerraformState {
+                sealed: sealed.blob,
+                serial,
+                key_fingerprint: key.fingerprint(),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn terraform_exports_module_and_age_state_and_round_trips() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let state = state_with_terraform(&key, 3, b"{\"serial\":9}");
+        let mut cache = SecretCache::new();
+        let files = build(&state, &key, &identity.to_public(), &mut cache);
+        let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"terraform/web/app.tf"));
+        assert!(paths.contains(&"terraform/web/app.tfstate.age"));
+        assert!(paths.contains(&TERRAFORM_REVISIONS_PATH));
+        let tf = files
+            .iter()
+            .find(|f| f.path == "terraform/web/app.tf")
+            .unwrap();
+        assert_eq!(tf.contents, b"variable \"x\" {}\n");
+
+        // git round trip (nested 3-component paths)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init");
+        let oid = crate::git::build_git_tree(&repo, &files).expect("build tree");
+        let parsed = crate::git::parse_tree(&repo, oid).expect("parse tree");
+        assert_eq!(parsed.terraform["web"]["app"], "variable \"x\" {}\n");
+        let ct = &parsed.terraform_states["web/app"];
+        assert_eq!(
+            crate::age::decrypt(&identity, ct).expect("decrypt"),
+            b"{\"serial\":9}"
+        );
+
+        // the same files written to disk parse identically through parse_dir (restore)
+        let disk = tempfile::tempdir().expect("tempdir");
+        for f in &files {
+            let p = disk.path().join(&f.path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, &f.contents).unwrap();
+        }
+        let parsed = parse_dir(disk.path()).expect("parse_dir");
+        assert_eq!(parsed.terraform["web"]["app"], "variable \"x\" {}\n");
+        assert_eq!(
+            crate::age::decrypt(&identity, &parsed.terraform_states["web/app"]).unwrap(),
+            b"{\"serial\":9}"
+        );
+    }
+
+    #[test]
+    fn terraform_state_ciphertext_is_reused_until_the_serial_moves() {
+        let key = ClusterKey::generate();
+        let recipient = age::x25519::Identity::generate().to_public();
+        let state = state_with_terraform(&key, 1, b"one");
+        let mut cache = SecretCache::new();
+        let ct = |files: &[TreeFile]| {
+            files
+                .iter()
+                .find(|f| f.path == "terraform/web/app.tfstate.age")
+                .unwrap()
+                .contents
+                .clone()
+        };
+        let first = ct(&build(&state, &key, &recipient, &mut cache));
+        assert_eq!(first, ct(&build(&state, &key, &recipient, &mut cache)));
+        let moved = state_with_terraform(&key, 2, b"two");
+        assert_ne!(first, ct(&build(&moved, &key, &recipient, &mut cache)));
+
+        // A removed module drops its cache entry.
+        let mut gone = moved.clone();
+        gone.terraform_modules.clear();
+        gone.terraform_states.clear();
+        build(&gone, &key, &recipient, &mut cache);
+        assert!(!cache.0.keys().any(|k| k.starts_with(TFSTATE_PREFIX)));
     }
 
     #[test]

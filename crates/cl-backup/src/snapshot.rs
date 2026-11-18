@@ -48,6 +48,12 @@ pub struct Snapshot {
     pub stacks: BTreeMap<String, u64>,
     pub configs: BTreeMap<String, u64>,
     pub secrets: BTreeMap<String, u64>,
+    /// `"stack/service"` -> module revision.
+    #[serde(default)]
+    pub terraform: BTreeMap<String, u64>,
+    /// `"stack/service"` -> state serial.
+    #[serde(default)]
+    pub terraform_states: BTreeMap<String, u64>,
 }
 
 impl Snapshot {
@@ -70,6 +76,23 @@ impl Snapshot {
                 .iter()
                 .map(|(name, s)| (name.clone(), s.revision))
                 .collect(),
+            terraform: state
+                .terraform_modules
+                .iter()
+                .flat_map(|(stack, mods)| {
+                    mods.iter().map(move |(service, m)| {
+                        (
+                            cl_raft::terraform::terraform_key(stack, service),
+                            m.revision,
+                        )
+                    })
+                })
+                .collect(),
+            terraform_states: state
+                .terraform_states
+                .iter()
+                .map(|(key, st)| (key.clone(), st.serial))
+                .collect(),
         }
     }
 }
@@ -86,6 +109,10 @@ pub enum Change {
     SecretAdded(String),
     SecretUpdated(String),
     SecretRemoved(String),
+    TerraformAdded(String),
+    TerraformUpdated(String),
+    TerraformRemoved(String),
+    TerraformStateUpdated(String),
 }
 
 /// Diffs `old` against `new`. Empty means nothing this feature cares about
@@ -121,6 +148,26 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
         Change::SecretUpdated,
         Change::SecretRemoved,
     );
+    diff_map(
+        &old.terraform,
+        &new.terraform,
+        &mut changes,
+        Change::TerraformAdded,
+        Change::TerraformUpdated,
+        Change::TerraformRemoved,
+    );
+    // A state appearing, moving or vanishing changes its .tfstate.age.
+    for key in old
+        .terraform_states
+        .keys()
+        .chain(new.terraform_states.keys())
+    {
+        if old.terraform_states.get(key) != new.terraform_states.get(key)
+            && !changes.contains(&Change::TerraformStateUpdated(key.clone()))
+        {
+            changes.push(Change::TerraformStateUpdated(key.clone()));
+        }
+    }
 
     changes
 }
@@ -177,6 +224,10 @@ fn describe(change: &Change) -> String {
         Change::SecretAdded(name) => format!("add secret {name}"),
         Change::SecretUpdated(name) => format!("update secret {name}"),
         Change::SecretRemoved(name) => format!("remove secret {name}"),
+        Change::TerraformAdded(key) => format!("add terraform module {key}"),
+        Change::TerraformUpdated(key) => format!("update terraform module {key}"),
+        Change::TerraformRemoved(key) => format!("remove terraform module {key}"),
+        Change::TerraformStateUpdated(key) => format!("update terraform state {key}"),
     }
 }
 
@@ -239,7 +290,29 @@ mod tests {
             stacks: stacks.iter().map(|(n, r)| (n.to_string(), *r)).collect(),
             configs: configs.iter().map(|(n, r)| (n.to_string(), *r)).collect(),
             secrets: secrets.iter().map(|(n, r)| (n.to_string(), *r)).collect(),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn terraform_module_and_state_changes_are_detected() {
+        let a = snap(&[], &[], &[]);
+        let mut b = a.clone();
+        b.terraform.insert("s/w".into(), 1);
+        assert_eq!(diff(&a, &b), vec![Change::TerraformAdded("s/w".into())]);
+        let mut c = b.clone();
+        c.terraform_states.insert("s/w".into(), 1);
+        assert_eq!(
+            diff(&b, &c),
+            vec![Change::TerraformStateUpdated("s/w".into())]
+        );
+        let mut d = c.clone();
+        d.terraform_states.insert("s/w".into(), 2);
+        assert_eq!(
+            diff(&c, &d),
+            vec![Change::TerraformStateUpdated("s/w".into())]
+        );
+        assert!(commit_message(&diff(&c, &d)).contains("terraform state"));
     }
 
     #[test]

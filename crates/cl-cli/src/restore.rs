@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::state::{ClusterConfigEntry, ConfigEntry, SecretEntry, StackState};
+use cl_raft::terraform::{TerraformModule, TerraformState};
 use cl_secret::{ClusterKey, Sealed};
 
 use cl_init::prompt::Prompt;
@@ -64,6 +65,8 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
         configs,
         secrets,
         skipped,
+        terraform_modules,
+        terraform_states,
     } = build_restored_state(parsed, &identity, &key)?;
 
     let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
@@ -75,7 +78,7 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
         data_dir.join("raft.redb").display()
     ))?;
     prompt.say(&format!(
-        "about to restore: cluster config {}, {} stack(s), {} config(s), {} secret(s){}.",
+        "about to restore: cluster config {}, {} stack(s), {} config(s), {} secret(s), {} terraform module(s), {} terraform state(s){}.",
         if cluster_config.is_some() {
             "present"
         } else {
@@ -84,6 +87,8 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
         stacks.len(),
         configs.len(),
         secrets.len(),
+        terraform_modules.values().map(|m| m.len()).sum::<usize>(),
+        terraform_states.len(),
         if skipped.is_empty() {
             String::new()
         } else {
@@ -104,6 +109,9 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
     cl_raft::node::restore(&data_dir, cluster_config, stacks, configs, secrets)
         .await
         .map_err(|e| anyhow!("{e}"))?;
+    cl_raft::node::restore_terraform(&data_dir, terraform_modules, terraform_states)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
 
     println!(
         "{name}'s local content has been restored from {source}. Start its daemon; raft membership \
@@ -121,6 +129,8 @@ struct RestoredState {
     /// identity - reported to the operator, not fatal, since one bad secret
     /// must not block restoring everything else.
     skipped: Vec<String>,
+    terraform_modules: BTreeMap<String, BTreeMap<String, TerraformModule>>,
+    terraform_states: BTreeMap<String, TerraformState>,
 }
 
 /// Converts a parsed git tree into the fields `Store::restore_state` takes.
@@ -188,12 +198,65 @@ fn build_restored_state(
         }
     }
 
+    let mut terraform_modules: BTreeMap<String, BTreeMap<String, TerraformModule>> =
+        BTreeMap::new();
+    for (stack, modules) in &parsed.terraform {
+        // A module without its stack/service would be refused by raft; drop it here.
+        let Some(spec) = parsed.stacks.get(stack) else {
+            continue;
+        };
+        let services = cl_config::StackFile::parse(spec).ok();
+        for (service, source) in modules {
+            if services
+                .as_ref()
+                .is_some_and(|s| !s.services.contains_key(service))
+            {
+                continue;
+            }
+            terraform_modules.entry(stack.clone()).or_default().insert(
+                service.clone(),
+                TerraformModule {
+                    source: source.clone(),
+                    revision: 1,
+                },
+            );
+        }
+    }
+    let mut terraform_states = BTreeMap::new();
+    for (tf_key, ciphertext) in &parsed.terraform_states {
+        let has_module = tf_key.split_once('/').is_some_and(|(stack, service)| {
+            terraform_modules
+                .get(stack)
+                .is_some_and(|m| m.contains_key(service))
+        });
+        if !has_module {
+            continue;
+        }
+        match cl_backup::age::decrypt(identity, ciphertext) {
+            Ok(plaintext) => {
+                let sealed = Sealed::seal(key, tf_key, &plaintext)
+                    .with_context(|| format!("resealing terraform state {tf_key}"))?;
+                terraform_states.insert(
+                    tf_key.clone(),
+                    TerraformState {
+                        sealed: sealed.blob,
+                        serial: 1,
+                        key_fingerprint: key.fingerprint(),
+                    },
+                );
+            }
+            Err(_) => skipped.push(format!("terraform state {tf_key}")),
+        }
+    }
+
     Ok(RestoredState {
         cluster_config,
         stacks,
         configs,
         secrets,
         skipped,
+        terraform_modules,
+        terraform_states,
     })
 }
 
@@ -300,6 +363,50 @@ mod tests {
             b"hunter2"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn terraform_modules_and_states_are_restored() -> Result<()> {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("cluster.yaml"), "nodes: []\n")?;
+        std::fs::create_dir(dir.path().join("stacks"))?;
+        std::fs::write(
+            dir.path().join("stacks/app.yaml"),
+            "services:\n  web:\n    image: x\n",
+        )?;
+        let tf = dir.path().join("terraform/app");
+        std::fs::create_dir_all(&tf)?;
+        std::fs::write(tf.join("web.tf"), "variable \"x\" {}\n")?;
+        std::fs::write(
+            tf.join("web.tfstate.age"),
+            cl_backup::age::encrypt(&recipient, b"{\"serial\":4}")?,
+        )?;
+        // No such service: dropped, with its state.
+        std::fs::write(tf.join("ghost.tf"), "")?;
+        std::fs::write(
+            tf.join("ghost.tfstate.age"),
+            cl_backup::age::encrypt(&recipient, b"{}")?,
+        )?;
+
+        let parsed = cl_backup::tree::parse_dir(dir.path())?;
+        let restored = build_restored_state(parsed, &identity, &key)?;
+        assert_eq!(restored.terraform_modules["app"].len(), 1);
+        assert_eq!(
+            restored.terraform_modules["app"]["web"].source,
+            "variable \"x\" {}\n"
+        );
+        assert_eq!(restored.terraform_states.len(), 1);
+        let st = &restored.terraform_states["app/web"];
+        assert_eq!(st.serial, 1);
+        assert_eq!(
+            Sealed::from_blob(st.sealed.clone()).open(&key, "app/web")?,
+            b"{\"serial\":4}"
+        );
         Ok(())
     }
 

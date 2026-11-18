@@ -593,6 +593,19 @@ fn pull_and_decide(
 
     // With no known good commit the candidate's parent is the baseline, so a lost status entry
     // cannot make every commit look like a secret rotation.
+    // The tofu state is export-only too: a changed .tfstate.age is rejected like a secret.
+    if backup.tfstate_changed_against_baseline(last_good_oid, candidate)? {
+        let reason = "the pulled commit changes a terraform/*/*.tfstate.age file; the tofu state is export-only \
+                       and lives in the cluster - it cannot be edited through git"
+            .to_string();
+        let outcome =
+            backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem, None)?;
+        return Ok(PullDecision::Rejected {
+            reason,
+            preserved_branch: outcome.preserved_branch,
+        });
+    }
+
     if backup.secrets_changed_against_baseline(last_good_oid, candidate)? {
         let reason = "the pulled commit changes something under secrets/, which this cluster cannot decrypt back \
                        into a live secret - secret rotation must go through the api, not git"
@@ -679,6 +692,23 @@ fn validate_parsed(
             }
         }
     }
+    for (stack_name, modules) in &parsed.terraform {
+        let Some(spec) = parsed.stacks.get(stack_name) else {
+            return Err(format!(
+                "terraform/{stack_name}/: no stack {stack_name} in stacks/"
+            ));
+        };
+        let stack = StackFile::parse(spec).map_err(|e| format!("stacks/{stack_name}.yaml: {e}"))?;
+        for (service, source) in modules {
+            if !stack.services.contains_key(service) {
+                return Err(format!(
+                    "terraform/{stack_name}/{service}.tf: stack {stack_name} has no service {service}"
+                ));
+            }
+            cl_config::validate_module(source)
+                .map_err(|e| format!("terraform/{stack_name}/{service}.tf: {e}"))?;
+        }
+    }
     Ok(cluster_config)
 }
 
@@ -728,6 +758,8 @@ async fn apply_pulled_tree(
         }
     }
 
+    apply_pulled_terraform(state, parsed).await?;
+
     for (name, bytes) in &parsed.configs {
         // Reserved configs are mirrored into the export but each has its own validated write path;
         // a raw `PutConfig` of git content would bypass it.
@@ -768,6 +800,49 @@ async fn apply_pulled_tree(
     Ok(())
 }
 
+/// Applies the tree's `.tf` modules, never the state (export-only). A stack whose module set
+/// already matches raft is skipped, so this never touches an unchanged stack, and it is
+/// independent of the spec redeploy: editing a module does not restart containers. A stack
+/// with modules in raft but no `terraform/<stack>/` in the tree gets an empty set.
+async fn apply_pulled_terraform(state: &AppState, parsed: &ParsedTree) -> Result<(), ApiError> {
+    let current = state.cluster.state().await;
+    let mut stacks: BTreeSet<&String> = parsed.terraform.keys().collect();
+    stacks.extend(current.terraform_modules.keys());
+    for stack in stacks {
+        if !current.stacks.contains_key(stack.as_str()) {
+            continue;
+        }
+        let desired: BTreeMap<String, String> =
+            parsed.terraform.get(stack).cloned().unwrap_or_default();
+        let existing: BTreeMap<String, String> = current
+            .terraform_modules
+            .get(stack)
+            .map(|m| {
+                m.iter()
+                    .map(|(service, module)| (service.clone(), module.source.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if desired == existing {
+            continue;
+        }
+        let response = state
+            .cluster
+            .submit(ClusterRequest::SetStackTerraform {
+                stack: stack.clone(),
+                modules: desired,
+            })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Internal(format!(
+                "writing terraform modules of {stack}: {msg}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +860,8 @@ mod tests {
                 .collect(),
             configs: BTreeMap::new(),
             secrets: BTreeMap::new(),
+            terraform: BTreeMap::new(),
+            terraform_states: BTreeMap::new(),
         }
     }
 
@@ -856,5 +933,106 @@ mod tests {
         let after = h.state.cluster.state().await;
         assert_eq!(after.stacks["site"].revision, 2);
         assert_eq!(after.stacks["site"].spec, SPEC_V2);
+    }
+
+    const SPEC_TWO: &str = "services:\n  web:\n    image: nginx\n  db:\n    image: pg\n";
+    const MODULE: &str = "variable \"x\" {}\n";
+
+    fn with_modules(mut t: ParsedTree, stack: &str, mods: &[(&str, &str)]) -> ParsedTree {
+        t.terraform.insert(
+            stack.to_string(),
+            mods.iter()
+                .map(|(s, m)| (s.to_string(), m.to_string()))
+                .collect(),
+        );
+        t
+    }
+
+    fn valid_tree() -> ParsedTree {
+        let mut t = tree(&[("site", SPEC)]);
+        t.cluster_yaml = Some(CLUSTER_YAML.to_string());
+        t
+    }
+
+    #[test]
+    fn validation_rejects_bad_terraform_modules() {
+        let none = BTreeSet::new();
+        let ok = with_modules(valid_tree(), "site", &[("web", MODULE)]);
+        assert!(validate_parsed(&ok, &none, &none).is_ok());
+
+        let unknown_service = with_modules(valid_tree(), "site", &[("nope", MODULE)]);
+        let e = validate_parsed(&unknown_service, &none, &none).unwrap_err();
+        assert!(e.contains("no service nope"), "{e}");
+
+        let unknown_stack = with_modules(valid_tree(), "ghost", &[("web", MODULE)]);
+        let e = validate_parsed(&unknown_stack, &none, &none).unwrap_err();
+        assert!(e.contains("no stack ghost"), "{e}");
+
+        let bad_hcl = with_modules(valid_tree(), "site", &[("web", "variable \"x\" {")]);
+        let e = validate_parsed(&bad_hcl, &none, &none).unwrap_err();
+        assert!(e.contains("invalid HCL"), "{e}");
+
+        let backend = with_modules(
+            valid_tree(),
+            "site",
+            &[("web", "terraform {\n  backend \"s3\" {}\n}\n")],
+        );
+        let e = validate_parsed(&backend, &none, &none).unwrap_err();
+        assert!(e.contains("backend"), "{e}");
+    }
+
+    /// A `.tf`-only change lands via SetStackTerraform without redeploying the stack, and a stack
+    /// whose `terraform/` dir vanished loses its modules.
+    #[tokio::test]
+    async fn a_pull_applies_modules_without_redeploying() {
+        let h = harness().await;
+        h.state
+            .cluster
+            .submit(ClusterRequest::DeployStack {
+                name: "site".to_string(),
+                spec: SPEC_TWO.to_string(),
+                at: 0,
+            })
+            .await
+            .expect("deploy");
+        let cluster_config = h.state.cluster_config.read().await.clone();
+
+        let t = with_modules(tree(&[("site", SPEC_TWO)]), "site", &[("web", MODULE)]);
+        apply_pulled_tree(&h.state, &cluster_config, &t)
+            .await
+            .expect("apply");
+        let st = h.state.cluster.state().await;
+        assert_eq!(st.stacks["site"].revision, 1, "no redeploy");
+        assert_eq!(st.terraform_modules["site"]["web"].source, MODULE);
+        let rev = st.terraform_modules["site"]["web"].revision;
+
+        // Same tree again: untouched.
+        apply_pulled_tree(&h.state, &cluster_config, &t)
+            .await
+            .expect("reapply");
+        let st = h.state.cluster.state().await;
+        assert_eq!(st.terraform_modules["site"]["web"].revision, rev);
+
+        // Edit one module, add another.
+        let t = with_modules(
+            tree(&[("site", SPEC_TWO)]),
+            "site",
+            &[("web", "variable \"y\" {}\n"), ("db", MODULE)],
+        );
+        apply_pulled_tree(&h.state, &cluster_config, &t)
+            .await
+            .expect("apply edit");
+        let st = h.state.cluster.state().await;
+        assert_eq!(st.stacks["site"].revision, 1, "still no redeploy");
+        assert_eq!(st.terraform_modules["site"].len(), 2);
+        assert_eq!(st.terraform_modules["site"]["web"].revision, rev + 1);
+
+        // terraform/site/ gone from the tree.
+        apply_pulled_tree(&h.state, &cluster_config, &tree(&[("site", SPEC_TWO)]))
+            .await
+            .expect("apply removal");
+        let st = h.state.cluster.state().await;
+        assert!(st.terraform_modules.is_empty());
+        assert_eq!(st.stacks["site"].revision, 1);
     }
 }

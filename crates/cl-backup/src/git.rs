@@ -372,15 +372,25 @@ impl GitBackup {
             let blob = entry.to_object(&self.repo).ok()?.into_blob().ok()?;
             Some(blob.content().to_vec())
         };
-        let Some(raw) = blob(crate::tree::SECRET_REVISIONS_PATH) else {
-            return Ok(());
-        };
-        let Ok(revisions) = serde_json::from_slice::<BTreeMap<String, u64>>(&raw) else {
-            return Ok(());
-        };
+        let revisions = blob(crate::tree::SECRET_REVISIONS_PATH)
+            .and_then(|raw| serde_json::from_slice::<BTreeMap<String, u64>>(&raw).ok())
+            .unwrap_or_default();
         for (name, revision) in revisions {
             if let Some(ciphertext) = blob(&format!("secrets/{name}.age")) {
                 cache.seed(name, revision, ciphertext);
+            }
+        }
+        if let Some(raw) = blob(crate::tree::TERRAFORM_REVISIONS_PATH) {
+            if let Ok(serials) = serde_json::from_slice::<BTreeMap<String, u64>>(&raw) {
+                for (key, serial) in serials {
+                    if let Some((stack, service)) = key.split_once('/') {
+                        if let Some(ciphertext) =
+                            blob(&format!("terraform/{stack}/{service}.tfstate.age"))
+                        {
+                            cache.seed_tfstate(key, serial, ciphertext);
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -436,6 +446,52 @@ impl GitBackup {
             None => self.repo.find_commit(candidate_commit)?.parent_id(0).ok(),
         };
         self.secrets_subtree_changed(baseline, candidate_commit)
+    }
+
+    /// Whether any `terraform/<stack>/<service>.tfstate.age` differs between the
+    /// baseline (same rule as `secrets_changed_against_baseline`) and the
+    /// candidate. The state in git is export-only, like `secrets/`.
+    pub fn tfstate_changed_against_baseline(
+        &self,
+        good_commit: Option<git2::Oid>,
+        candidate_commit: git2::Oid,
+    ) -> Result<bool> {
+        let baseline = match good_commit {
+            Some(oid) => Some(oid),
+            None => self.repo.find_commit(candidate_commit)?.parent_id(0).ok(),
+        };
+        let candidate = self.tfstate_blobs(Some(candidate_commit))?;
+        let good = self.tfstate_blobs(baseline)?;
+        Ok(candidate != good)
+    }
+
+    /// `terraform/<stack>/<service>.tfstate.age` -> blob id, for one commit.
+    fn tfstate_blobs(&self, commit: Option<git2::Oid>) -> Result<BTreeMap<String, git2::Oid>> {
+        let mut out = BTreeMap::new();
+        let Some(oid) = commit else {
+            return Ok(out);
+        };
+        let tree = self.repo.find_commit(oid)?.tree()?;
+        let Some(tf) = tree.get_name("terraform") else {
+            return Ok(out);
+        };
+        let Ok(tf) = tf.to_object(&self.repo)?.into_tree() else {
+            return Ok(out);
+        };
+        for stack in tf.iter() {
+            let Some(stack_name) = stack.name() else {
+                continue;
+            };
+            let Ok(stack_tree) = stack.to_object(&self.repo)?.into_tree() else {
+                continue;
+            };
+            for entry in stack_tree.iter() {
+                if let Some(name) = entry.name().filter(|n| n.ends_with(".tfstate.age")) {
+                    out.insert(format!("{stack_name}/{name}"), entry.id());
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn subtree_oid_from_commit(
@@ -556,55 +612,67 @@ pub fn build_git_tree_on_parent(
             let _ = builder.remove("stacks");
             let _ = builder.remove("configs");
             let _ = builder.remove("secrets");
+            let _ = builder.remove("terraform");
             let _ = builder.remove(crate::tree::SECRET_REVISIONS_PATH);
+            let _ = builder.remove(crate::tree::TERRAFORM_REVISIONS_PATH);
             builder
         }
         None => repo.treebuilder(None)?,
     };
 
-    let mut subtrees: HashMap<String, git2::TreeBuilder> = HashMap::new();
-    let mut root_entries: Vec<(String, git2::Oid, u32)> = Vec::new();
-
+    let mut dir = TreeDir::default();
     for file in files {
         let parts: Vec<&str> = file.path.split('/').collect();
-        // The layout is at most one directory deep. Anything deeper would
-        // keep only its last component, silently overwriting a sibling.
-        if parts.len() > 2 || parts.iter().any(|p| p.is_empty()) {
+        // The layout is at most one directory deep, except `terraform/<stack>/<service>.tf`.
+        // Anything deeper would keep only its last component, silently overwriting a sibling.
+        let max_parts = if parts[0] == "terraform" { 3 } else { 2 };
+        if parts.len() > max_parts || parts.iter().any(|p| p.is_empty()) {
             return Err(BackupError::Malformed {
                 what: format!("tree path {:?}", file.path),
-                reason: "expected `<name>` or `<dir>/<name>`".to_string(),
+                reason: "expected `<name>`, `<dir>/<name>` or `terraform/<stack>/<name>`"
+                    .to_string(),
             });
         }
         let blob_oid = repo.blob(&file.contents)?;
-
-        if parts.len() == 1 {
-            // Top-level file.
-            root_entries.push((parts[0].to_string(), blob_oid, 0o100644));
-        } else {
-            // Nested path: ensure each parent tree exists.
-            let dir_name = parts[0];
-            let file_name = parts[1];
-            let subtree = match subtrees.entry(dir_name.to_string()) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => e.insert(repo.treebuilder(None)?),
-            };
-            // Our layout is flat one level deep (stacks/*.yaml, configs/*,
-            // secrets/*.age), which the check above enforces.
-            subtree.insert(file_name, blob_oid, 0o100644)?;
+        let mut cur = &mut dir;
+        for part in &parts[..parts.len() - 1] {
+            cur = cur.dirs.entry((*part).to_string()).or_default();
         }
+        cur.blobs
+            .insert(parts[parts.len() - 1].to_string(), blob_oid);
     }
 
-    // Finalize subtree builders and collect their oids.
-    for (name, builder) in subtrees {
-        let tree_oid = builder.write()?;
-        root.insert(&name, tree_oid, 0o040000)?;
-    }
-    for (name, blob_oid, mode) in root_entries {
-        root.insert(&name, blob_oid, mode as i32)?;
+    for (name, oid, mode) in dir.entries(repo)? {
+        root.insert(&name, oid, mode)?;
     }
 
     let tree_oid = root.write()?;
     Ok(tree_oid)
+}
+
+/// In-memory directory used to assemble nested git trees.
+#[derive(Default)]
+struct TreeDir {
+    blobs: BTreeMap<String, git2::Oid>,
+    dirs: BTreeMap<String, TreeDir>,
+}
+
+impl TreeDir {
+    /// Writes the subdirectories and returns every entry (name, oid, filemode).
+    fn entries(&self, repo: &Repository) -> Result<Vec<(String, git2::Oid, i32)>> {
+        let mut out = Vec::new();
+        for (name, sub) in &self.dirs {
+            let mut builder = repo.treebuilder(None)?;
+            for (n, oid, mode) in sub.entries(repo)? {
+                builder.insert(&n, oid, mode)?;
+            }
+            out.push((name.clone(), builder.write()?, 0o040000));
+        }
+        for (name, oid) in &self.blobs {
+            out.push((name.clone(), *oid, 0o100644));
+        }
+        Ok(out)
+    }
 }
 
 /// Builds a tree with no parent; see [`build_git_tree_on_parent`].
@@ -719,11 +787,51 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
         }
     }
 
+    let mut terraform: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut terraform_states = BTreeMap::new();
+    if let Some(tf_entry) = tree.get_name("terraform") {
+        let tf_tree =
+            tf_entry
+                .to_object(repo)?
+                .into_tree()
+                .map_err(|_| BackupError::Malformed {
+                    what: "terraform".to_string(),
+                    reason: "not a tree".to_string(),
+                })?;
+        for stack_entry in tf_tree.iter() {
+            let Some(stack) = stack_entry.name() else {
+                continue;
+            };
+            // Stray files directly under terraform/ are ignored.
+            let Ok(stack_tree) = stack_entry.to_object(repo)?.into_tree() else {
+                continue;
+            };
+            for entry in stack_tree.iter() {
+                let Some(name) = entry.name() else {
+                    continue;
+                };
+                let Ok(blob) = entry.to_object(repo)?.into_blob() else {
+                    continue;
+                };
+                if let Some(service) = name.strip_suffix(".tfstate.age") {
+                    terraform_states.insert(format!("{stack}/{service}"), blob.content().to_vec());
+                } else if let Some(service) = name.strip_suffix(".tf") {
+                    terraform.entry(stack.to_string()).or_default().insert(
+                        service.to_string(),
+                        String::from_utf8_lossy(blob.content()).into_owned(),
+                    );
+                }
+            }
+        }
+    }
+
     Ok(ParsedTree {
         cluster_yaml,
         stacks,
         configs,
         secrets,
+        terraform,
+        terraform_states,
     })
 }
 
@@ -961,6 +1069,33 @@ mod tests {
             .seed_secret_cache(&mut cache, "not-a-real-key")
             .expect("seed");
         assert_eq!(cache.0.get("db"), Some(&(4, b"ciphertext-v1".to_vec())),);
+    }
+
+    #[test]
+    fn a_fresh_leader_reuses_the_committed_tfstate_ciphertext() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let files = vec![
+            TreeFile {
+                path: "terraform/s/w.tfstate.age".to_string(),
+                contents: b"state-ct".to_vec(),
+            },
+            TreeFile {
+                path: crate::tree::TERRAFORM_REVISIONS_PATH.to_string(),
+                contents: br#"{"s/w": 7}"#.to_vec(),
+            },
+        ];
+        let (_first, _oid, _local) = seeded_backup(&bare_dir, &files);
+        let local_dir = tempfile::tempdir().expect("local tempdir");
+        let repo_url = format!("file://{}", bare_dir.path().display());
+        let fresh = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
+        let mut cache = crate::tree::SecretCache::new();
+        fresh
+            .seed_secret_cache(&mut cache, "not-a-real-key")
+            .expect("seed");
+        assert_eq!(
+            cache.0.get("/tfstate/s/w"),
+            Some(&(7, b"state-ct".to_vec()))
+        );
     }
 
     #[test]
@@ -1479,6 +1614,70 @@ mod tests {
         assert!(parsed.stacks.is_empty());
         assert!(parsed.configs.is_empty());
         assert!(parsed.secrets.is_empty());
+    }
+
+    #[test]
+    fn terraform_paths_may_be_three_deep_but_nothing_else() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let f = |p: &str| TreeFile {
+            path: p.to_string(),
+            contents: b"x".to_vec(),
+        };
+        assert!(build_git_tree(
+            &repo,
+            &[
+                f("terraform/a/b.tf"),
+                f("terraform/a/c.tf"),
+                f("stacks/a.yaml")
+            ]
+        )
+        .is_ok());
+        assert!(build_git_tree(&repo, &[f("terraform/a/b/c.tf")]).is_err());
+    }
+
+    #[test]
+    fn a_changed_tfstate_is_detected_against_the_baseline() {
+        let bare_dir = tempfile::tempdir().expect("tempdir");
+        let f = |state: &[u8], tf: &[u8]| {
+            vec![
+                TreeFile {
+                    path: "cluster.yaml".to_string(),
+                    contents: b"a".to_vec(),
+                },
+                TreeFile {
+                    path: "terraform/s/w.tf".to_string(),
+                    contents: tf.to_vec(),
+                },
+                TreeFile {
+                    path: "terraform/s/w.tfstate.age".to_string(),
+                    contents: state.to_vec(),
+                },
+            ]
+        };
+        let (backup, first, _local) = seeded_backup(&bare_dir, &f(b"s1", b"m1"));
+        let dummy_key = "not-a-real-key";
+        let second = backup
+            .sync(&f(b"s1", b"m2"), "edit module", dummy_key, None)
+            .expect("sync")
+            .expect("commit");
+        let third = backup
+            .sync(&f(b"s2", b"m2"), "edit state", dummy_key, None)
+            .expect("sync")
+            .expect("commit");
+        assert!(!backup
+            .tfstate_changed_against_baseline(Some(first), second)
+            .unwrap());
+        assert!(backup
+            .tfstate_changed_against_baseline(Some(second), third)
+            .unwrap());
+        // No known good: the parent is the baseline.
+        assert!(!backup
+            .tfstate_changed_against_baseline(None, second)
+            .unwrap());
+        assert!(backup
+            .tfstate_changed_against_baseline(None, third)
+            .unwrap());
     }
 
     #[test]

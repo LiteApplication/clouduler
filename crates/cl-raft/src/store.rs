@@ -228,6 +228,28 @@ impl Store {
         Ok(())
     }
 
+    /// Companion to `restore_state` for `clouduler restore`: replaces the terraform
+    /// modules and sealed states (`terraform_runs`/`requests`/`applied` are cleared,
+    /// so a restored cluster re-applies once rather than trusting stale fingerprints).
+    pub async fn restore_terraform(
+        &self,
+        modules: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, crate::terraform::TerraformModule>,
+        >,
+        states: std::collections::BTreeMap<String, crate::terraform::TerraformState>,
+    ) -> Result<(), StorageError> {
+        let mut sm = self.sm.write().await;
+        sm.data.terraform_modules = modules;
+        sm.data.terraform_states = states;
+        sm.data.terraform_runs.clear();
+        sm.data.terraform_requests.clear();
+        sm.data.terraform_applied.clear();
+        sm.data.version += 1;
+        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
+        Ok(())
+    }
+
     /// Shared part of `force_quorum`/`emergency`: append a synthetic committed
     /// membership entry making `id` the sole voter (see `force_quorum`). Updates
     /// `sm`'s membership/log fields but does not persist; the caller writes once.
