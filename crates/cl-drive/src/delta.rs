@@ -413,6 +413,11 @@ impl DeltaEngine {
 
         // Last, once their files are gone (`removed_dirs` is children-first).
         for path in &diff.removed_dirs {
+            // Now under a file or symlink here (a type change): the receiver already
+            // cleared the old directory, and the path no longer resolves as one.
+            if under_a_file(&local, path) {
+                continue;
+            }
             transport::send(&mut conn, &Message::RemoveDir(path.clone()))
                 .await
                 .map_err(transfer_err)?;
@@ -466,9 +471,14 @@ impl DeltaEngine {
         if meta.size <= transport::WHOLE_FILE_CHUNK as u64 {
             let full = src.join(path);
             let data = off_runtime("reading a file to send", move || {
+                // Replaced by a directory or symlink since the scan: skip, the next
+                // pass sees the new type.
+                if !is_regular_file(&full) {
+                    return Ok(None);
+                }
                 match std::fs::read(&full) {
                     Ok(data) => Ok(Some(data)),
-                    Err(e) if scan::vanished(Some(&e)) => Ok(None),
+                    Err(e) if scan::vanished(Some(&e)) || !is_regular_file(&full) => Ok(None),
                     Err(source) => Err(DriveError::Io { path: full, source }),
                 }
             })
@@ -501,7 +511,8 @@ impl DeltaEngine {
         let file = off_runtime(
             "opening a file to send",
             move || match std::fs::File::open(&opened) {
-                Ok(file) => Ok(Some(file)),
+                Ok(file) if file.metadata().map(|m| m.is_file()).unwrap_or(false) => Ok(Some(file)),
+                Ok(_) => Ok(None),
                 Err(e) if scan::vanished(Some(&e)) => Ok(None),
                 Err(source) => Err(DriveError::Io {
                     path: opened,
@@ -570,7 +581,7 @@ impl DeltaEngine {
         stats: &mut SyncStats,
     ) -> Result<()> {
         // Deleted since the scan: skip before asking the peer for a signature.
-        if !src.join(path).exists() {
+        if !is_regular_file(&src.join(path)) {
             return Ok(());
         }
         transport::send(conn, &Message::SignatureRequest(path.to_string()))
@@ -599,15 +610,22 @@ impl DeltaEngine {
 
             let local_data = match std::fs::read(&full) {
                 Ok(data) => data,
+                // Replaced since the check above: skip, the next pass resends it.
+                Err(e) if scan::vanished(Some(&e)) || !is_regular_file(&full) => return Ok(None),
                 Err(source) => return Err(DriveError::Io { path: full, source }),
             };
             let mut delta = Vec::new();
             rsync_diff(&indexed, &local_data, &mut delta).map_err(|e| DriveError::Transfer {
                 message: format!("diff for {named}: {e}"),
             })?;
-            Ok(delta)
+            Ok(Some(delta))
         })
         .await?;
+        let Some(delta) = delta else {
+            // The receiver is waiting for a Delta it will not get; its temp state is
+            // untouched, so the next frame just proceeds.
+            return Ok(());
+        };
 
         stats.bytes_sent += delta.len() as u64;
         transport::send(
@@ -624,6 +642,26 @@ impl DeltaEngine {
         .await
         .map_err(transfer_err)
     }
+}
+
+/// `true` if a strict ancestor of `path` is a file or symlink in `manifest`.
+fn under_a_file(manifest: &scan::Manifest, path: &str) -> bool {
+    let mut end = 0;
+    while let Some(slash) = path[end..].find('/') {
+        end += slash;
+        if manifest.files.contains_key(&path[..end]) {
+            return true;
+        }
+        end += 1;
+    }
+    false
+}
+
+/// `true` if `path` is currently a regular file (not a directory, symlink, or gone).
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Detects btrfs/zfs and would shell out to their send/receive tools. Not

@@ -241,6 +241,44 @@ async fn a_small_edit_sends_far_fewer_bytes_than_the_whole_file() {
 }
 
 #[tokio::test]
+async fn a_path_that_swaps_between_dir_file_and_symlink_still_syncs() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let s = src.path();
+
+    // uv wheel-cache style: names that are directories, later atomically replaced.
+    std::fs::create_dir_all(s.join("w/pkg-1.0/sub")).unwrap();
+    std::fs::write(s.join("w/pkg-1.0/sub/f"), b"inside").unwrap();
+    std::fs::write(s.join("was_file"), b"file").unwrap();
+    std::fs::create_dir_all(s.join("to_link/deep")).unwrap();
+    std::fs::write(s.join("to_link/deep/f"), b"x").unwrap();
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let engine = DeltaEngine::new(test_keys());
+    let vid = volume_id();
+    let run = |generation| engine.sync(s, addr, &vid, generation, None, ProgressSink::none());
+    run(1).await.expect("first sync");
+
+    std::fs::remove_dir_all(s.join("w/pkg-1.0")).unwrap();
+    std::fs::write(s.join("w/pkg-1.0"), b"now a file").unwrap();
+    std::fs::remove_file(s.join("was_file")).unwrap();
+    std::fs::create_dir_all(s.join("was_file/child")).unwrap();
+    std::fs::write(s.join("was_file/child/f"), b"y").unwrap();
+    std::fs::remove_dir_all(s.join("to_link")).unwrap();
+    std::os::unix::fs::symlink("w", s.join("to_link")).unwrap();
+
+    run(2).await.expect("second sync after type changes");
+    assert!(tree_equal(s, &dst_volume(&dst)));
+
+    // And back again.
+    std::fs::remove_file(s.join("w/pkg-1.0")).unwrap();
+    std::fs::create_dir_all(s.join("w/pkg-1.0")).unwrap();
+    std::fs::write(s.join("w/pkg-1.0/g"), b"z").unwrap();
+    run(3).await.expect("third sync");
+    assert!(tree_equal(s, &dst_volume(&dst)));
+}
+
+#[tokio::test]
 async fn deleting_a_file_removes_it_on_the_peer() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();

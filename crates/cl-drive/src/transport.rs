@@ -541,6 +541,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                         state.mtime_nanos,
                     )?;
                     drop(file);
+                    clear_dir_in_the_way(&state.target)?;
                     std::fs::rename(&state.tmp, &state.target).map_err(|source| {
                         DriveError::Io {
                             path: state.target.clone(),
@@ -648,6 +649,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 // earlier rename, or deleted) must not kill the volume: returning drops
                 // the connection, the sender sees "Broken pipe", and the volume fails
                 // every pass. Skip; the file is sent whole next pass.
+                clear_dir_in_the_way(&dst)?;
                 if let Err(source) = std::fs::rename(&src, &dst) {
                     if source.kind() == io::ErrorKind::NotFound {
                         warn!(%from, %to, "skipping a rename whose source is gone");
@@ -667,7 +669,16 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let target = resolve_no_follow(&root, &path)?;
                 let root = root.clone();
                 off_runtime("creating a directory", move || {
-                    reject_symlink(&root, &target, &path)?;
+                    // A file or symlink here is a directory on the sender (type
+                    // change): unlink it so the directory can take its place.
+                    if let Ok(meta) = std::fs::symlink_metadata(&target) {
+                        if !meta.is_dir() && target != root {
+                            std::fs::remove_file(&target).map_err(|source| DriveError::Io {
+                                path: target.clone(),
+                                source,
+                            })?;
+                        }
+                    }
                     std::fs::create_dir_all(&target).map_err(|source| DriveError::Io {
                         path: target.clone(),
                         source,
@@ -741,7 +752,16 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let target = resolve_no_follow(&root, &path)?;
                 match std::fs::remove_file(&target) {
                     Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) => {}
+                    // The path became a directory (type change): not ours to delete
+                    // as a file, and not worth killing the sync over.
+                    Err(e) if target.is_dir() => {
+                        debug!(path = %target.display(), error = %e, "not deleting a directory as a file");
+                    }
                     Err(source) => {
                         return Err(DriveError::Io {
                             path: target,
@@ -902,6 +922,21 @@ fn stamp_path_no_follow(
     }
 }
 
+/// A real directory (not a symlink to one) at `target` where the sender has a
+/// file: remove it, since `rename` of a file over a directory fails with EISDIR.
+/// Entries the sender still has inside it were sent as their own paths.
+fn clear_dir_in_the_way(target: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.is_dir() => {
+            std::fs::remove_dir_all(target).map_err(|source| DriveError::Io {
+                path: target.to_path_buf(),
+                source,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Write `data` to a temp file next to `target`, then rename into place, so an
 /// interrupted transfer never shows a half-written file and a symlink at
 /// `target` is replaced rather than written through.
@@ -931,6 +966,7 @@ fn write_temp_then_rename(
             source,
         })
         .and_then(|()| stamp_open_file(&file, &tmp, mode, uid, gid, mtime_nanos))
+        .and_then(|()| clear_dir_in_the_way(target))
         .and_then(|()| {
             std::fs::rename(&tmp, target).map_err(|source| DriveError::Io {
                 path: target.to_path_buf(),
@@ -982,6 +1018,10 @@ fn write_whole(
         path: tmp.clone(),
         source,
     })?;
+    if let Err(e) = clear_dir_in_the_way(&target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io {
         path: target,
         source,
@@ -1241,15 +1281,6 @@ mod receive_tests {
                 },
             ),
             (
-                "make dir through the link itself",
-                Message::MakeDir {
-                    path: "a".into(),
-                    mode: 0o777,
-                    uid,
-                    gid,
-                },
-            ),
-            (
                 "dir meta through a link",
                 Message::SetDirMeta {
                     path: "a/inner".into(),
@@ -1430,6 +1461,79 @@ mod receive_tests {
             leftover_temps(&root)
         );
         assert!(!root.join("big").exists());
+    }
+
+    #[tokio::test]
+    async fn a_path_that_changed_type_is_replaced_not_fatal() {
+        let (uid, gid) = me();
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, root) = session(tmp.path()).await;
+        // uv-style: a directory here becomes a file, a file becomes a directory, a
+        // symlink becomes a directory, and a directory becomes a symlink.
+        std::fs::create_dir_all(root.join("wheel/inner")).unwrap();
+        std::fs::write(root.join("wheel/inner/x"), b"x").unwrap();
+        std::fs::write(root.join("was_file"), b"f").unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.join("was_link")).unwrap();
+        std::fs::create_dir_all(root.join("big")).unwrap();
+        std::fs::create_dir_all(root.join("now_link")).unwrap();
+        let whole = |path: &str, link: Option<&str>| Message::WholeFile {
+            path: path.into(),
+            mode: 0o644,
+            uid,
+            gid,
+            mtime_nanos: 0,
+            is_symlink: link.is_some(),
+            link_target: link.map(String::from),
+            data: if link.is_some() {
+                vec![]
+            } else {
+                b"new".to_vec()
+            },
+        };
+        let dir = |path: &str| Message::MakeDir {
+            path: path.into(),
+            mode: 0o755,
+            uid,
+            gid,
+        };
+        for m in [
+            dir("was_file"),
+            dir("was_link"),
+            whole("wheel", None),
+            whole("now_link", Some("target")),
+            Message::WholeFileBegin {
+                path: "big".into(),
+                mode: 0o644,
+                uid,
+                gid,
+                mtime_nanos: 0,
+            },
+            Message::WholeFileChunk {
+                data: b"big".to_vec(),
+            },
+            Message::WholeFileEnd,
+            // Stale removals of the old entries must not end the connection.
+            Message::Delete("was_file".into()),
+            Message::Delete("wheel/inner/x".into()),
+            Message::RemoveDir("wheel/inner".into()),
+            Message::Done,
+        ] {
+            if send(&mut s.conn, &m).await.is_err() {
+                panic!("receiver died on {m:?}: {:?}", s.done.await);
+            }
+        }
+        let ack = recv(&mut s.conn).await;
+        let end = s.done.await.unwrap();
+        assert!(matches!(ack, Ok(Some(Message::Ack(1)))), "{ack:?} {end:?}");
+        end.unwrap();
+        assert!(root.join("was_file").is_dir());
+        assert!(root.join("was_link").is_dir());
+        assert_eq!(std::fs::read(root.join("wheel")).unwrap(), b"new");
+        assert_eq!(std::fs::read(root.join("big")).unwrap(), b"big");
+        assert!(std::fs::symlink_metadata(root.join("now_link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[tokio::test]

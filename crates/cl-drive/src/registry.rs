@@ -335,7 +335,15 @@ pub fn resolve_no_follow(root: &Path, rel: &str) -> Result<PathBuf> {
                 })
             }
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            // An ancestor that is a file (type change in flight) holds nothing.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break
+            }
             Err(source) => {
                 return Err(DriveError::Io {
                     path: walked,
