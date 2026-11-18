@@ -85,7 +85,7 @@ pub fn records_for(
     }
     if let Some(domain) = &public.domain {
         records.push(DesiredRecord {
-            fqdn: fqdn.clone(),
+            fqdn,
             kind: RecordType::CNAME,
             content: domain.clone(),
             ttl: 1,

@@ -683,10 +683,11 @@ impl DeltaEngine {
 pub mod fast_path {
     use std::path::Path;
 
+    use nix::sys::statfs::{FsType, BTRFS_SUPER_MAGIC};
+
     /// Filesystem magic numbers from `statfs(2)`, used to detect a fast path
     /// without shelling out just to find out we can't use it.
-    const BTRFS_SUPER_MAGIC: i64 = 0x9123683e;
-    const ZFS_SUPER_MAGIC: i64 = 0x2fc12fc1;
+    const ZFS_SUPER_MAGIC: FsType = FsType(0x2fc12fc1);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FsKind {
@@ -702,7 +703,7 @@ pub mod fast_path {
         let Ok(stat) = nix::sys::statfs::statfs(path) else {
             return FsKind::Other;
         };
-        match stat.filesystem_type().0 as i64 {
+        match stat.filesystem_type() {
             BTRFS_SUPER_MAGIC => FsKind::Btrfs,
             ZFS_SUPER_MAGIC => FsKind::Zfs,
             _ => FsKind::Other,

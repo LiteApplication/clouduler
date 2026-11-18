@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -81,7 +81,7 @@ impl Routes {
     /// channel (initially routeless) the first time a port is referenced,
     /// either by `set` or `subscribe`, whichever happens first.
     fn channel(&self, published: u16) -> watch::Sender<Option<SocketAddr>> {
-        let mut inner = self.inner.lock().expect("routes lock poisoned");
+        let mut inner = self.inner.lock();
         inner
             .entry(published)
             .or_insert_with(|| watch::channel(None).0)
@@ -688,7 +688,7 @@ mod tests {
             };
             let mut buf = [0u8; 256];
             if let Ok(n) = conn.read(&mut buf).await {
-                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+                sink.lock().extend_from_slice(&buf[..n]);
             }
         });
         (addr, seen)
@@ -760,7 +760,7 @@ mod tests {
         client.write_all(b"HELO").await.unwrap();
         tokio::time::sleep(Duration::from_millis(80)).await;
 
-        let seen = seen.lock().unwrap().clone();
+        let seen = seen.lock().clone();
         assert_eq!(&seen[..12], &PROXY_V2_SIGNATURE, "header must come first");
         assert_eq!(&seen[16..20], &[127, 0, 0, 1]);
         assert_eq!(
@@ -794,7 +794,7 @@ mod tests {
         client.write_all(b"HELO").await.unwrap();
         tokio::time::sleep(Duration::from_millis(80)).await;
 
-        assert_eq!(&seen.lock().unwrap().clone(), b"HELO");
+        assert_eq!(&seen.lock().clone(), b"HELO");
     }
 
     #[tokio::test]
@@ -844,7 +844,7 @@ mod tests {
         client.write_all(b"HELO").await.unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
 
-        let seen = seen.lock().unwrap().clone();
+        let seen = seen.lock().clone();
         assert_eq!(&seen[..12], &PROXY_V2_SIGNATURE, "header must come first");
         assert_eq!(u16::from_be_bytes([seen[24], seen[25]]), client_port);
         assert_eq!(&seen[28..32], b"HELO");

@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tracing::warn;
@@ -259,7 +259,6 @@ impl MountManager {
         let key = spec.key();
         self.mounts
             .lock()
-            .expect("mount table lock")
             .insert(key, ActiveMount { spec });
         Ok(())
     }
@@ -268,7 +267,7 @@ impl MountManager {
     /// no-op, not an error, so shutdown and convergence can call this
     /// unconditionally.
     pub fn unmount(&self, key: &str) -> Result<()> {
-        let active = self.mounts.lock().expect("mount table lock").remove(key);
+        let active = self.mounts.lock().remove(key);
         if let Some(active) = active {
             unmount_clean(&active.spec.mountpoint)?;
         }
@@ -282,7 +281,6 @@ impl MountManager {
         let keys: Vec<String> = self
             .mounts
             .lock()
-            .expect("mount table lock")
             .keys()
             .cloned()
             .collect();
@@ -301,7 +299,6 @@ impl MountManager {
     pub fn mounted_keys(&self) -> BTreeSet<String> {
         self.mounts
             .lock()
-            .expect("mount table lock")
             .keys()
             .cloned()
             .collect()
@@ -310,7 +307,6 @@ impl MountManager {
     pub fn is_mounted(&self, key: &str) -> bool {
         self.mounts
             .lock()
-            .expect("mount table lock")
             .contains_key(key)
     }
 
@@ -325,7 +321,7 @@ impl MountManager {
     /// same server and root.
     pub fn retarget(&self, key: &str, new_spec: MountSpec) -> Result<bool> {
         {
-            let mounts = self.mounts.lock().expect("mount table lock");
+            let mounts = self.mounts.lock();
             match mounts.get(key) {
                 Some(active)
                     if active.spec.server == new_spec.server
@@ -352,7 +348,7 @@ impl MountManager {
     /// end on its own.
     pub async fn check_health(&self) {
         let specs: Vec<MountSpec> = {
-            let mounts = self.mounts.lock().expect("mount table lock");
+            let mounts = self.mounts.lock();
             mounts.values().map(|m| m.spec.clone()).collect()
         };
         for spec in specs {
@@ -364,7 +360,7 @@ impl MountManager {
             }
             warn!(%key, "served drive mount looks unhealthy, remounting");
             force_unmount(&spec.mountpoint);
-            self.mounts.lock().expect("mount table lock").remove(&key);
+            self.mounts.lock().remove(&key);
             if let Err(e) = self.mount_one(spec) {
                 warn!(%key, error = %e, "failed to remount an unhealthy served drive volume");
             }

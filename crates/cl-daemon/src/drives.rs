@@ -869,7 +869,7 @@ const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 struct DriveIntervals {
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     /// Parsed stacks by name, reparsed only when the stack's revision moves.
-    stacks: std::sync::Mutex<ParsedStacks>,
+    stacks: parking_lot::Mutex<ParsedStacks>,
 }
 
 type ParsedStacks = std::collections::BTreeMap<String, (u64, Option<Arc<cl_config::StackFile>>)>;
@@ -884,7 +884,7 @@ impl DriveIntervals {
 
     /// Every deployed stack that parses, from the cache, with its name.
     fn parsed(&self, state: &cl_raft::ClusterState) -> Vec<(String, Arc<cl_config::StackFile>)> {
-        let mut cache = self.stacks.lock().expect("interval cache");
+        let mut cache = self.stacks.lock();
         cache.retain(|name, _| state.stacks.contains_key(name));
         state
             .stacks

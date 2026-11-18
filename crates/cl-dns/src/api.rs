@@ -1,7 +1,7 @@
 //! Minimal Cloudflare API v4 client: auth, zone lookup, and DNS record CRUD.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,6 @@ impl Cloudflare {
         if let Some(id) = self
             .zone_cache
             .lock()
-            .expect("zone cache poisoned")
             .get(name)
         {
             return Ok(id.clone());
@@ -159,7 +158,6 @@ impl Cloudflare {
 
         self.zone_cache
             .lock()
-            .expect("zone cache poisoned")
             .insert(name.to_string(), zone.id.clone());
         Ok(zone.id)
     }

@@ -569,7 +569,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 // runtime thread.
                 chunked = Some(
                     off_runtime("writing a chunk", move || {
-                        let file = state.file.as_mut().expect("file is open until the end");
+                        let file = state.file.as_mut().ok_or_else(|| DriveError::Transfer {
+                            message: "chunk received after the file was finished".into(),
+                        })?;
                         file.write_all(&data).map_err(|source| DriveError::Io {
                             path: state.tmp.clone(),
                             source,
@@ -584,7 +586,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                     message: "WholeFileEnd with no WholeFileBegin in progress".into(),
                 })?;
                 off_runtime("finishing a chunked file", move || {
-                    let file = state.file.take().expect("file is open until the end");
+                    let file = state.file.take().ok_or_else(|| DriveError::Transfer {
+                        message: "file already finished".into(),
+                    })?;
                     stamp_open_file(
                         &file,
                         &state.tmp,

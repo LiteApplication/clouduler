@@ -132,7 +132,7 @@ pub struct SyncScheduler<E: SyncEngine> {
     guard: Arc<InFlightGuard>,
     /// Volumes found without a file on the previous pass. One empty reading
     /// is not enough to raise the alarm: a file can be mid-replace.
-    empty_seen: std::sync::Mutex<BTreeSet<VolumeId>>,
+    empty_seen: parking_lot::Mutex<BTreeSet<VolumeId>>,
     /// How often to check whether any volume is due. Independent of any
     /// individual volume's own interval.
     tick: Duration,
@@ -148,7 +148,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             quorum,
             hooks: None,
             guard: Arc::new(InFlightGuard::new()),
-            empty_seen: std::sync::Mutex::default(),
+            empty_seen: parking_lot::Mutex::default(),
             tick: Duration::from_secs(30),
         }
     }
@@ -359,7 +359,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         };
         let empty = manifest.files.is_empty();
         let confirmed = {
-            let mut seen = self.empty_seen.lock().unwrap_or_else(|e| e.into_inner());
+            let mut seen = self.empty_seen.lock();
             if empty {
                 !seen.insert(id.clone())
             } else {

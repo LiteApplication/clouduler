@@ -140,7 +140,7 @@ pub fn install(unit: &Unit) -> Result<PathBuf> {
     // whose group does not exist.
     crate::permissions::ensure_group()?;
     let path = unit_path();
-    let dir = path.parent().expect("unit path has a directory");
+    let dir = path.parent().context("unit path has no parent directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::write(&path, unit.render()).with_context(|| format!("writing {}", path.display()))?;
     match unit.render_socket() {

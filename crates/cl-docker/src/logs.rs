@@ -98,15 +98,14 @@ fn log_line_from_output(output: bollard::container::LogOutput) -> LogLine {
         LogOutput::StdIn { message } => (LogStream::Stdout, message),
         LogOutput::Console { message } => (LogStream::Stdout, message),
     };
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    split_timestamp(stream, text)
+    split_timestamp(stream, &String::from_utf8_lossy(&bytes))
 }
 
 /// Docker prefixes each line with an RFC3339 timestamp and a space when
 /// `timestamps(true)` is set. Split it off here instead of asking for logs
 /// twice (with and without timestamps).
-fn split_timestamp(stream: LogStream, line: String) -> LogLine {
-    let line = line.strip_suffix('\n').unwrap_or(&line).to_string();
+fn split_timestamp(stream: LogStream, line: &str) -> LogLine {
+    let line = line.strip_suffix('\n').unwrap_or(line);
     match line.split_once(' ') {
         Some((ts, rest)) if looks_like_rfc3339(ts) => LogLine {
             stream,
@@ -116,7 +115,7 @@ fn split_timestamp(stream: LogStream, line: String) -> LogLine {
         _ => LogLine {
             stream,
             timestamp: None,
-            text: line,
+            text: line.to_string(),
         },
     }
 }
@@ -134,7 +133,7 @@ mod tests {
     fn splits_leading_rfc3339_timestamp() {
         let line = split_timestamp(
             LogStream::Stdout,
-            "2024-01-02T15:04:05.999999999Z listening on :8080\n".to_string(),
+            "2024-01-02T15:04:05.999999999Z listening on :8080\n",
         );
         assert_eq!(
             line.timestamp.as_deref(),
@@ -146,14 +145,14 @@ mod tests {
 
     #[test]
     fn leaves_line_without_timestamp_untouched() {
-        let line = split_timestamp(LogStream::Stderr, "panic: boom\n".to_string());
+        let line = split_timestamp(LogStream::Stderr, "panic: boom\n");
         assert_eq!(line.timestamp, None);
         assert_eq!(line.text, "panic: boom");
     }
 
     #[test]
     fn does_not_mistake_a_normal_word_for_a_timestamp() {
-        let line = split_timestamp(LogStream::Stdout, "hello world\n".to_string());
+        let line = split_timestamp(LogStream::Stdout, "hello world\n");
         assert_eq!(line.timestamp, None);
         assert_eq!(line.text, "hello world");
     }

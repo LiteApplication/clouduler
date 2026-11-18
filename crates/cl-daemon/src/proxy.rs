@@ -271,8 +271,8 @@ impl Group {
 /// restart leaves clients queued in the listen backlog instead of refused.
 /// Taken by `build_listen`; a port that was not pre-bound is bound there.
 /// Keyed by port and whether the socket is the IPv6-only one.
-static PREBOUND: std::sync::Mutex<BTreeMap<(u16, bool), std::net::TcpListener>> =
-    std::sync::Mutex::new(BTreeMap::new());
+static PREBOUND: parking_lot::Mutex<BTreeMap<(u16, bool), std::net::TcpListener>> =
+    parking_lot::Mutex::new(BTreeMap::new());
 
 /// A non-blocking listener on `[::]:port` that accepts only IPv6, so it
 /// coexists with the `0.0.0.0` one whatever `net.ipv6.bindv6only` says.
@@ -300,7 +300,7 @@ pub fn prebind(cfg: &ClusterConfig, node: &str) {
     let Some((http_port, https_port)) = desired.listen else {
         return;
     };
-    let mut bound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let mut bound = PREBOUND.lock();
     // Sockets systemd already holds for us (see `clouduler.socket`) are the
     // best case: they were bound before this process existed.
     for listener in crate::systemd::take_listen_fds() {
@@ -328,7 +328,6 @@ pub fn prebind(cfg: &ClusterConfig, node: &str) {
 fn take_listener(port: u16, v6: bool) -> std::io::Result<tokio::net::TcpListener> {
     let prebound = PREBOUND
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
         .remove(&(port, v6));
     match prebound {
         Some(listener) => tokio::net::TcpListener::from_std(listener),

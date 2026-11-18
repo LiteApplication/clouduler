@@ -11,7 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -351,7 +353,6 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
         let failed_recently = self
             .last_failure
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .get(drive)
             .is_some_and(|at| at.elapsed() < LOCAL_RETRY);
         if failed_recently {
@@ -359,7 +360,6 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
         }
         self.busy
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .insert(drive.to_string())
     }
 
@@ -367,9 +367,8 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
     fn release(&self, drive: &str, progressed: bool) {
         self.busy
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .remove(drive);
-        let mut failures = self.last_failure.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failures = self.last_failure.lock();
         if progressed {
             failures.remove(drive);
         } else {

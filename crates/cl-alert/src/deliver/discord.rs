@@ -466,13 +466,16 @@ fn digest_messages(
                     e["timestamp"] = rfc3339(t).into();
                 }
                 let sz = embed_chars(&e);
-                let full = messages.last().map(Vec::len).unwrap_or(0) >= EMBEDS_PER_MESSAGE;
-                if full || size + sz > EMBED_TOTAL_MAX {
-                    messages.push(Vec::new());
-                    size = 0;
+                match messages.last_mut() {
+                    Some(m) if m.len() < EMBEDS_PER_MESSAGE && size + sz <= EMBED_TOTAL_MAX => {
+                        m.push(e);
+                        size += sz;
+                    }
+                    _ => {
+                        messages.push(vec![e]);
+                        size = sz;
+                    }
                 }
-                size += sz;
-                messages.last_mut().expect("one message").push(e);
             }
             let count = messages.len();
             messages
@@ -532,11 +535,9 @@ pub async fn send(
     let mut returned_id: Option<String> = None;
 
     for (idx, message) in msgs.iter().enumerate() {
-        let should_patch =
-            opts.edit_resolved && is_resolved && idx == 0 && edit_message_id.is_some();
+        let patch_target = edit_message_id.filter(|_| opts.edit_resolved && is_resolved && idx == 0);
 
-        if should_patch {
-            let msg_id = edit_message_id.unwrap();
+        if let Some(msg_id) = patch_target {
             let base = url.trim_end_matches('/');
             let patch_url = format!("{base}/messages/{msg_id}");
             let mut req = http.patch(&patch_url).timeout(TIMEOUT).header(

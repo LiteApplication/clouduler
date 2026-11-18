@@ -79,7 +79,7 @@ fn build_view(view: &View) -> Result<BuiltView> {
     let mut handler = InMemoryZoneHandler::empty(root.clone(), ZoneType::Primary, AxfrPolicy::Deny);
     let soa = SOA::new(root.clone(), root.clone(), 1, 3600, 600, 86400, RECORD_TTL);
     handler.upsert_mut(
-        Record::from_rdata(root.clone(), RECORD_TTL, RData::SOA(soa)),
+        Record::from_rdata(root, RECORD_TTL, RData::SOA(soa)),
         1,
     );
 

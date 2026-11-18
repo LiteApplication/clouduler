@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -69,7 +71,6 @@ impl HealthTable {
     pub fn get(&self, instance: &str) -> Option<BackendHealth> {
         self.0
             .lock()
-            .expect("proxy health lock")
             .get(instance)
             .cloned()
     }
@@ -77,7 +78,6 @@ impl HealthTable {
     fn record(&self, instance: String, health: BackendHealth) {
         self.0
             .lock()
-            .expect("proxy health lock")
             .insert(instance, health);
     }
 
@@ -86,7 +86,6 @@ impl HealthTable {
     fn retain_known(&self, known: &std::collections::HashSet<String>) {
         self.0
             .lock()
-            .expect("proxy health lock")
             .retain(|k, _| known.contains(k));
     }
 }

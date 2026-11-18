@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use cl_config::ClusterConfig;
 use cl_raft::VolumeId;
@@ -156,8 +156,7 @@ impl DriveRegistry {
     pub fn set_staging_destinations(&self, paths: Vec<PathBuf>) {
         *self
             .staging_destinations
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = paths;
+            .write() = paths;
     }
 
     /// Accept a peer-supplied staging path only if it is exactly a backup
@@ -182,7 +181,6 @@ impl DriveRegistry {
             && self
                 .staging_destinations
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .any(|p| p == destination_path);
         if allowed {
