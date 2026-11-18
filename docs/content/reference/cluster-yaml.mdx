@@ -450,6 +450,15 @@ The API token is a sealed secret set from **Settings > Network > Cloudflare DNS*
   {"key": "updates.check_interval", "type": "duration", "default": "6h", "reload": "live", "description": "How often the leader asks the registries whether the images the stacks declare have a newer digest. The results are stored in the cluster state and used by the Updates page and by `x-clouduler.auto_update`. Pressing Refresh on the Updates page checks sooner.", "quirks": "Values under 10m are treated as 10m."},
 ]} />
 
+### terraform
+
+<OptionTable rows={[
+  {"key": "terraform", "type": "object", "default": "absent (off)", "reload": "live", "description": "Runs the OpenTofu modules stored with stacks. Absent means nothing runs. `terraform: {}` turns it on with the defaults.", "quirks": "Storing modules does not need it, but plan and apply requests are refused until it is set. Unknown keys are an error. See [Terraform](/docs/features/terraform)."},
+  {"key": "terraform.image", "type": "image reference", "default": "ghcr.io/opentofu/opentofu:1.10", "reload": "live", "description": "The OpenTofu image for init, plan and apply. A node pulls it only when it does not have it yet.", "quirks": "A run that has started keeps the image it began with."},
+  {"key": "terraform.timeout", "type": "duration", "default": "10m", "reload": "live", "description": "Wall-clock limit for one run, init and plan or apply together.", "quirks": "A run that has started keeps the timeout it began with. The leader fails a run that is still going after the timeout plus 90 s."},
+  {"key": "terraform.init_network", "type": "docker network name", "default": "bridge", "reload": "live", "description": "The network the init container runs on, for provider downloads. It needs internet access.", "quirks": "Overlay networks have no internet access. plan and apply do not use this network: they share the target container's."}
+]} />
+
 ## Validation errors you may see
 
 Validation stops at the first failure, so you see exactly one error, printed as `Error: invalid config at <path>: <message>`.

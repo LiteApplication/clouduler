@@ -1,0 +1,262 @@
+---
+title: Terraform
+sidebar_position: 20
+---
+
+# Terraform
+
+A service can have an [OpenTofu](https://opentofu.org) module. The module configures what runs inside the service, such as users, monitors or API objects, through the service's own interface. Clouduler keeps the module with the stack, runs it once the service is healthy, and keeps the module's state in the cluster.
+
+Clouduler still schedules the containers. A module only runs against a service that is already running.
+
+## Turn it on
+
+The feature is off by default. Add a `terraform:` section to [cluster.yaml](/docs/reference/cluster-yaml#terraform):
+
+```yaml title="cluster.yaml"
+terraform:
+  image: ghcr.io/opentofu/opentofu:1.10   # default
+  timeout: 10m                             # default, per run
+  init_network: bridge                     # default
+```
+
+`terraform: {}` turns it on with the defaults. Without the section you can still store modules, but nothing runs, and plan and apply requests are refused.
+
+## Where the module lives
+
+- A module is one `.tf` file per service. Clouduler writes it to the run directory as `main.tf`.
+- Put it at `terraform/<service>.tf` next to the stack file. `clouduler stack deploy` picks up every service that has one. If the `terraform/` directory exists, it **replaces** the stack's modules: a service with no `.tf` file in it loses its module and its state. Without the directory, the stored modules stay.
+- The module may not contain a `backend` or `cloud` block inside `terraform {}`. State lives in the cluster, so such a block is refused.
+- Keep secret values out of the module. Secrets reach it as variables at run time.
+- [Git backup](/docs/features/git-backup#what-is-exported) mirrors each module to `terraform/<stack>/<service>.tf` and its state to `terraform/<stack>/<service>.tfstate.age`.
+
+## Give it secrets, configs and variables
+
+The inputs are declared in the service's `x-clouduler.terraform` block in the stack spec:
+
+```yaml title="stack.yaml (excerpt)"
+services:
+  kuma:
+    x-clouduler:
+      terraform:
+        secrets:
+          - source: kuma_admin_password
+            var: kuma_admin_password
+        configs:
+          - source: kuma_monitors
+            var: monitors
+            path: monitors.yaml
+        vars:
+          region: eu
+```
+
+<OptionTable rows={[
+  {key: 'x-clouduler.terraform', type: 'map', reload: 'n/a', description: 'Bindings for the module. Having a module is enough to run it; this block adds inputs. Service level only: the stack-level x-clouduler rejects it.'},
+  {key: 'enabled', type: 'bool', default: 'true', reload: 'n/a', description: 'false stops runs of this service\'s module, manual requests included, until it is true again.'},
+  {key: 'secrets[].source, var', type: 'secret name, variable name', reload: 'n/a', required: true, description: 'A cluster secret passed as TF_VAR_<var>, to plan and apply only. Never to init.'},
+  {key: 'configs[].source', type: 'config name', reload: 'n/a', required: true, description: 'The cluster config to pass.'},
+  {key: 'configs[].var', type: 'variable name', reload: 'n/a', description: 'Passes the config text as TF_VAR_<var>.'},
+  {key: 'configs[].path', type: 'relative path', reload: 'n/a', description: 'Writes the config text to this file in the run directory. The module reads it with file().'},
+  {key: 'vars', type: 'map of string', default: '{}', reload: 'n/a', description: 'Plain strings passed as TF_VAR_<name>. They are stored in the stack spec in plain text.'},
+]} />
+
+Checks run when the stack is parsed, so a deploy, a validate and a git pull all refuse a bad block:
+
+- A variable name starts with a letter or `_`, then holds only letters, digits, `_` and `-`.
+- A name is bound once across secrets, configs and `vars`.
+- A config needs `var`, `path`, or both.
+- A `path` is relative. It has no `..`, `.` or empty part (`/` and `\` both separate parts), does not end in `.tf` or `.tfstate` (in any case), and no two configs share one.
+- `clouduler_stack`, `clouduler_service` and `clouduler_instance` are set by Clouduler last, so they win over a binding with the same name. Declare them as variables to read them: they tell the module which stack, service and instance it belongs to.
+- Secrets and configs named here are part of the stack's requirements, the same as a service's own `secrets:` and `configs:`. To bundle a file with the stack, declare it at the top of the stack with `file:`. A `path` is written into the run directory, so the module reads it as `file("monitors.yaml")`.
+
+## How a run works
+
+1. **Target.** The run uses the lowest-numbered instance of the service that is running, assigned to a node and not moving. Until that instance is running and healthy (or has no healthcheck), nothing starts.
+2. **Claim.** Each node looks at the modules whose target runs on it. The node that finds one due claims it through raft. Raft allows one running run per module, so a module never runs twice at once.
+3. **Work directory.** `<data_dir>/tofu/work/<run id>`, mode 0700. It holds `main.tf`, the previous state if there is one, and the `path` configs. It is removed when the run ends.
+4. **Init.** `tofu init` runs in a helper container on `init_network`, so providers can be downloaded. It gets no secrets and no variables. Providers are cached per node in `<data_dir>/tofu/plugin-cache`, which every run on that node shares.
+5. **Plan or apply.** `tofu plan`, or `tofu apply -auto-approve`, runs in a second helper container. That container shares the target's network namespace (`container:<target>`), so the module reaches the service on `localhost`. The `TF_VAR_*` values are set only here.
+6. **State.** After an apply, the new state is sealed with the cluster key and stored. This also happens after a failed or timed-out apply, so partial state is kept. A plan never writes state.
+7. **Log.** Injected secret values in the output are replaced with `[REDACTED]`. The last 64 KiB of the log are stored with the run.
+
+Helper containers drop every capability, set `no-new-privileges`, never restart, run as the owner of the work directory, and are removed after each phase. They are not managed containers, so the reconciler ignores them.
+
+Each node checks for due runs every 10 seconds, and an API call wakes it sooner.
+
+The `timeout` (default `10m`) covers init and plan or apply together. At the limit the container gets SIGTERM and 30 seconds to write its state, then it is killed, and the run fails, for example with `tofu apply timed out after 10m`.
+
+## When a module runs
+
+A run starts for one of two reasons:
+
+- **The fingerprint changed.** A run is due when the fingerprint differs from the last successful apply. Automatic runs always apply, so a new module is applied as soon as its service is healthy. A plan never counts as an apply.
+- **Someone asked.** `plan` or `apply` from the CLI, the API or MCP. A request runs once, even if nothing changed, and it runs even after a failed run.
+
+The fingerprint covers:
+
+- the module text;
+- the service's `x-clouduler.terraform` block;
+- the revision of each bound secret and config, so a rotated secret or a changed config triggers a run;
+- the image the service runs: its pinned digest, or the tag in the spec when no digest is pinned.
+
+It does not cover the `terraform:` settings in cluster.yaml, a container restart, or other services.
+
+**A failed run is not retried by itself.** After a run fails, whether plan or apply, no automatic apply runs again for the same fingerprint. A change to an input, or a manual request, starts a new run.
+
+## Removing
+
+Dropping a service from its stack, removing the stack, deleting a module, or a git pull or deploy that leaves a service without one forgets everything Clouduler holds for that module: the module, its state, its run history and any pending request. **Nothing is destroyed.** Whatever the module created stays where it is. A module stored again starts from an empty state, so its first apply may try to create what already exists.
+
+## Failures and alerts
+
+- A failed run keeps its error and its redacted log. The error ends with the first `Error:` line of OpenTofu's output.
+- Until a newer run for that service starts or finishes, the failure shows up as a `terraform_failed` problem, which `list_problems` reports. Only the latest run per service is kept.
+- A failed **apply** raises the `terraform.failed` alert (Warning). A failed plan does not. See the [alerts catalog](/docs/features/alerts#events).
+- If the node running a run stops, the leader fails the run once it is older than `timeout` plus 90 seconds. If the daemon restarts during a run, that run fails with `interrupted: the daemon restarted during the run`.
+
+## Commands
+
+From the CLI:
+
+| Command | What it does |
+|---|---|
+| `clouduler terraform status STACK [SERVICE] [--via NODE]` | Shows each module's revision, any pending request and its last run. Prints the log tail of a failed run. |
+| `clouduler terraform plan STACK [SERVICE] [--via NODE]` | Requests a plan. Writes no state. |
+| `clouduler terraform apply STACK [SERVICE] [--via NODE]` | Requests an apply now, even if nothing changed. |
+
+`SERVICE` defaults to every module of the stack. `plan` and `apply` return at once, so check the result with `status`. The API returns the log tail of any run, not only failed ones.
+
+Over the API, all under `/api/stacks/{name}/terraform`:
+
+| Method and path | Auth | Success | What it does |
+|---|---|---|---|
+| `GET` (the collection) | user | 200 | `enabled_cluster` and, per service, `source`, `revision`, `enabled`, `pending_request` and `last_run` (with `outcome`, `message` and `log_tail`). |
+| `PUT /{service}` | admin | 204 | Stores a module. Body `{"source": "<.tf text>"}`. Refuses a `backend` or `cloud` block. |
+| `DELETE /{service}` | admin | 204 | Forgets the module, its state and its runs. 404 if the service has no module. |
+| `POST /{service}/plan` | admin | 202 | Requests a plan. 409 while cluster terraform is off, 404 without a module. |
+| `POST /{service}/apply` | admin | 202 | Requests an apply. The same errors as plan. |
+
+Over MCP:
+
+- `deploy_stack` takes `terraform`, a map of service name to module text. Omitted, the stored modules stay. Given, the map replaces them all, and an empty map forgets them.
+- `terraform_run` (admin) takes `service` and `mode` (`plan` or `apply`) for the focused stack. Read the outcome with `get_stack`.
+
+## Example: Uptime Kuma
+
+This stack runs [Uptime Kuma](https://github.com/louislam/uptime-kuma) and creates its monitors from a list that the stack also mounts. The admin password comes from a secret.
+
+<Quirk title="No official provider" severity="warn">
+Uptime Kuma has no official OpenTofu or Terraform provider. Community providers each target particular Kuma versions. Pick one that supports the Kuma version you run, and pin both the provider and the image. **The provider `source` and `version` in the module below are placeholders.** Replace them with a provider you have checked, pinned to a version that matches your Kuma image.
+</Quirk>
+
+The layout:
+
+```text
+kuma.yaml              the stack
+kuma/monitors.yaml     the monitor list, bundled with the stack
+terraform/kuma.tf      the module
+```
+
+The stack:
+
+```yaml title="kuma.yaml"
+configs:
+  kuma_monitors:
+    file: ./kuma/monitors.yaml      # bundled with the stack, read by the module too
+
+secrets:
+  kuma_admin_password:              # standalone: create it first with clouduler secret set
+
+services:
+  kuma:
+    image: louislam/uptime-kuma:1   # pin the version you test against
+    configs:
+      - kuma_monitors
+    # add x-clouduler.proxy to reach the web UI
+    x-clouduler:
+      terraform:
+        secrets:
+          - source: kuma_admin_password
+            var: kuma_admin_password
+        configs:
+          - source: kuma_monitors
+            var: monitors
+```
+
+The monitor list. Its format is up to the module; this one is read with `yamldecode`:
+
+```yaml title="kuma/monitors.yaml"
+- name: Notes
+  url: http://notes.internal:8080/health
+  interval: 60
+```
+
+The module. Every provider-specific part is a marked placeholder:
+
+```hcl title="terraform/kuma.tf"
+terraform {
+  required_providers {
+    kuma = {
+      # PLACEHOLDER: source of a community Uptime Kuma provider you have checked
+      source  = "PLACEHOLDER/kuma"
+      # PLACEHOLDER: a version that supports your Kuma version
+      version = "PLACEHOLDER"
+    }
+  }
+}
+
+variable "kuma_admin_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "monitors" {
+  type = string
+}
+
+provider "kuma" {
+  # PLACEHOLDER arguments: check the provider's docs. The run shares the
+  # kuma container's network namespace, so the service answers on localhost.
+  url      = "http://localhost:3001"
+  password = var.kuma_admin_password
+}
+
+locals {
+  monitors = { for m in yamldecode(var.monitors) : m.name => m }
+}
+
+resource "PLACEHOLDER_monitor" "monitor" {
+  for_each = local.monitors
+  # PLACEHOLDER arguments: the provider's monitor resource
+  name     = each.value.name
+  url      = each.value.url
+  interval = each.value.interval
+}
+```
+
+Deploy it:
+
+```bash
+printf '%s' "$KUMA_ADMIN_PASSWORD" | clouduler secret set kuma_admin_password
+clouduler stack deploy kuma.yaml
+clouduler terraform status kuma
+```
+
+Once the `kuma` container is healthy, the module applies by itself. Edit `kuma/monitors.yaml` and deploy again: the config's new revision triggers a run.
+
+<Quirk title="Automatic runs apply without a review" severity="danger">
+A new or changed module is applied as soon as its service is healthy. Run `plan` by hand first while you write or change a module.
+</Quirk>
+
+<Quirk title="State can hold secrets" severity="warn">
+OpenTofu stores the values a module receives in its state, sensitive ones included, in plain text. Clouduler seals the state in the cluster, and the git copy is age-encrypted. A restore needs the age identity.
+</Quirk>
+
+<Quirk title="The module shares the service's network" severity="warn">
+Plan and apply see the service's network namespace, so the module can reach whatever the service's container can reach. Give it only the credentials it needs.
+</Quirk>
+
+## Related
+
+- [Stacks](/docs/features/stacks), [Configs and secrets](/docs/features/configs-and-secrets), [Git backup](/docs/features/git-backup), [Alerts](/docs/features/alerts)
+- [cluster.yaml](/docs/reference/cluster-yaml#terraform), [Stack spec](/docs/reference/stack-spec)

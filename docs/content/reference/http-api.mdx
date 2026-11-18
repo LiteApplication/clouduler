@@ -142,12 +142,22 @@ curl -N -H "Authorization: Bearer $KEY" \
 |---|---|---|---|---|---|
 | GET | `/api/stacks` | user | none | `[{name, revision, deployed_at}]` | |
 | GET | `/api/stacks/{name}` | user | none | `{name, spec, revision, configs, secrets, used_configs, used_secrets, requirements, deployed_at, previous_spec}` | 404 if missing. |
-| PUT | `/api/stacks/{name}` | admin | `{"spec": "<yaml>", "configs": {name: base64}, "secrets": {name: base64}}` | 200 | The server seals `secrets`; unreferenced ones are ignored. |
+| PUT | `/api/stacks/{name}` | admin | `{"spec": "<yaml>", "configs": {name: base64}, "secrets": {name: base64}, "terraform": {service: ".tf text"}}` | 200 | The server seals `secrets`; unreferenced ones are ignored. A given `terraform` replaces the stack's modules. |
 | DELETE | `/api/stacks/{name}` | admin | none | 204 | |
 | POST | `/api/stacks/{name}/validate` | user | `{"spec": "<yaml>"}` | `{valid, errors: [{path, message}], requirements, per_service}` | Does not deploy. |
 | GET | `/api/stacks/{name}/update-webhook` | admin | none | `{"path": "/api/stacks/<name>/update-webhook/<token>"}` | Issues a token on first call. |
 | POST | `/api/stacks/{name}/update-webhook/regenerate` | admin | none | `{"path": ...}` | The old token stops working. |
 | POST | `/api/stacks/{name}/update-webhook/{token}` | token | none | 202 `{"accepted": [ids]}` | Rolling update of every instance. 401 `bad webhook token`. |
+
+### Terraform
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/stacks/{name}/terraform` | user | none | `{enabled_cluster, services: [{service, source, revision, enabled, pending_request, last_run}]}` | `last_run` has `outcome`, `message` and `log_tail`. 404 if the stack is missing. |
+| PUT | `/api/stacks/{name}/terraform/{service}` | admin | `{"source": "<.tf text>"}` | 204 | Stores that service's module. Refuses a `backend` or `cloud` block. |
+| DELETE | `/api/stacks/{name}/terraform/{service}` | admin | none | 204 | Forgets the module, its state and its runs. 404 if there is no module. |
+| POST | `/api/stacks/{name}/terraform/{service}/plan` | admin | none | 202 | Requests a plan. 409 while cluster terraform is off, 404 without a module. |
+| POST | `/api/stacks/{name}/terraform/{service}/apply` | admin | none | 202 | Requests an apply. The same errors as plan. |
 
 ### Instances
 

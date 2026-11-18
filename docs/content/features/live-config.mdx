@@ -51,6 +51,7 @@ graph LR
 | `proxy.dns_server.*` | Live | Client DNS re-reads config every 5 seconds. |
 | `proxy.auth.*` | Live | Read on each request. |
 | `self_update.*`, `backup.*`, `mcp.enabled` | Live | `mcp.enabled` is read on every request. |
+| `terraform.*` | Live | Read on every runner pass. A run that has started keeps the values it began with. |
 | Alert settings | Live | Stored in raft, not in `cluster.yaml`. |
 | Stack changes | On deploy | Not part of `cluster.yaml`. Redeploy the stack. |
 

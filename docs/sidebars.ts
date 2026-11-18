@@ -28,6 +28,7 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         {type: 'doc', id: 'features/stacks', label: 'Stacks'},
+        {type: 'doc', id: 'features/terraform', label: 'Terraform'},
         {type: 'doc', id: 'features/configs-and-secrets', label: 'Configs and secrets'},
         {type: 'doc', id: 'features/networking', label: 'Networking'},
         {type: 'doc', id: 'features/placement', label: 'Placement'},

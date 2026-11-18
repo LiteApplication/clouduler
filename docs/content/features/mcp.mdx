@@ -140,11 +140,12 @@ An assistant works on **one stack at a time**. Call `focus_stack` first. Every w
 | `inspect_secret` | `name` | Facts only: exists, revision, owner, where used, instances running an older revision, length, whitespace and character classes. No hash, prefix or suffix. |
 | `validate_stack` | `spec`, `name` (optional) | Validates a stack without deploying: `{valid, errors, requirements, per_service}`. |
 
-10 admin tools (Admin grant only):
+11 admin tools (Admin grant only):
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `deploy_stack` | `spec`, `configs`, `wait_seconds` | Deploys the focused stack, then polls every 2 s (default wait 20 s, max 120 s) until instances are running and healthy. Has no secrets parameter. Refuses a spec or config that contains a secret's plaintext. |
+| `deploy_stack` | `spec`, `configs`, `terraform`, `wait_seconds` | Deploys the focused stack, then polls every 2 s (default wait 20 s, max 120 s) until instances are running and healthy. `terraform` is a map of service to `.tf` text: given, it replaces the stack's OpenTofu modules; omitted, they stay. Has no secrets parameter. Refuses a spec or config that contains a secret's plaintext. |
+| `terraform_run` | `service`, `mode` (`plan` or `apply`) | Requests a plan or apply of one service's OpenTofu module in the focused stack. The runner starts it once the service is healthy; read the outcome with `get_stack`. Needs a `terraform:` section in cluster.yaml. See [Terraform](/docs/features/terraform). |
 | `remove_stack` | `confirm` | Removes the focused stack. `confirm` must equal its name. |
 | `restart_instance` | `id` | Re-places the instance (it can move node). Must be in the focused stack. |
 | `update_instance` | `id` | Pulls the image again and recreates the container. Refuses if an update is already running. |

@@ -19,11 +19,14 @@ The leader pushes after every change, to the branch you configure:
 | `stacks/<name>.yaml` | Each stack spec, plaintext. |
 | `configs/<name>` | Each config, **plaintext**. |
 | `secrets/<name>.age` | Each secret, encrypted with [age](https://age-encryption.org) to your recipient key. |
+| `terraform/<stack>/<service>.tf` | Each service's OpenTofu module, **plaintext**. |
+| `terraform/<stack>/<service>.tfstate.age` | The module's OpenTofu state, encrypted with age to the same recipient. Written once the service has state. |
 | `.clouduler-secret-revisions.json` | Bookkeeping. |
+| `.clouduler-terraform-revisions.json` | Bookkeeping. |
 
-Only the cluster config, stacks, configs and secrets are exported. Backup destinations and schedules are not. Export runs on the leader only and pulls first; a commit that fails validation is parked on a branch named `rejected/<branch>-<sha12>`. The deploy key is a reserved secret named `_clouduler_git_deploy_key`.
+Only the cluster config, stacks, configs, secrets, and terraform modules and state are exported. Backup destinations and schedules are not. Export runs on the leader only and pulls first; a commit that fails validation is parked on a branch named `rejected/<branch>-<sha12>`. The deploy key is a reserved secret named `_clouduler_git_deploy_key`.
 
-Nothing is committed when nothing changed. Files in the repository that Clouduler does not manage are kept. **Keep the repository private**: configs and stack files are readable by anyone with access.
+Nothing is committed when nothing changed. Files in the repository that Clouduler does not manage are kept. **Keep the repository private**: configs, stack files and Terraform modules are readable by anyone with access.
 
 Secrets are encrypted to a key whose private half you keep. Clouduler never stores the age identity, so without it the secret values in Git cannot be recovered (stack and config files still can).
 
@@ -100,6 +103,9 @@ The webhook is part of the dashboard API, so it is reachable wherever the dashbo
   - `stacks/NAME.yaml: config C has no content under configs/`
   - `secret S does not already exist in the cluster - git cannot supply new secret content, create it through the api first`
   - a commit that changes anything under `secrets/` compared with the last commit the cluster exported or accepted: `... secret rotation must go through the api, not git`. If the cluster has no such commit on record, the pulled commit's parent is the comparison instead.
+  - a commit that changes any `terraform/*/*.tfstate.age` file: `the pulled commit changes a terraform/*/*.tfstate.age file; the tofu state is export-only and lives in the cluster - it cannot be edited through git`.
+  - a module that does not match its stack: `terraform/NAME/: no stack NAME in stacks/`, `terraform/NAME/SVC.tf: stack NAME has no service SVC`, or the module's own error, such as a `backend` block being refused.
+- A changed `.tf` file is stored without redeploying the stack, and the module runs when its service is healthy. A stack whose `terraform/<stack>/` directory is gone loses its modules and their state.
 - Secret values never come from Git. Rotate them in the UI or with `clouduler secret set`.
 
 Export is leader-only and runs a pull first, so it does not overwrite a manual push. A new leader builds its first export on top of the remote branch, not on an empty history. Older versions had races here that redeployed every stack on each pull and reverted manual pushes; they are fixed.
@@ -117,7 +123,7 @@ sudo clouduler restore --age-identity-file ~/clouduler-age-key.txt \
 sudo systemctl start clouduler.service
 ```
 
-`restore` takes the repository path (or an `ssh://`/`git@` URL, cloned with your SSH agent). Use `--age-identity-stdin` instead of the file to pipe the identity in. The identity is read once, used in memory, and each secret is re-sealed under **this node's** cluster key. Secrets that cannot be decrypted are listed as skipped. `restore` refills content only; it does not repair quorum. If the cluster also lost its managers, run [emergency mode](/docs/features/emergency-mode) first. Then restore your data from [Backups](/docs/features/backups#restoring-after-losing-the-whole-cluster).
+`restore` takes the repository path (or an `ssh://`/`git@` URL, cloned with your SSH agent). Use `--age-identity-stdin` instead of the file to pipe the identity in. The identity is read once, used in memory, and each secret is re-sealed under **this node's** cluster key. Secrets that cannot be decrypted are listed as skipped. Terraform modules come back too, and each OpenTofu state is re-sealed the same way; a state that cannot be decrypted is listed as skipped. `restore` refills content only; it does not repair quorum. If the cluster also lost its managers, run [emergency mode](/docs/features/emergency-mode) first. Then restore your data from [Backups](/docs/features/backups#restoring-after-losing-the-whole-cluster).
 
 ## Options
 

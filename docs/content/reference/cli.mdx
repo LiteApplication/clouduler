@@ -283,6 +283,10 @@ The restore commands ask for confirmation unless `--yes`, stop the affected cont
 
 `clouduler git-backup pull [--via NODE]` triggers the same git-to-cluster pull the webhook runs, now. `clouduler git-backup reconcile [--via NODE]` rebuilds the git repo from the cluster state and pushes. Both print `triggered a git backup pull` (or `reconcile`) and do not wait for the job. See [Git backup](/docs/features/git-backup).
 
+### terraform
+
+`clouduler terraform status STACK [SERVICE] [--via NODE]` shows each module's revision, any pending request and its last run, and prints the log tail of a failed run. `clouduler terraform plan` and `apply` queue a run and return at once, so check the result with `status`. `SERVICE` defaults to every module of the stack. `stack deploy FILE` also reads `terraform/<service>.tf` next to the file. See [Terraform](/docs/features/terraform).
+
 ## Disaster recovery
 
 Both commands rewrite this node's own raft database. `restore` needs the daemon stopped; `emergency` stops and restarts it through systemd itself. Neither uses `--via`. See [Emergency mode](/docs/features/emergency-mode).

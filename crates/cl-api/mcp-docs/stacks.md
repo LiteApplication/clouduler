@@ -707,6 +707,23 @@ stack block. `alerts: false` disables every alert of the stack or service.
 `services`). Unknown event keys, bad regexes and `services` on a service's own
 rule are rejected when the stack is validated.
 
+### `terraform`
+
+`terraform` binds the service's OpenTofu module (stored with the stack, not in this file) to its inputs. Having a module is enough to run it. This block adds:
+
+- `secrets`: cluster secrets passed as `TF_VAR_<var>`, to plan and apply only.
+- `configs`: cluster configs passed as `TF_VAR_<var>`, written to a file at `path` in the run directory, or both.
+- `vars`: plain strings passed as `TF_VAR_<name>`.
+- `enabled: false` pauses the module.
+
+Valid at service level only. Variable names start with a letter or `_` and contain only letters, digits, `_` and `-`, and each name is bound once across the three lists. A config needs `var`, `path`, or both. A `path` is relative, has no `..`, `.` or empty part, and does not end in `.tf` or `.tfstate`. `clouduler_stack`, `clouduler_service` and `clouduler_instance` are set by Clouduler and override a binding of the same name.
+
+## OpenTofu modules
+
+A module is one `.tf` file per service, stored with the stack. Set them with the `terraform` argument of `deploy_stack`: a map of service name to module text. Omitted, the stored modules stay. Given, the map replaces them all, and an empty map forgets them. A module may not contain a `backend` or `cloud` block, and must not hold secret values.
+
+Clouduler runs a module once its service is healthy, when the module, a bound secret or config, or the service's image changes, or when asked with the `terraform_run` tool (`service`, and `mode` set to `plan` or `apply`). Read the outcome with `get_stack`. A failed run is not retried until something changes. Needs a `terraform:` section in cluster.yaml.
+
 ## Validation
 
 `StackFile::parse` runs syntax-only checks that don't need a cluster:
@@ -720,6 +737,7 @@ rule are rejected when the stack is validated.
   and `x-clouduler.expose`
 - `x-clouduler.colocate` targets name a real service in the same stack, and
   a service does not name itself
+- `x-clouduler.terraform` variable names, duplicate bindings and config `path`s
 
 `StackFile::validate(&cluster)` runs the above plus cross-checks against a
 `ClusterConfig`:

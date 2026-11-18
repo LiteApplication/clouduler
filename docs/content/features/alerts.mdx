@@ -7,7 +7,7 @@ sidebar_position: 16
 
 Alerts tell you when something in the cluster needs attention: a node went offline, a disk is nearly full, a container keeps crashing, a certificate is about to expire. They appear on the **Alerts** page and can also be sent to Discord, to any URL that accepts a JSON `POST` (a generic webhook), or by email.
 
-The cluster watches about 38 kinds of event ([catalog below](#events)). Each event has a severity (**Critical**, **Warning** or **Info**), and each destination chooses which severities it wants.
+The cluster watches about 45 kinds of event ([catalog below](#events)). Each event has a severity (**Critical**, **Warning** or **Info**), and each destination chooses which severities it wants.
 
 ## How it works
 
@@ -109,6 +109,7 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `update.completed` | Deployments | Info | An image update completed. |
 | `stack.deployed` | Deployments | Info | A stack was deployed ("First deploy." or "Redeployed, revision N."). |
 | `stack.removed` | Deployments | Info | A stack was removed. |
+| `terraform.failed` | Deployments | Warning | A terraform apply failed. Not retried until the module or its inputs change, or someone requests a run. |
 | `auth.api_key_created` | Security | Info | An API key was created. |
 | `auth.api_key_revoked` | Security | Info | An API key was revoked. |
 | `secret.rotated` | Security | Info | A user secret was overwritten (reserved `_clouduler_` secrets are not reported). |
