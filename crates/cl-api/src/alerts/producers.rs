@@ -182,7 +182,7 @@ async fn memory_loop(state: AppState) {
 async fn oom_loop(state: AppState) {
     let mut last_seen: Option<(String, Option<String>)> = None;
     loop {
-        let docker = state.docker.read().await.clone();
+        let docker = state.docker.get().await;
         let Some(docker) = docker else {
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;

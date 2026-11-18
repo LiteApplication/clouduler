@@ -41,7 +41,7 @@ pub fn start(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
     sync_progress: cl_drive::MigrationSyncTracker,
     keys: cl_raft::KeyWatch,
@@ -84,7 +84,7 @@ pub fn start(
                 // A dockerd that is not connected right now is not a reason to
                 // fail the migration outright: leave it unclaimed and try
                 // again on the next tick, same as a target with no address.
-                let Some(docker) = docker.read().await.clone() else {
+                let Some(docker) = docker.get().await else {
                     running.lock().await.remove(&job.instance);
                     continue;
                 };

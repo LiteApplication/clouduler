@@ -19,7 +19,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use cl_config::{AllowedHost, AllowedTarget, ClusterConfig, NetworkKind};
@@ -160,8 +162,8 @@ impl WanFirewall {
         })
     }
 
-    fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    fn inner(&self) -> parking_lot::MutexGuard<'_, Inner> {
+        self.inner.lock()
     }
 
     fn bump(&self) {
@@ -358,7 +360,7 @@ impl Signature {
 pub fn start(
     wan: Arc<WanFirewall>,
     cluster: Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     boot_cfg: ClusterConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -383,7 +385,7 @@ pub fn start(
             if wanted.is_empty() {
                 continue;
             }
-            let Some(docker) = docker.read().await.clone() else {
+            let Some(docker) = docker.get().await else {
                 continue;
             };
             match read_sources(&docker, &cfg, &wanted).await {

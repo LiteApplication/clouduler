@@ -134,7 +134,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
     let cluster = Arc::new(cluster);
     let server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
         cluster: cluster.clone(),
-        docker: std::sync::Arc::new(tokio::sync::RwLock::new(cl_docker::Docker::connect().ok())),
+        docker: cl_docker::DockerHandle::new(cl_docker::Docker::connect().ok()),
         pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
         migration_sync: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
         node_name: "n1".into(),
@@ -346,7 +346,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
     let n2_listen_addr = free_addr();
     let _n2_server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
         cluster: server.cluster.clone(),
-        docker: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        docker: cl_docker::DockerHandle::default(),
         pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
         migration_sync: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
         node_name: "n2".into(),

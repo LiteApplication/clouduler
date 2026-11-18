@@ -6,7 +6,7 @@
 //! authorization and removes the entry once the order moves past it.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 #[derive(Default)]
 pub struct Http01Store {
@@ -17,14 +17,12 @@ impl Http01Store {
     pub fn set(&self, token: impl Into<String>, key_authorization: impl Into<String>) {
         self.tokens
             .lock()
-            .expect("http01 store poisoned")
             .insert(token.into(), key_authorization.into());
     }
 
     pub fn get(&self, token: &str) -> Option<String> {
         self.tokens
             .lock()
-            .expect("http01 store poisoned")
             .get(token)
             .cloned()
     }
@@ -32,7 +30,6 @@ impl Http01Store {
     pub fn remove(&self, token: &str) {
         self.tokens
             .lock()
-            .expect("http01 store poisoned")
             .remove(token);
     }
 }

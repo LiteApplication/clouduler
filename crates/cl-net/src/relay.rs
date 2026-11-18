@@ -40,7 +40,9 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 use cl_raft::KeyWatch;
@@ -138,7 +140,7 @@ impl Dialer {
     /// Replace the whole relay table: container address -> relay endpoint of
     /// its node, for every container this node does not run itself.
     pub fn set_relays(&self, relays: HashMap<IpAddr, SocketAddr>) {
-        let mut table = self.inner.relays.write().unwrap_or_else(|e| e.into_inner());
+        let mut table = self.inner.relays.write();
         if **table != relays {
             *table = Arc::new(relays);
         }
@@ -149,7 +151,6 @@ impl Dialer {
         self.inner
             .relays
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&ip)
             .copied()
     }
@@ -228,7 +229,7 @@ impl Dialer {
         let mut stream = TcpStream::connect(relay).await.map_err(|e| {
             context(
                 e,
-                format!("connecting to the relay at {relay} for {target}"),
+                &format!("connecting to the relay at {relay} for {target}"),
             )
         })?;
         let _ = stream.set_nodelay(true);
@@ -241,13 +242,13 @@ impl Dialer {
         stream.flush().await?;
         read_status(&mut stream)
             .await
-            .map_err(|e| context(e, format!("the relay at {relay} could not reach {target}")))?;
+            .map_err(|e| context(e, &format!("the relay at {relay} could not reach {target}")))?;
         Ok(stream)
     }
 }
 
 /// `e` with `what` in front of its message, keeping its kind.
-fn context(e: io::Error, what: String) -> io::Error {
+fn context(e: io::Error, what: &str) -> io::Error {
     io::Error::new(e.kind(), format!("{what}: {e}"))
 }
 

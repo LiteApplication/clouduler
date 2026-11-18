@@ -25,7 +25,6 @@ use cl_raft::ids::InstanceId;
 use cl_raft::ClusterNode;
 use futures::StreamExt;
 use regex::{RegexSet, RegexSetBuilder};
-use tokio::sync::RwLock;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
@@ -349,7 +348,7 @@ fn fingerprint(rules: &[LogRule]) -> String {
 }
 
 /// Run until aborted. Call once per node.
-pub async fn run(cluster: Arc<ClusterNode>, docker: Arc<RwLock<Option<Docker>>>, node: String) {
+pub async fn run(cluster: Arc<ClusterNode>, docker: cl_docker::DockerHandle, node: String) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AlertSignal>(QUEUE);
     let sender = cluster.clone();
     let sender_task = tokio::spawn(async move {
@@ -360,7 +359,7 @@ pub async fn run(cluster: Arc<ClusterNode>, docker: Arc<RwLock<Option<Docker>>>,
     let mut followers: HashMap<String, Follower> = HashMap::new();
     loop {
         tokio::time::sleep(SCAN_EVERY).await;
-        let Some(docker) = docker.read().await.clone() else {
+        let Some(docker) = docker.get().await else {
             followers.clear();
             continue;
         };

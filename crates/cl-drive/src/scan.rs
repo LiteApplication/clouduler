@@ -610,8 +610,8 @@ mod tests {
         fs::create_dir(tmp.path().join("sub")).unwrap();
 
         let manifest = scan(tmp.path(), false).unwrap();
-        let want_uid = unsafe { libc::getuid() };
-        let want_gid = unsafe { libc::getgid() };
+        let want_uid = nix::unistd::getuid().as_raw();
+        let want_gid = nix::unistd::getgid().as_raw();
         assert_eq!(manifest.files["a.txt"].uid, want_uid);
         assert_eq!(manifest.files["a.txt"].gid, want_gid);
         assert_eq!(manifest.dirs["sub"].uid, want_uid);

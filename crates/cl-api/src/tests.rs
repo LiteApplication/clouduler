@@ -163,7 +163,7 @@ pub(crate) async fn harness() -> Harness {
     let cluster_key = Arc::new(ClusterKey::generate());
     let state = AppState {
         cluster: node.clone(),
-        docker: Arc::new(RwLock::new(Docker::connect().ok())),
+        docker: cl_docker::DockerHandle::new(Docker::connect().ok()),
         pulling: Arc::new(RwLock::new(Default::default())),
         migration_sync: Arc::new(std::sync::RwLock::new(Default::default())),
         node_name: "n0".to_string(),
@@ -829,7 +829,7 @@ async fn cluster_status_has_the_documented_shape() {
 #[tokio::test]
 async fn the_api_answers_without_a_docker_daemon() {
     let h = harness().await;
-    *h.state.docker.write().await = None;
+    h.state.docker.set(None).await;
 
     let resp = h
         .router

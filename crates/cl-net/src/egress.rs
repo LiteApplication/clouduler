@@ -104,9 +104,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// the same subnet; `ClusterConfig::validate` refuses such a config.
 pub fn egress_subnet(network: &str) -> Ipv4Net {
     let second_octet = cl_config::subnet_octet(network);
-    format!("10.{EGRESS_POOL_BASE}.{second_octet}.0/24")
-        .parse()
-        .expect("a /24 built from two bytes always parses")
+    Ipv4Net::new_assert(Ipv4Addr::new(10, EGRESS_POOL_BASE, second_octet, 0), 24)
 }
 
 /// A node-local `/24` for a nat network's docker bridge, deterministically
@@ -118,9 +116,7 @@ pub fn egress_subnet(network: &str) -> Ipv4Net {
 /// cluster-wide coordination.
 pub fn nat_subnet(network: &str) -> Ipv4Net {
     let second_octet = cl_config::subnet_octet(network);
-    format!("10.{NAT_POOL_BASE}.{second_octet}.0/24")
-        .parse()
-        .expect("a /24 built from two bytes always parses")
+    Ipv4Net::new_assert(Ipv4Addr::new(10, NAT_POOL_BASE, second_octet, 0), 24)
 }
 
 /// Every address pool container traffic can originate from on this host: the
@@ -130,20 +126,14 @@ pub fn nat_subnet(network: &str) -> Ipv4Net {
 pub fn container_pools() -> Vec<Ipv4Net> {
     vec![
         overlay_pool(),
-        format!("10.{EGRESS_POOL_BASE}.0.0/16")
-            .parse()
-            .expect("a /16 built from two bytes always parses"),
-        format!("10.{NAT_POOL_BASE}.0.0/16")
-            .parse()
-            .expect("a /16 built from two bytes always parses"),
+        Ipv4Net::new_assert(Ipv4Addr::new(10, EGRESS_POOL_BASE, 0, 0), 16),
+        Ipv4Net::new_assert(Ipv4Addr::new(10, NAT_POOL_BASE, 0, 0), 16),
     ]
 }
 
 /// The pool stack overlay networks are carved from.
 pub fn overlay_pool() -> Ipv4Net {
-    crate::ipam::DEFAULT_OVERLAY_POOL
-        .parse()
-        .expect("the default overlay pool parses")
+    crate::ipam::DEFAULT_OVERLAY_NET
 }
 
 /// The bridge's own address on its subnet: the first host address.

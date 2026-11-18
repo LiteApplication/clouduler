@@ -408,7 +408,7 @@ pub fn node_routing_plan(input: &RoutingInput) -> RoutingPlan {
 
     plan.routes.push(TableRoute {
         table: reply,
-        dest: "0.0.0.0/0".parse().expect("default parses"),
+        dest: DEFAULT_ROUTE,
         via: router,
         dev: veth.clone(),
         src: None,
@@ -448,7 +448,7 @@ pub fn node_routing_plan(input: &RoutingInput) -> RoutingPlan {
     // router stack's own overlay, must never be sent back to the router.
     plan.rules.push(IpRule {
         priority: EXEMPT_PRIORITY,
-        selector: RuleSelector::From(Ipv4Net::new(router, 32).expect("/32 is valid")),
+        selector: RuleSelector::From(Ipv4Net::from(router)),
         action: RuleAction::LookupMain,
     });
     if let Some(bridge) = &input.router_bridge {
@@ -531,9 +531,11 @@ fn parse_hex(s: &str) -> Option<u32> {
     u32::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
 }
 
+const DEFAULT_ROUTE: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::UNSPECIFIED, 0);
+
 fn parse_net(s: &str) -> Option<Ipv4Net> {
     if s == "default" {
-        return Some("0.0.0.0/0".parse().expect("default parses"));
+        return Some(DEFAULT_ROUTE);
     }
     s.parse::<Ipv4Net>().ok().or_else(|| {
         s.parse::<Ipv4Addr>()

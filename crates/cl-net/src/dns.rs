@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock as StdRwLock;
 
 use cl_raft::InstanceId;
 use hickory_proto::rr::rdata::{A, SOA};
@@ -363,7 +365,7 @@ impl ZoneHandler for ObservedForwarder {
         lookup_options: LookupOptions,
     ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
         let (flow, ctx) = self.inner.search(request, lookup_options).await;
-        let observer = self.observer.read().ok().and_then(|slot| slot.clone());
+        let observer = self.observer.read().clone();
         if let (Some(observer), LookupControlFlow::Continue(Ok(lookup))) = (observer, &flow) {
             let answers: Vec<(Ipv4Addr, u32)> = lookup
                 .iter()
@@ -508,9 +510,7 @@ impl InternalDns {
     /// Have `observer` told of every upstream answer from now on. Applies to
     /// servers already running too.
     pub fn set_observer(&self, observer: Arc<dyn AnswerObserver>) {
-        if let Ok(mut slot) = self.observer.write() {
-            *slot = Some(observer);
-        }
+        *self.observer.write() = Some(observer);
     }
 
     /// Replace the zone content in place. Called whenever placement changes,

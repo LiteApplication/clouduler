@@ -194,8 +194,8 @@ fn has_identical_live(live: &[Record], want: &DesiredRecord) -> bool {
 /// Logs, once per key for the life of the process, that an existing
 /// unowned record is being used as-is instead of adopted.
 fn note_unclaimed(key: &str) {
-    static SEEN: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    static SEEN: parking_lot::Mutex<Option<HashSet<String>>> = parking_lot::Mutex::new(None);
+    let mut seen = SEEN.lock();
     if seen
         .get_or_insert_with(HashSet::new)
         .insert(key.to_string())

@@ -224,7 +224,7 @@ pub async fn run(
     // The api comes up before docker does, and picks the client up whenever it
     // lands. A node whose dockerd is slow or absent still has to be reachable,
     // since the web ui is where someone would go to find out why.
-    let docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>> = Arc::default();
+    let docker = cl_docker::DockerHandle::default();
     // Shared between the scheduler (which marks/unmarks it around an image
     // pull) and the api (which reads it to report a "pulling" instance
     // state) — see `cl_sched::PullTracker`.
@@ -325,7 +325,7 @@ pub async fn run(
     // second or two behind us, and a node that gave up on docker for the life
     // of the process would vote but run nothing until someone restarted it.
     crate::systemd::extend_timeout(DOCKER_WAIT + Duration::from_secs(30));
-    *docker.write().await = connect_docker().await;
+    docker.set(connect_docker().await).await;
     // Keeps retrying afterwards: a node whose dockerd was not up yet during
     // the wait above, or whose dockerd is later bounced independently of this
     // process, gets a working `Docker` handle again without a restart. Every
@@ -563,7 +563,7 @@ struct StartApiArgs<'a> {
     config_path: &'a Path,
     cluster: &'a Arc<ClusterNode>,
     data_dir: &'a Path,
-    docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
+    docker: cl_docker::DockerHandle,
     pulling: cl_sched::PullTracker,
     migration_sync: cl_drive::MigrationSyncTracker,
     key: Option<Arc<ClusterKey>>,
@@ -728,12 +728,12 @@ fn start_self_update(
 /// client again without restarting the daemon. bollard's client normally
 /// reconnects its own socket transparently per call once it has one, so the
 /// steady-state cost here is just a cheap ping.
-async fn run_docker_reconnect(docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>) {
+async fn run_docker_reconnect(docker: cl_docker::DockerHandle) {
     const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut ticker = tokio::time::interval(RETRY_INTERVAL);
     loop {
         ticker.tick().await;
-        let alive = match docker.read().await.as_ref() {
+        let alive = match docker.get().await {
             Some(client) => client.ping().await.is_ok(),
             None => false,
         };
@@ -743,15 +743,15 @@ async fn run_docker_reconnect(docker: Arc<tokio::sync::RwLock<Option<cl_docker::
         match cl_docker::Docker::connect() {
             Ok(client) => match client.ping().await {
                 Ok(()) => {
-                    let had_one = docker.read().await.is_some();
-                    *docker.write().await = Some(client);
+                    let had_one = docker.is_connected().await;
+                    docker.set(Some(client)).await;
                     if !had_one {
                         info!("docker connected");
                     }
                 }
-                Err(_) => *docker.write().await = None,
+                Err(_) => docker.set(None).await,
             },
-            Err(_) => *docker.write().await = None,
+            Err(_) => docker.set(None).await,
         }
     }
 }
@@ -1047,7 +1047,7 @@ async fn watch_git_backup(
 
         let author = api_state
             .as_ref()
-            .and_then(|a| a.git_export_author.lock().unwrap().take());
+            .and_then(|a| a.git_export_author.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
         let (result, updated_cache) = run_git_export_blocking(
             state.clone(),
             key,
@@ -1789,7 +1789,7 @@ async fn report_self(
     cluster: Arc<ClusterNode>,
     node_pubkey: Option<String>,
     gpus_rx: tokio::sync::watch::Receiver<Option<cl_raft::state::NodeGpus>>,
-    docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
+    docker: cl_docker::DockerHandle,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -1810,7 +1810,7 @@ async fn report_self(
             .map(Box::new)
             .unwrap_or_else(|| current.gpus.clone());
         // Keep what is stored while docker cannot be asked.
-        let client = docker.read().await.clone();
+        let client = docker.get().await;
         let images = match client {
             Some(d) => match d.list_local_images().await {
                 Ok(list) => list

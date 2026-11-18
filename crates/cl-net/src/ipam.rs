@@ -19,6 +19,9 @@ use crate::error::{NetError, Result};
 /// network, so a default cluster config never needs to touch it.
 pub const DEFAULT_OVERLAY_POOL: &str = "10.244.0.0/16";
 
+/// [`DEFAULT_OVERLAY_POOL`] as a checked-at-compile-time network.
+pub const DEFAULT_OVERLAY_NET: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(10, 244, 0, 0), 16);
+
 /// Prefix length handed to each stack network's subnet.
 pub const DEFAULT_SUBNET_PREFIX: u8 = 24;
 
@@ -340,7 +343,7 @@ impl NetworkAllocation {
 impl Default for Allocations {
     fn default() -> Self {
         Self::new(
-            DEFAULT_OVERLAY_POOL.parse().expect("valid default pool"),
+            DEFAULT_OVERLAY_NET,
             DEFAULT_SUBNET_PREFIX,
         )
     }
@@ -360,6 +363,14 @@ fn nets_overlap(a: Ipv4Net, b: Ipv4Net) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_overlay_net_matches_its_string_form() {
+        assert_eq!(
+            super::DEFAULT_OVERLAY_POOL.parse::<ipnet::Ipv4Net>().unwrap(),
+            super::DEFAULT_OVERLAY_NET
+        );
+    }
+
     use super::*;
 
     #[test]

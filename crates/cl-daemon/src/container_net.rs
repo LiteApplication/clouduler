@@ -82,7 +82,7 @@ pub fn allowed_destinations(cfg: &ClusterConfig, allowed_networks: &[String]) ->
         for node in cfg.nodes.values() {
             let ip = v4(node.ip_on(name)).or_else(|| node.public_on(name).and_then(|p| p.ipv4));
             if let Some(ip) = ip {
-                out.insert(Ipv4Net::new(ip, 32).expect("/32 is valid"));
+                out.insert(Ipv4Net::from(ip));
             }
         }
     }

@@ -5,7 +5,9 @@
 //! back; the cluster replicates the result to everyone, this node included, the
 //! moment its daemon comes up.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use anyhow::{bail, Context, Result};
 use cl_config::ClusterConfig;
@@ -67,7 +69,7 @@ impl ServerCertVerifier for PinnedVerifier {
                 )));
             }
         }
-        *self.seen.lock().expect("fingerprint lock") = Some(seen);
+        *self.seen.lock() = Some(seen);
         Ok(ServerCertVerified::assertion())
     }
 
@@ -144,7 +146,7 @@ impl Peer {
     /// Fingerprint of the certificate the peer presented, once a request has
     /// been made.
     pub fn peer_fingerprint(&self) -> Option<String> {
-        self.seen.lock().expect("fingerprint lock").clone()
+        self.seen.lock().clone()
     }
 
     pub async fn fetch_config(&self) -> Result<ClusterConfig> {
@@ -376,7 +378,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(
-            seen.lock().unwrap().as_deref(),
+            seen.lock().as_deref(),
             Some(fingerprint(b"whatever").as_str())
         );
     }

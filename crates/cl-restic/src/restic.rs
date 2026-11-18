@@ -158,7 +158,11 @@ impl ResticRepo {
         // to fill the pipe buffer, which would otherwise deadlock this
         // thread against a restic that's blocked writing to a pipe nobody is
         // reading.
-        let stderr = child.stderr.take().expect("stderr piped");
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(ResticError::Io(std::io::Error::other(
+                "restic child spawned without piped stdout/stderr",
+            )));
+        };
         let stderr_thread = std::thread::spawn(move || {
             let mut buf = String::new();
             let mut stderr = stderr;
@@ -166,7 +170,6 @@ impl ResticRepo {
             buf
         });
 
-        let stdout = child.stdout.take().expect("stdout piped");
         let mut summary: Option<Result<BackupOutcome>> = None;
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(ResticError::Io)?;

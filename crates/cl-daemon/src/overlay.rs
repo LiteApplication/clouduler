@@ -20,16 +20,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
-use cl_docker::{Docker, NetworkSpec};
+use cl_docker::NetworkSpec;
 use cl_net::container_net::container_docker_name;
-use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
+use cl_net::ipam::{DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::Request;
 use cl_sched::run::overlay_name;
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::IpNet;
 use tracing::{debug, info, warn};
 
 /// How often the loop re-checks. The overlay only changes when a stack is
@@ -41,7 +41,7 @@ pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
 ) -> tokio::task::JoinHandle<()> {
     let ctx = Context_ {
         node: node_name.to_string(),
@@ -59,7 +59,7 @@ struct Context_ {
     /// A live view rather than a snapshot: a node started before dockerd was
     /// up, or reconnected later, picks the overlay work back up without a
     /// restart.
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     boot_cfg: ClusterConfig,
 }
 
@@ -345,7 +345,7 @@ impl Context_ {
         netlink: Option<&Overlay>,
         wanted: &BTreeMap<String, BTreeSet<InstanceId>>,
     ) -> Result<()> {
-        let Some(docker) = self.docker.read().await.clone() else {
+        let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
         for name in docker
@@ -548,11 +548,12 @@ impl Context_ {
                 );
             }
         }
-        let vni = needs_vxlan.then(|| allocate_vni(overlay, &BTreeSet::new()));
+        let vxlan_setup = needs_vxlan
+            .then(|| internal_ip.context("a vxlan network needs this node's internal address"))
+            .transpose()?
+            .map(|ip| (ip, allocate_vni(overlay, &BTreeSet::new())));
 
-        let mtu = if needs_vxlan {
-            let internal_ip =
-                internal_ip.expect("caller only sets needs_vxlan once internal_ip is Some");
+        let mtu = if let Some((internal_ip, vni)) = vxlan_setup {
             let underlay = netlink.underlay_for(internal_ip).await?.with_context(|| {
                 format!("no interface holds the internal address {internal_ip}")
             })?;
@@ -564,7 +565,7 @@ impl Context_ {
             let vxlan_index = netlink
                 .ensure_vxlan(
                     &vxlan,
-                    vni.expect("set above"),
+                    vni,
                     underlay.index,
                     internal_ip,
                     bridge_index,
@@ -586,7 +587,7 @@ impl Context_ {
             mtu
         };
 
-        let Some(docker) = self.docker.read().await.clone() else {
+        let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
         let stack = overlay.split('_').next().unwrap_or(overlay).to_string();
@@ -601,7 +602,7 @@ impl Context_ {
             })
             .await?;
         if created {
-            info!(network = %overlay, %subnet, %bridge, ?vni, mtu, "overlay network up");
+            info!(network = %overlay, %subnet, %bridge, vni = ?vxlan_setup.map(|(_, vni)| vni), mtu, "overlay network up");
         }
         Ok(())
     }
@@ -613,9 +614,7 @@ impl Context_ {
 /// Starting over is the only option, and it is survivable: the addresses are
 /// re-derived, and containers pick them up on their next restart.
 fn load_allocations(stored: Option<&str>) -> Allocations {
-    let pool: Ipv4Net = DEFAULT_OVERLAY_POOL
-        .parse()
-        .expect("the default pool parses");
+    let pool = DEFAULT_OVERLAY_NET;
     match stored {
         Some(raw) => serde_json::from_str(raw).unwrap_or_else(|e| {
             warn!(error = %e, "overlay allocations could not be decoded, starting a fresh address book");

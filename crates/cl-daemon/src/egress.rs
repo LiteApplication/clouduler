@@ -138,7 +138,7 @@ pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     wan: Arc<crate::wan::WanFirewall>,
 ) -> tokio::task::JoinHandle<()> {
@@ -211,7 +211,7 @@ pub fn start(
                 Err(e) => warn!(error = %e, "cannot apply the per-stack network restrictions"),
             }
 
-            let Some(docker) = docker.read().await.clone() else {
+            let Some(docker) = docker.get().await else {
                 continue;
             };
 

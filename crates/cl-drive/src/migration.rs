@@ -253,7 +253,10 @@ fn migration_progress_writer(
     volume_count: u64,
 ) -> crate::progress::ProgressSink {
     crate::progress::ProgressSink::new(move |files_done, files_total| {
-        tracker.write().unwrap().insert(
+        tracker
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
             instance.clone(),
             crate::progress::MigrationSyncProgress {
                 volume_index,
@@ -323,7 +326,10 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
 /// migration that actually failed.
 fn finish_sync(job: &MigrationJob<'_>, result: Result<()>) -> Result<()> {
     if let Some(tracker) = &job.sync_progress {
-        tracker.write().unwrap().remove(&job.instance);
+        tracker
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&job.instance);
     }
     result
 }

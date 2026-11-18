@@ -15,12 +15,10 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use cl_docker::Docker;
 use cl_raft::state::{NodeGpus, NvidiaGpu, RenderNode};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tracing::{debug, info};
 
 /// How often to look again once the first detection has worked.
@@ -50,9 +48,9 @@ const TOOLKIT_BINS: &[&str] = &["nvidia-container-runtime-hook", "nvidia-contain
 
 /// Detect on a schedule, publishing each result. `None` until the first one,
 /// so a daemon that has only just started does not report "no GPUs".
-pub async fn run(docker: Arc<RwLock<Option<Docker>>>, tx: watch::Sender<Option<NodeGpus>>) {
+pub async fn run(docker: cl_docker::DockerHandle, tx: watch::Sender<Option<NodeGpus>>) {
     loop {
-        let runtimes = match docker.read().await.clone() {
+        let runtimes = match docker.get().await {
             Some(docker) => tokio::time::timeout(DOCKER_TIMEOUT, docker.runtimes())
                 .await
                 .ok()
