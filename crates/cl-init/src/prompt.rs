@@ -24,7 +24,6 @@ impl<R: BufRead, W: Write> Prompt<R, W> {
         }
     }
 
-    /// Print a line of context, not a question.
     pub fn say(&mut self, line: &str) -> Result<()> {
         writeln!(self.output, "{line}")?;
         Ok(())
@@ -51,7 +50,6 @@ impl<R: BufRead, W: Write> Prompt<R, W> {
         }
     }
 
-    /// Ask for a value that may legitimately be left unset.
     pub fn ask_optional(
         &mut self,
         question: &str,
@@ -137,7 +135,6 @@ impl<R: BufRead, W: Write> Prompt<R, W> {
     }
 }
 
-/// The prompter the command actually runs with.
 pub fn stdio(interactive: bool) -> Prompt<std::io::BufReader<std::io::Stdin>, std::io::Stdout> {
     Prompt::new(
         std::io::BufReader::new(std::io::stdin()),

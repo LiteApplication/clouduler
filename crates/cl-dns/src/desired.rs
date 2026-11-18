@@ -6,7 +6,6 @@ use cl_config::{qualify, ClusterConfig, Node};
 use crate::api::RecordType;
 use crate::error::{DnsError, Result};
 
-/// One DNS record clouduler wants to exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredRecord {
     pub fqdn: String,
@@ -95,7 +94,6 @@ pub fn records_for(
     Ok(records)
 }
 
-/// Desired records for the web UI hostname, on the node it runs on.
 pub fn web_records_for(cfg: &ClusterConfig, node: &Node) -> Result<Vec<DesiredRecord>> {
     records_for(cfg, &cfg.web.address, &cfg.web.network, node)
 }

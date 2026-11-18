@@ -3,12 +3,10 @@
 
 use cl_raft::state::DriveBackupTarget;
 
-/// `restic forget` arguments for one target's retention policy. Empty when
-/// the target sets none of `keep_last`, `keep_within_secs` or the
-/// daily/weekly/monthly/yearly counts - restic's own
-/// `forget` refuses to prune anything without at least one `--keep-*` flag,
-/// so an unset target intentionally keeps every snapshot forever, which the
-/// caller should treat as "skip the forget call" (see `restic::ResticRepo::forget`).
+/// `restic forget` arguments for one target's retention policy. Empty when no
+/// `keep_*` field is set: restic refuses to forget without a `--keep-*` flag, so
+/// an unset target keeps everything and the caller skips the call (see
+/// `restic::ResticRepo::forget`).
 pub fn forget_args(target: &DriveBackupTarget) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(keep_last) = target.keep_last {
@@ -34,9 +32,7 @@ pub fn forget_args(target: &DriveBackupTarget) -> Vec<String> {
     args
 }
 
-/// restic's `--keep-within` takes a duration like `30d12h`, built here from
-/// days/hours since that's the granularity retention is actually expressed
-/// in - nobody sets a keep-within of a few seconds.
+/// restic's `--keep-within` takes a duration like `30d12h`, built from days/hours.
 fn format_within(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3600;

@@ -30,7 +30,6 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// stopped, usually because something else already holds the port.
 const BIND_RETRY: Duration = Duration::from_secs(30);
 
-/// `dialer` is how every forwarder reaches its backend.
 pub fn start(
     cfg: &ClusterConfig,
     cluster: &Arc<ClusterNode>,
@@ -51,9 +50,6 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig, dialer: Dialer)
     loop {
         ticker.tick().await;
         let state = cluster.state().await;
-        // Recomputed every pass like `internal_dns`'s own live config, so a
-        // network's kind changing (or a node joining) is picked up without a
-        // restart.
         let live = crate::daemon::live_config(&state, &boot_cfg);
         let desired = desired(&state, &live);
 
@@ -131,9 +127,7 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig, dialer: Dialer)
     }
 }
 
-/// Every port this node's forwarders listen on, with its protocol. The host
-/// firewall uses it to let containers reach exactly these and no other host
-/// listener (`cl_net::egress::container_input_plan`).
+/// Every port this node forwards; the host firewall allows containers to reach exactly these.
 pub(crate) fn published_ports(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(Protocol, u16)> {
     desired(state, cfg)
         .keys()

@@ -15,11 +15,9 @@ use cl_config::{
 };
 use ipnet::IpNet;
 
-/// Name given to the internal network of a cluster init creates. Nothing
-/// depends on the name, it just has to be stable and obvious in the file.
+/// Name of the internal network init creates; it only needs to be stable.
 pub const INTERNAL_NETWORK: &str = "internal";
 
-/// What this machine becomes, in either mode.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePlan {
     pub name: String,
@@ -79,7 +77,6 @@ impl NodePlan {
     }
 }
 
-/// What a brand new cluster looks like, before any other node joins it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusterPlan {
     pub cluster_name: String,
@@ -92,8 +89,7 @@ pub struct ClusterPlan {
     pub node: NodePlan,
 }
 
-/// Build the config file for a cluster of one. Further nodes arrive through
-/// [`add_node`], run against this config from the joining machine.
+/// Build the config file for a cluster of one; further nodes arrive via [`add_node`].
 pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
     if plan.node.role != NodeRole::Manager {
         bail!("the first node of a cluster has to be a manager, nothing would lead it otherwise");
@@ -211,7 +207,6 @@ fn drive_names(config: &ClusterConfig) -> String {
     config.drives.keys().cloned().collect::<Vec<_>>().join(", ")
 }
 
-/// Parse a `--drive name=/path` argument.
 pub fn parse_drive_arg(arg: &str) -> Result<(String, PathBuf)> {
     let Some((name, path)) = arg.split_once('=') else {
         bail!("--drive takes name=/path, got {arg}");

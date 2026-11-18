@@ -1,9 +1,5 @@
-//! A plain callback for reporting "N of M done" from inside `SyncEngine`,
-//! decoupled from *what* collects it. `delta.rs` calls `report` without
-//! knowing whether anyone is listening; `migration.rs` (the one caller that
-//! cares, for now) supplies a closure that writes into its own tracker.
-//! Kept a synchronous `Fn` rather than an async callback so the per-file
-//! send loop in `delta.rs` never has to `.await` just to report progress.
+//! Synchronous progress callback for `SyncEngine`, so the per-file send loop
+//! in `delta.rs` never has to `.await` to report.
 
 use std::sync::Arc;
 
@@ -13,7 +9,6 @@ type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 pub struct ProgressSink(Option<ProgressCallback>);
 
 impl ProgressSink {
-    /// No one is listening — the cost of calling `report` is one branch.
     pub fn none() -> Self {
         Self(None)
     }
@@ -22,8 +17,7 @@ impl ProgressSink {
         Self(Some(Arc::new(f)))
     }
 
-    /// `done` out of `total`, in whatever unit the caller and its listener
-    /// agreed on (this crate always uses file counts, not bytes).
+    /// Unit is file counts, not bytes.
     pub fn report(&self, done: u64, total: u64) {
         if let Some(f) = &self.0 {
             f(done, total);
@@ -71,17 +65,12 @@ mod tests {
 }
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use cl_raft::ids::InstanceId;
 
-/// A migrating instance's current position: which of its volumes is being
-/// synced right now, and that volume's own file-count progress. Plain
-/// `std::sync::RwLock`, not `tokio`'s: it is only ever held for the instant
-/// it takes to update or read one entry, from both a synchronous
-/// `ProgressSink` callback (Task 2) and an async reader (`cl-api`), and a
-/// blocking lock is simpler than making the callback async just to `.await`
-/// a tokio lock it holds for microseconds.
+/// A migrating instance's current volume and its file-count progress. Updated
+/// from a synchronous callback, so the tracker uses a blocking lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationSyncProgress {
     /// 1-based: "syncing volume 2 of 3".
@@ -91,8 +80,6 @@ pub struct MigrationSyncProgress {
     pub files_total: u64,
 }
 
-/// Shared with `cl-api` so it can report live migration-sync progress
-/// without either crate depending on the other's internals — see
-/// `cl_sched::PullTracker` for the same sharing pattern applied to image
-/// pulls.
+/// Shared with `cl-api` for live migration-sync progress (same pattern as
+/// `cl_sched::PullTracker`).
 pub type MigrationSyncTracker = Arc<RwLock<HashMap<InstanceId, MigrationSyncProgress>>>;

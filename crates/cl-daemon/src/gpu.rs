@@ -21,14 +21,12 @@ use cl_raft::state::{NodeGpus, NvidiaGpu, RenderNode};
 use tokio::sync::watch;
 use tracing::{debug, info};
 
-/// How often to look again once the first detection has worked.
 const RESCAN: Duration = Duration::from_secs(5 * 60);
 /// How often to look again while docker could not be asked about runtimes.
 const RESCAN_NO_DOCKER: Duration = Duration::from_secs(30);
 const SMI_TIMEOUT: Duration = Duration::from_secs(10);
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `/dev` subdirectories whose entries are listed too.
 const DEV_SUBDIRS: &[&str] = &[
     "dri",
     "snd",
@@ -121,7 +119,6 @@ fn scan(dev: &Path, sys: &Path) -> NodeGpus {
     gpus
 }
 
-/// The first toolkit binary found in `dirs`, as a full path.
 fn find_toolkit(dirs: &[&Path]) -> Option<String> {
     for bin in TOOLKIT_BINS {
         for dir in dirs {
@@ -202,7 +199,6 @@ fn nvidia_device_paths<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> 
     found.into_iter().map(|(_, p)| p).collect()
 }
 
-/// `renderD128`, ... from the names under `/dev/dri`.
 fn render_node_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
     names
         .filter(|n| {

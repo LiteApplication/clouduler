@@ -1,25 +1,19 @@
-//! Pure "is this target due to run" logic - no filesystem or clock reads
-//! beyond the `now` the caller passes in, so it's exercised without touching
-//! wall-clock time in tests.
+//! Pure "is this target due to run" logic: no clock reads beyond the `now` the
+//! caller passes in.
 //!
-//! `time_of_day` is interpreted against UTC seconds-since-midnight, not the
-//! node's local timezone: a real timezone-aware interpretation needs a
-//! calendar library this workspace doesn't otherwise depend on, and getting
-//! that wrong silently would be worse than a documented, deliberate
-//! simplification. Revisit if operators outside UTC need exact wall-clock
-//! scheduling.
+//! `time_of_day` is interpreted as UTC seconds-since-midnight, not local time:
+//! timezone awareness needs a calendar library this workspace does not use, and
+//! getting it silently wrong is worse than a documented simplification.
 
 use cl_raft::state::DriveBackupTarget;
 
 /// Whether `target` is due to run at `now` (unix seconds).
 ///
-/// - No `time_of_day`: plain interval scheduling - due once
-///   `frequency_secs` has elapsed since `last_run` (or immediately, if it
-///   has never run).
-/// - With a `time_of_day`: due once `frequency_secs` has elapsed *and* `now`
-///   is at or past today's occurrence of that time - so a daily target with
-///   `time_of_day: "02:00"` doesn't fire the instant 24h have elapsed if
-///   that lands at 14:00, it waits for the next 02:00.
+/// - No `time_of_day`: due once `frequency_secs` has elapsed since `last_run`
+///   (or immediately if never run).
+/// - With `time_of_day`: also requires `now` to be at or past today's occurrence
+///   of that time, so a daily 02:00 target waits for 02:00 rather than firing
+///   at 14:00.
 pub fn is_due(target: &DriveBackupTarget, now: i64) -> bool {
     if !target.enabled {
         return false;
@@ -35,9 +29,8 @@ fn at_or_past_time_of_day(target: &DriveBackupTarget, now: i64) -> bool {
     let Some(tod) = &target.time_of_day else {
         return true;
     };
-    // A malformed time-of-day (should be rejected earlier, at the api/cli
-    // boundary) doesn't block scheduling forever - it's treated as "no
-    // constraint" rather than "never due".
+    // A malformed time-of-day (rejected earlier at the api/cli) is treated as
+    // "no constraint" rather than "never due".
     let Some((hour, minute)) = parse_time_of_day(tod) else {
         return true;
     };

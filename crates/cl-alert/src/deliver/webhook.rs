@@ -43,7 +43,6 @@ fn alert_json(m: &AlertMessage) -> Value {
     Value::Object(o)
 }
 
-/// The request body. Pure, so the schema is testable.
 pub fn payload(n: &Notification) -> Value {
     let mut o = Map::new();
     o.insert("version".into(), SCHEMA_VERSION.into());

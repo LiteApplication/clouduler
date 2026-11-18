@@ -129,8 +129,6 @@ fn host_string(host: &AllowedHost) -> String {
     }
 }
 
-/// The proxy's view: per overlay subnet, the hostname-only entries of every
-/// network the stack listed.
 pub fn proxy_policies(stacks: &[RestrictedStack]) -> Vec<(Ipv4Net, StackPolicy)> {
     stacks
         .iter()
@@ -163,7 +161,6 @@ pub fn proxy_policies(stacks: &[RestrictedStack]) -> Vec<(Ipv4Net, StackPolicy)>
         .collect()
 }
 
-/// Names the firewall needs resolved.
 pub fn names_to_resolve(stacks: &[RestrictedStack]) -> BTreeSet<String> {
     stacks
         .iter()
@@ -242,8 +239,6 @@ impl HostResolver {
         &self.cache
     }
 
-    /// Re-resolve `names`. A failed or timed out lookup keeps what was known;
-    /// a name nobody asks for any more is forgotten.
     pub async fn refresh(&mut self, names: &BTreeSet<String>) {
         self.cache.retain(|n, _| names.contains(n));
         let lookups = names.iter().map(|name| async move {

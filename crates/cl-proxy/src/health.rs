@@ -1,20 +1,13 @@
 //! Active backend health checks.
 //!
-//! The routing table alone can't tell "nobody has hit this route yet" apart
-//! from "the next real request would 502" — a route sits idle between
-//! deploys as easily as a genuinely broken one does. This probes every
-//! route's backends itself on a timer and remembers what it found, so
-//! `clouduler stack unhealthy` and the ui can surface a dead backend before a
-//! client discovers it the hard way.
+//! The routing table alone can't tell an idle route from one whose next request
+//! would 502. This probes every route's backends on a timer and remembers the
+//! result so `clouduler stack unhealthy` and the ui can surface a dead backend
+//! early.
 //!
-//! Deliberately independent of the request path in `server.rs`: reusing that
-//! code would mean synthesizing a fake client request, and the failure modes
-//! this cares about (connect refused, timeout, TLS on a route that expects
-//! plain HTTP) are exactly what a plain probe request already reproduces.
-//! It does dial the way the request path does, though, through the same
-//! `cl_net::relay::Dialer`: a backend on another node is probed through the
-//! relay of the node running it, since this host cannot reach it over the
-//! overlay at all.
+//! Deliberately independent of the request path in `server.rs`, but it dials
+//! through the same `cl_net::relay::Dialer`: a backend on another node is probed
+//! through that node's relay, since this host cannot reach it over the overlay.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -33,19 +26,16 @@ use tracing::debug;
 
 use crate::route::{Route, RouteTable};
 
-/// How long a single backend probe has to connect and get a response before
-/// it's counted as unreachable. Generous relative to `CONNECT_TIMEOUT` since
-/// this also waits for a full response.
+/// How long a probe has to connect and get a response before the backend counts
+/// as unreachable.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a probe waits for the backend to accept, through its node's relay
 /// included. Matches `BACKEND_CONNECT_TIMEOUT` in `server.rs`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often every route in the table gets re-probed.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
-/// One route's most recent probe.
 #[derive(Debug, Clone)]
 pub struct BackendHealth {
     pub host: String,
@@ -90,16 +80,13 @@ impl HealthTable {
     }
 }
 
-/// Probes every route in `routes` every `interval`, forever.
+/// Probes every route in `routes` every `interval`, forever, dialing through
+/// `dialer` as the proxy itself does.
 ///
-/// `tokio::time::interval` fires its first tick immediately, which would mean
-/// probing the whole cluster's routes the instant this node's proxy comes
-/// up - exactly when the VXLAN FDB and ARP caches are coldest and a probe is
-/// most likely to eat a one-off timeout that has nothing to do with the
-/// backend actually being down. Waiting out one interval before the first
-/// pass gives the overlay a chance to warm up first.
-///
-/// Backends are dialed through `dialer`, as the proxy itself dials them.
+/// `tokio::time::interval` fires immediately, which would probe every route the
+/// instant the proxy comes up, when the VXLAN FDB and ARP caches are coldest and
+/// a probe is likeliest to eat a one-off timeout. Waiting out one interval first
+/// lets the overlay warm up.
 pub async fn run(routes: Arc<RouteTable>, health: HealthTable, interval: Duration, dialer: Dialer) {
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -148,17 +135,13 @@ fn is_static_route(route: &Route) -> bool {
     route.instance.starts_with("clouduler.static.")
 }
 
-/// A failed probe gets this many extra attempts before the backend is
-/// actually recorded as unreachable. Head-end replication over the VXLAN
-/// mesh (see `cl-net::vxlan`) means a cross-node probe occasionally eats a
-/// one-off dropped packet on an otherwise healthy backend - confirmed live:
-/// a route that failed its first post-restart probe came back healthy on
-/// the very next attempt seconds later, with nothing on the backend having
-/// changed. Retrying in-place tells that apart from a backend that is
-/// actually down, which keeps failing every attempt.
+/// Extra attempts for a failed probe before the backend is recorded as
+/// unreachable. Head-end replication over the VXLAN mesh (`cl-net::vxlan`)
+/// occasionally drops a cross-node probe on a healthy backend (seen live: a
+/// route failing its first post-restart probe was healthy seconds later); a
+/// really dead backend fails every attempt.
 const PROBE_RETRIES: u32 = 2;
 
-/// Wait between retry attempts on the same backend.
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Probes every backend behind one route; the route is healthy only if all
@@ -200,19 +183,14 @@ async fn probe_route(dialer: &Dialer, route: &Route) -> BackendHealth {
     }
 }
 
-/// One probe request to one backend: a `GET path` with the route's `Host`,
-/// counted as reachable once any response comes back, whatever its status
-/// (a redirect is not followed - it already proves the backend answers).
+/// One probe: a `GET path` with the route's `Host`, counted as reachable on any
+/// response whatever its status (a redirect is not followed).
 ///
-/// The proxy always speaks plain HTTP to a backend regardless of whether the
-/// route terminates TLS for clients (see `server.rs`). Every probe gets a
-/// fresh connection: probes for one backend are `interval` apart - far too
-/// infrequent for a pooled connection to earn its keep, and confirmed live to
-/// actively hurt: a backend whose first probe landed mid-startup (TCP
-/// accepted, then reset before a response) left a dead connection in the pool
-/// that every retry and every later tick kept reusing, reporting the same
-/// route unreachable indefinitely even after a plain `curl` to the identical
-/// address succeeded instantly.
+/// The proxy always speaks plain HTTP to a backend. Every probe uses a fresh
+/// connection: pooling does not pay off at `interval` spacing and was seen live
+/// to hurt, since a probe that landed mid-startup (accepted, then reset) left a
+/// dead connection in the pool that every later probe reused, reporting the
+/// route unreachable even after a plain `curl` succeeded.
 async fn probe(dialer: &Dialer, addr: SocketAddr, host: &str, path: &str) -> Result<(), String> {
     let uri: Uri = path
         .parse()

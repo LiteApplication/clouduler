@@ -33,16 +33,13 @@ use crate::iptables::{ChainSpec, IptablesPlan, Jump};
 pub const INPUT_CHAIN: &str = "CLDR-NET";
 pub const FORWARD_CHAIN: &str = "CLDR-NETF";
 
-/// A network a source is denied from reaching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Denied {
     pub network: String,
     pub subnet: Ipv4Net,
-    /// This node's own address on the network, if it has one.
     pub node_addr: Option<Ipv4Addr>,
 }
 
-/// One restricted source network and everything it is denied from reaching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRules {
     pub network: String,
@@ -60,7 +57,6 @@ pub struct NetAccessInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetAccessPlan {
     pub plan: IptablesPlan,
-    /// Pairs that could not be enforced, one human readable line each.
     pub warnings: Vec<String>,
 }
 

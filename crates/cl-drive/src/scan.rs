@@ -1,10 +1,8 @@
 //! Walking a volume into a manifest, and diffing two manifests.
 //!
-//! Pure and IO only at the edges: `scan` touches the filesystem, `Manifest`
-//! and `diff` do not. Hashing every file on every scan does not scale, so
-//! `scan` only hashes when asked; ordinary sync decisions run on size and
-//! mtime alone, and content hashing is reserved for rename detection and
-//! migration verification.
+//! Only `scan` touches the filesystem. Hashing every file doesn't scale, so
+//! `scan` hashes only when asked; ordinary sync decisions use size and mtime,
+//! and hashing is reserved for rename detection and migration verification.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
@@ -15,34 +13,27 @@ use walkdir::WalkDir;
 
 use crate::error::{DriveError, Result};
 
-/// What's known about one file (or symlink) in a volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMeta {
     pub size: u64,
-    /// Nanoseconds since the epoch. Second resolution is too coarse: a
-    /// rewrite that lands in the same wall-clock second as the original
-    /// would otherwise be invisible to a no-hash diff.
+    /// Nanoseconds since the epoch; second resolution would hide a same-second
+    /// rewrite from a no-hash diff.
     pub mtime_nanos: i64,
-    /// Permission bits, masked to the low 12 (rwx + setuid/gid/sticky).
     pub mode: u32,
-    /// Owning user, by numeric ID. Names are not portable between nodes —
-    /// two nodes agree on UID space (containers run with fixed UIDs), not on
-    /// `/etc/passwd` entries, so replication carries the number, never a
-    /// name lookup.
+    /// Numeric owner ID: nodes share a UID space (fixed container UIDs), not
+    /// `/etc/passwd`, so replication never carries names.
     pub uid: u32,
     pub gid: u32,
     pub is_symlink: bool,
-    /// Set only for symlinks.
     pub link_target: Option<String>,
-    /// Content hash. Only present when the scan was asked to hash.
+    /// Only present when the scan hashed.
     pub hash: Option<[u8; 32]>,
 }
 
 impl FileMeta {
-    /// Whether two entries for the same path represent different content.
-    /// Falls back to cheap metadata unless both sides carry a hash, in which
-    /// case the hash is authoritative for content — ownership is still
-    /// compared separately since it isn't reflected in a content hash.
+    /// Whether two entries for one path differ. Uses cheap metadata unless both
+    /// sides carry a hash (then the hash decides content; ownership is compared
+    /// separately).
     fn differs_from(&self, other: &FileMeta) -> bool {
         let owner_changed = self.uid != other.uid || self.gid != other.gid;
         if self.is_symlink || other.is_symlink {
@@ -60,11 +51,8 @@ impl FileMeta {
     }
 }
 
-/// What's known about one directory: not just its permission bits, but its
-/// owner too, since a replicated volume that only matches the files inside a
-/// directory and not the directory itself is not a faithful copy — Postgres,
-/// for one, insists `PGDATA` and its subdirectories are owned by the user it
-/// runs as, not merely writable by it.
+/// One directory's metadata including owner: Postgres insists `PGDATA` and its
+/// subdirectories are owned by the user it runs as.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirMeta {
     pub mode: u32,
@@ -82,51 +70,38 @@ impl DirMeta {
     }
 }
 
-/// A volume's contents, keyed by path relative to the volume root, always
-/// using `/` separators so it's portable between nodes.
+/// A volume's contents keyed by `/`-separated path relative to the root.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub files: BTreeMap<String, FileMeta>,
-    /// Directories, path to metadata.
-    ///
-    /// Tracked in their own right rather than being implied by the files
-    /// inside them, because an *empty* directory is implied by nothing. A
-    /// receiver that only ever calls `create_dir_all` on the way to writing a
-    /// file ends up with a faithful copy of every file and none of the empty
-    /// directories — which is not a faithful copy of the volume. Postgres
-    /// keeps a dozen normally-empty directories (`pg_notify`, `pg_replslot`,
-    /// `pg_twophase`, ...) and refuses to start without them, so a replica
-    /// built purely by sync was unstartable: `could not open directory
-    /// "pg_notify"`. That only ever surfaces on failover, which is the worst
-    /// possible moment to discover it.
+    /// Directories, path to metadata. Tracked separately because an *empty*
+    /// directory is implied by no file: a receiver that only `create_dir_all`s
+    /// on the way to a file lacks them, and Postgres (`pg_notify`, `pg_replslot`,
+    /// `pg_twophase`, ...) refuses to start without them (`could not open
+    /// directory "pg_notify"`), which only surfaced on failover.
     #[serde(default)]
     pub dirs: BTreeMap<String, DirMeta>,
-    /// The volume root's own metadata. Not a `dirs` entry: the walk skips the
-    /// root itself (it's never "added" or "removed", only ever there), so its
-    /// permissions and ownership need their own home to be replicated at all.
+    /// The root's own metadata. Not a `dirs` entry since the walk skips the root.
     #[serde(default)]
     pub root: DirMeta,
 }
 
-/// The difference needed to turn `other` into `self`. Sorted since the
-/// backing map is a `BTreeMap`.
+/// The difference needed to turn `other` into `self`, sorted (`BTreeMap`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Diff {
-    /// Present in `self` only: needs sending.
+    /// Only in `self`: send.
     pub added: Vec<String>,
-    /// Present in both, content differs: needs sending.
+    /// In both, content differs: send.
     pub changed: Vec<String>,
-    /// Present in `other` only: needs deleting from `other`.
+    /// Only in `other`: delete.
     pub removed: Vec<String>,
-    /// Directories to create on `other`, parents first (lexicographic order
-    /// puts `a` before `a/b`).
+    /// Directories to create on `other`, parents first.
     pub added_dirs: Vec<String>,
-    /// Directories `other` has and `self` does not, children first so a tree
-    /// can be taken down from the leaves.
+    /// Directories only `other` has, children first.
     pub removed_dirs: Vec<String>,
-    /// Directories present on both sides whose mode, uid or gid differs.
+    /// Directories on both sides whose mode, uid or gid differs.
     pub changed_dirs: Vec<String>,
-    /// The root's own metadata, if it differs between `self` and `other`.
+    /// Root metadata, if it differs.
     pub root: Option<DirMeta>,
 }
 
@@ -135,10 +110,8 @@ impl Manifest {
         self.files.is_empty()
     }
 
-    /// A fingerprint of everything `diff` compares, so two no-hash manifests
-    /// have the same digest exactly when diffing them finds nothing to do.
-    /// Used to tell whether a copy has been written since it last agreed
-    /// with its peer.
+    /// Fingerprint of everything `diff` compares: equal digests of no-hash
+    /// manifests mean diffing finds nothing. Detects writes since last agreement.
     pub fn digest(&self) -> String {
         let mut hasher = blake3::Hasher::new();
         let mut put = |bytes: &[u8]| {
@@ -169,7 +142,6 @@ impl Manifest {
         hasher.finalize().to_hex().to_string()
     }
 
-    /// What's needed to bring `other` up to `self`.
     pub fn diff(&self, other: &Manifest) -> Diff {
         let mut diff = Diff::default();
         for (path, meta) in &self.files {
@@ -199,8 +171,7 @@ impl Manifest {
                 diff.removed_dirs.push(path.clone());
             }
         }
-        // Children before parents, so a removed tree comes down from the
-        // leaves and each `remove_dir` sees an empty directory.
+        // Children first so each `remove_dir` sees an empty directory.
         diff.removed_dirs.reverse();
         if self.root != other.root {
             diff.root = Some(self.root);
@@ -209,17 +180,11 @@ impl Manifest {
     }
 }
 
-/// Read size for [`hash_file`]. Big enough that the syscall overhead is
-/// irrelevant, small enough to be noise against the process's footprint.
+/// Read size for [`hash_file`].
 const HASH_CHUNK: usize = 1024 * 1024;
 
-/// blake3 a file's contents without holding the file in memory.
-///
-/// `std::fs::read` followed by `blake3::hash` needs the entire file resident,
-/// and these hashes are taken over arbitrary volume contents — a
-/// multi-gigabyte database relation, an ONNX model, a stray core dump. On a
-/// node with 8GB that is an OOM kill for a single file. Streaming keeps the
-/// cost at one `HASH_CHUNK` buffer regardless of size, for the same result.
+/// Streaming blake3 of a file. Reading whole files would need them resident:
+/// a multi-gigabyte database relation or core dump OOM-kills an 8GB node.
 pub fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
     use std::io::Read;
 
@@ -240,27 +205,19 @@ fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
     meta.mtime() * 1_000_000_000 + meta.mtime_nsec()
 }
 
-/// Converts a `FileMeta`-style nanosecond timestamp to a `filetime::FileTime`,
-/// shared by every writer (`transport`, `served::server`) that needs to stamp
-/// a file with a timestamp carried over the wire rather than "now".
+/// Converts a `FileMeta` nanosecond timestamp to a `FileTime`, for every writer
+/// that stamps a file with a wire-carried timestamp.
 pub fn nanos_to_filetime(nanos: i64) -> filetime::FileTime {
     filetime::FileTime::from_unix_time(nanos / 1_000_000_000, (nanos % 1_000_000_000) as u32)
 }
 
 /// `scan`, moved off the async runtime.
 ///
-/// Every caller of `scan` in this crate is inside an `async fn`, and a scan is
-/// not a quick syscall: it stats every file in the volume and, with
-/// `hash_content`, reads and blake3 hashes all of it. On a volume the size of
-/// a database that is seconds of solid syscalls and CPU on one thread.
-///
-/// Run inline, that blocks a tokio worker for the whole pass — and this
-/// process is also a raft node. openraft's heartbeat deadline is a fraction of
-/// `heartbeat_interval` (375ms at the default 500ms), so a sync pass is long
-/// enough to make the node miss heartbeats, be marked unreachable by peers
-/// that can reach it perfectly well, lose quorum and fence itself. The
-/// giveaway is `Unreachable node: deadline has elapsed` on a link that pings
-/// with 0% loss.
+/// A scan stats (and with `hash_content`, hashes) every file: seconds of
+/// blocking work. Inline, it stalls a tokio worker, and since this process is
+/// also a raft node it misses openraft heartbeats (deadline 375ms at the default
+/// 500ms interval), gets marked unreachable, loses quorum and fences itself.
+/// Giveaway: `Unreachable node: deadline has elapsed` with 0% packet loss.
 pub async fn scan_off_runtime(root: PathBuf, hash_content: bool) -> Result<Manifest> {
     let name = root.display().to_string();
     tokio::task::spawn_blocking(move || scan(&root, hash_content))
@@ -270,14 +227,11 @@ pub async fn scan_off_runtime(root: PathBuf, hash_content: bool) -> Result<Manif
         })?
 }
 
-/// Walk `root` into a manifest. Symlinks are recorded, not followed. When
-/// `hash_content` is set every regular file is read and blake3 hashed, which
-/// is only worth paying for during verification or rename detection.
+/// Walk `root` into a manifest. Symlinks are recorded, not followed. Hashing
+/// is only worth it for verification or rename detection. A file vanishing
+/// mid-walk is left out rather than failing the scan.
 ///
-/// Blocking. Inside an `async fn` use `scan_off_runtime`.
-///
-/// A file that disappears while the walk is under way is left out rather than
-/// failing the scan.
+/// Blocking: in async code use `scan_off_runtime`.
 /// Whether an io error just means the path no longer exists.
 pub fn vanished(err: Option<&std::io::Error>) -> bool {
     err.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
@@ -299,8 +253,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = match entry {
             Ok(entry) => entry,
-            // Gone between the directory listing and the stat: a running
-            // database deletes and recreates files like this all the time.
+            // Gone between listing and stat; running databases do this constantly.
             Err(e) if vanished(e.io_error()) => continue,
             Err(e) => {
                 return Err(DriveError::Io {
@@ -368,8 +321,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         if !file_type.is_file() {
-            // Sockets, fifos and friends: not something a bind-mounted volume
-            // should carry, and not something we know how to replicate.
+            // Sockets, fifos etc.: not replicable.
             continue;
         }
 

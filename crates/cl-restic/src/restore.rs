@@ -1,18 +1,13 @@
 //! Pure logic for the three restore granularities (whole drive, one volume,
-//! every volume a service uses): what `restic restore --include` filter each
-//! one needs. Orchestration - stopping containers, actually invoking
-//! `restic::ResticRepo::restore`, restarting - lives in `clouduler`'s own
-//! `backup_restore.rs`, since it needs docker and raft access this crate
-//! deliberately doesn't have.
+//! every volume a service uses): the `restic restore --include` filter each
+//! needs. Orchestration lives in `clouduler`'s `backup_restore.rs`, which has the
+//! docker and raft access this crate lacks.
 
-/// The `--include` filter for restoring one volume out of a whole-drive
-/// snapshot, relative to the snapshot's source directory (see
-/// `restic::ResticRepo::restore` for why it is relative). `None` means "no
-/// filter": a whole-drive restore, or the drive-root volume `.` (a
-/// whole-drive mount), which *is* the whole drive.
+/// The `--include` filter for restoring one volume out of a whole-drive snapshot,
+/// relative to the snapshot's source directory (see `restic::ResticRepo::restore`).
+/// `None` means no filter: a whole-drive restore, or the drive-root volume `.`.
 ///
-/// restic include patterns are globs, so the glob metacharacters in a volume
-/// name are backslash-escaped to match literally.
+/// Include patterns are globs, so metacharacters in the name are escaped.
 pub fn include_path_for_volume(volume: &str) -> Option<String> {
     if volume == "." {
         return None;
@@ -28,11 +23,9 @@ pub fn include_path_for_volume(volume: &str) -> Option<String> {
     Some(pattern)
 }
 
-/// A snapshot argument that is safe to hand to restic: the literal `latest`
-/// or a hex id (restic accepts any unambiguous prefix, 4+ chars in practice).
-/// Rejects anything else - in particular a leading dash (an option) or a
-/// `:` (restic's `snapshot:subfolder` syntax, which would let a caller
-/// restore from a path of their choosing).
+/// A snapshot argument that is safe to hand to restic: `latest` or a hex id
+/// (any unambiguous prefix). Rejects a leading dash (an option) and `:` (the
+/// `snapshot:subfolder` syntax, which would restore from an arbitrary path).
 pub fn validate_snapshot_id(id: &str) -> Result<(), String> {
     if id == "latest" {
         return Ok(());

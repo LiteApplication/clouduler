@@ -1,21 +1,16 @@
 //! The sync scheduler: keeps replicas of every volume this node is primary
 //! for moving towards the other nodes that implement the same drive.
 //!
-//! One task runs per volume. Each tick it checks quorum, checks whether the
-//! volume's interval has elapsed (with jitter so a fleet of volumes on the
-//! same interval doesn't all fire together), and if so runs one engine sync
-//! per replica, reporting the generation reached back through raft. A guard
-//! keyed by volume id stops two syncs of the same volume overlapping if a
-//! slow sync runs past its own next tick.
+//! One task per volume. Each tick it checks quorum and whether the volume's
+//! interval (with jitter) has elapsed, then runs one engine sync per replica,
+//! reporting the generation reached through raft. A per-volume guard stops a
+//! slow sync overlapping its next tick.
 //!
-//! A served drive's volumes go through the same loop, just with a different
-//! notion of "am I the source" and "who are the targets": the source is
-//! whichever candidate `DriveRegistry::active_server` currently names, not
-//! `VolumeState.primary` (which, for a served drive, is the node an
-//! instance happens to run on, not the node holding the data), and the
-//! targets are the drive's other `served_by` candidates, not every node
-//! that implements the drive, since a plain mounting node has no local copy
-//! to sync into.
+//! A served drive's volumes use the same loop with a different source and
+//! targets: the source is `DriveRegistry::active_server`, not
+//! `VolumeState.primary` (the node an instance runs on, not the data holder),
+//! and the targets are the other `served_by` candidates, since a plain
+//! mounting node has no local copy.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -31,23 +26,19 @@ use cl_raft::{ClusterNode, QuorumWatch, Request, VolumeId};
 use crate::delta::{BoxFuture, SyncEngine};
 use crate::registry::DriveRegistry;
 
-/// The effective sync interval for a volume: its own override if the caller
-/// has one, otherwise the drive's default.
+/// The volume's own interval override, else the drive default.
 pub fn resolve_interval(drive_default: Duration, volume_override: Option<Duration>) -> Duration {
     volume_override.unwrap_or(drive_default)
 }
 
-/// Spread ticks across the interval instead of letting every volume line up
-/// on the same wall clock second. `spread` in `[0, 1)` picks where in the
-/// interval this volume's tick lands; callers pass a random value at
-/// runtime and a fixed one in tests.
+/// Spread ticks across the interval so volumes don't line up. `spread` in
+/// `[0, 1)` picks the tick position (random at runtime, fixed in tests).
 pub fn jitter(interval: Duration, spread: f64) -> Duration {
     let spread = spread.clamp(0.0, 0.999);
     Duration::from_secs_f64(interval.as_secs_f64() * spread)
 }
 
-/// Tracks which volumes currently have a sync in flight, so the scheduler
-/// never starts a second one for the same volume while the first is running.
+/// Tracks volumes with a sync in flight, so none is started twice.
 #[derive(Default)]
 pub struct InFlightGuard {
     running: Mutex<BTreeSet<VolumeId>>,
@@ -58,8 +49,7 @@ impl InFlightGuard {
         Self::default()
     }
 
-    /// `true` if this call claimed the volume; `false` if it was already
-    /// running and the caller should skip this tick.
+    /// `true` if this call claimed the volume; `false` if already running (skip the tick).
     pub async fn try_start(&self, volume: &VolumeId) -> bool {
         self.running.lock().await.insert(volume.clone())
     }
@@ -73,23 +63,20 @@ impl InFlightGuard {
     }
 }
 
-/// One peer address to replicate a volume to.
 #[derive(Debug, Clone)]
 pub struct ReplicaTarget {
     pub node: String,
     pub addr: std::net::SocketAddr,
 }
 
-/// Supplies the per-volume interval; the daemon derives this from the
-/// cluster config's drive defaults and each stack's `x-clouduler.volume_sync`
-/// overrides, none of which this crate needs to know how to parse. `state` is
-/// the replicated state of this pass, which holds the stacks.
+/// Supplies the per-volume interval; the daemon derives it from drive defaults
+/// and each stack's `x-clouduler.volume_sync`. `state` is this pass's replicated
+/// state.
 pub trait IntervalSource: Send + Sync {
     fn interval_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Duration;
 
-    /// How important the volume's drive is: the best (lowest) `priority` of
-    /// any stack that uses the drive. When several volumes are due in the same
-    /// pass they sync one after the other in ascending order of this value.
+    /// Best (lowest) `priority` of any stack using the drive. Volumes due in the
+    /// same pass sync in ascending order of this.
     fn priority_for(&self, _volume: &VolumeId, _state: &cl_raft::ClusterState) -> i32 {
         0
     }
@@ -100,29 +87,26 @@ pub trait IntervalSource: Send + Sync {
     }
 }
 
-/// Which side of a replication a hook runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncPhase {
     Before,
     After,
 }
 
-/// What a hook did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookOutcome {
-    /// Nothing is configured for this volume and phase.
+    /// Nothing configured for this volume and phase.
     None,
     Ok,
     Failed(String),
 }
 
-/// Commands to run around a volume's replication, supplied by the daemon
-/// (which knows the stacks and docker; this crate knows neither).
+/// Commands run around a volume's replication, supplied by the daemon (which
+/// knows the stacks and docker).
 pub trait SyncHooks: Send + Sync {
     fn run<'a>(&'a self, volume: &'a VolumeId, phase: SyncPhase) -> BoxFuture<'a, HookOutcome>;
 }
 
-/// Runs the periodic sync loop for one node.
 pub struct SyncScheduler<E: SyncEngine> {
     node: Arc<ClusterNode>,
     registry: Arc<DriveRegistry>,
@@ -130,11 +114,10 @@ pub struct SyncScheduler<E: SyncEngine> {
     quorum: QuorumWatch,
     hooks: Option<Arc<dyn SyncHooks>>,
     guard: Arc<InFlightGuard>,
-    /// Volumes found without a file on the previous pass. One empty reading
-    /// is not enough to raise the alarm: a file can be mid-replace.
+    /// Volumes found without a file on the previous pass; one empty reading is
+    /// not enough (a file can be mid-replace).
     empty_seen: parking_lot::Mutex<BTreeSet<VolumeId>>,
-    /// How often to check whether any volume is due. Independent of any
-    /// individual volume's own interval.
+    /// How often to check whether any volume is due.
     tick: Duration,
 }
 
@@ -153,7 +136,6 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Runs `hooks` before and after each replication of a volume.
     pub fn with_hooks(mut self, hooks: Arc<dyn SyncHooks>) -> Self {
         self.hooks = Some(hooks);
         self
@@ -170,14 +152,12 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         outcome
     }
 
-    /// Run forever, syncing every volume this node is primary for once its
-    /// interval elapses. Intended to be spawned as a background task.
+    /// Run forever; spawn as a background task.
     pub async fn run(&self, intervals: &dyn IntervalSource) {
         let mut next_due: std::collections::BTreeMap<VolumeId, Instant> =
             std::collections::BTreeMap::new();
         let mut ticker = tokio::time::interval(self.tick);
-        // Volumes last seen frozen: when one unfreezes it is pushed at once,
-        // not at the end of its (possibly long) interval.
+        // Volumes last seen frozen: pushed at once on unfreeze.
         let mut was_frozen: BTreeSet<VolumeId> = BTreeSet::new();
 
         loop {
@@ -193,15 +173,13 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
             self.remove_deleted_volumes(&state.volume_removals).await;
 
-            // Everything due this pass, synced one volume at a time, most
-            // important stack first (ties by volume id).
+            // Everything due, most important stack first (ties by volume id).
             let mut due: Vec<(i32, VolumeId)> = Vec::new();
             for (id, volume) in &state.volumes {
                 if !self.registry.implements(&id.drive) {
                     continue;
                 }
-                // Frozen for hand edits: nothing may sync out of, or over,
-                // this volume until it is unfrozen.
+                // Frozen for hand edits: nothing syncs out of or over it.
                 if volume.frozen.is_some() {
                     was_frozen.insert(id.clone());
                     continue;
@@ -231,9 +209,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             }
             due.sort();
 
-            // The most important due volume goes first together with up to
-            // `max_parallel_syncs - 1` more due volumes of its drive; the next
-            // batch starts once that one has finished.
+            // Most important due volume plus up to `max_parallel_syncs - 1` more of its
+            // drive; the next batch starts when this one finishes.
             while !due.is_empty() {
                 let width = intervals.parallelism_for(&due[0].1.drive).max(1);
                 let batch = take_batch(&mut due, width);
@@ -250,16 +227,14 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Claims and replicates one due volume. `false` when a sync of it was
-    /// already in flight and nothing was done.
+    /// Claims and replicates one due volume; `false` if already in flight.
     async fn sync_due(&self, id: &VolumeId, state: &cl_raft::ClusterState) -> bool {
         let Some(volume) = state.volumes.get(id) else {
             return false;
         };
         let is_served = self.registry.is_served(&id.drive);
         if !self.guard.try_start(id).await {
-            // Previous run is still going; wait for the next tick rather
-            // than piling up a second one.
+            // Previous run still going; wait for the next tick.
             return false;
         }
 
@@ -301,8 +276,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         true
     }
 
-    /// Removes this node's copy of every volume deleted on purpose, then says
-    /// so. The cluster has already checked that no stack uses the volume.
+    /// Removes this node's copy of every deliberately deleted volume (the cluster
+    /// has checked no stack uses it), then says so.
     async fn remove_deleted_volumes(
         &self,
         removals: &std::collections::BTreeMap<VolumeId, BTreeSet<String>>,
@@ -342,10 +317,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Raises `looks_empty` once this volume has had no files on two passes
-    /// running, and lowers it as soon as one shows up. Nothing is done about
-    /// an empty volume here: whether it should be deleted or restored is the
-    /// operator's call.
+    /// Raises `looks_empty` after two empty passes in a row, lowers it when a file
+    /// shows up. Delete-vs-restore is the operator's call.
     async fn check_empty(&self, id: &VolumeId, recorded: bool) {
         let Ok(src) = self.registry.volume_path(id) else {
             return;
@@ -381,9 +354,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Surfaces a refused push as a cluster problem. Skipped when the same
-    /// refusal is already recorded, so a volume refused every pass does not
-    /// write to the raft log every pass.
+    /// Surfaces a refused push as a cluster problem, skipping repeats of the same
+    /// refusal to avoid writing raft every pass.
     async fn record_refusal(&self, id: &VolumeId, to: &str, reason: String) {
         let current = self
             .node
@@ -418,8 +390,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Stops a served drive's replication between two copies that were both
-    /// written, and records the conflict for an operator.
+    /// Stops replication between two copies that were both written; records the
+    /// conflict for an operator.
     async fn record_served_conflict(&self, id: &VolumeId, other: &str, reason: String) {
         warn!(%id, %other, %reason, "served drive copies diverged, keeping both");
         let _ = self
@@ -457,9 +429,9 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// `served` is `Some` for a served drive's volume, carrying the drive's
-    /// recorded authority: every target is then asked whether its copy was
-    /// written since it last agreed, and one that was is never pushed over.
+    /// `served` is `Some` for a served drive's volume with its recorded authority:
+    /// every target is asked whether its copy was written since it last agreed,
+    /// and one that was is never pushed over.
     async fn run_one(
         &self,
         id: VolumeId,
@@ -476,16 +448,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             }
         };
 
-        // A failed `before` skips this replication, but `after` still runs:
-        // the `before` may have paused or locked something halfway.
+        // A failed `before` skips replication but `after` still runs: `before` may
+        // have paused or locked something halfway.
         let skip = matches!(
             self.hook(&id, SyncPhase::Before).await,
             HookOutcome::Failed(_)
         );
 
         for target in targets.into_iter().filter(|_| !skip) {
-            // A freeze can land while earlier targets of this run were
-            // syncing; stop pushing the moment it does.
+            // Stop pushing the moment a freeze lands mid-run.
             if self
                 .node
                 .state()
@@ -600,8 +571,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 }
 
 /// Takes the next batch off the sorted `due` list: its first volume and up to
-/// `width - 1` further volumes of the same drive, keeping the order of what is
-/// left.
+/// `width - 1` more of the same drive, preserving the order of the rest.
 fn take_batch(due: &mut Vec<(i32, VolumeId)>, width: usize) -> Vec<VolumeId> {
     let Some(drive) = due.first().map(|(_, id)| id.drive.clone()) else {
         return Vec::new();
@@ -619,8 +589,7 @@ fn take_batch(due: &mut Vec<(i32, VolumeId)>, width: usize) -> Vec<VolumeId> {
     batch
 }
 
-/// A static map, for callers that have already resolved every volume's
-/// interval (the common case: the daemon does this once per stack deploy).
+/// A static map for callers that already resolved every interval.
 pub struct StaticIntervals {
     default: Duration,
     overrides: std::collections::BTreeMap<VolumeId, Duration>,

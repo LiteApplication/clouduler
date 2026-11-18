@@ -10,9 +10,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Internal config object holding [`AlertSettings`] as JSON.
 pub const SETTINGS_CONFIG: &str = "_clouduler_alerts";
-/// Sealed SMTP password, when the server wants one.
 pub const SMTP_PASSWORD_SECRET: &str = "_clouduler_alert_smtp_password";
 const SECRET_PREFIX: &str = "_clouduler_alert_";
 
@@ -111,7 +109,6 @@ impl Default for AlertSettings {
     }
 }
 
-/// One place alerts are sent to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Destination {
     /// Unique, `[a-z0-9-]`, shown in lists and at the top of each message.
@@ -270,7 +267,6 @@ pub struct EventOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
-    /// Not recorded, not sent.
     Muted,
     /// Recorded in-app, never sent anywhere.
     InApp,

@@ -1,6 +1,5 @@
-//! A thin wrapper around the `restic` binary: build the environment/args,
-//! run it, and parse just enough of its `--json` output for what the runner
-//! needs (a snapshot id and byte count, or the parsed error).
+//! A thin wrapper around the `restic` binary: build env/args, run it, and parse
+//! just enough `--json` output (snapshot id, byte count, or the error).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
@@ -12,26 +11,20 @@ use serde::{Deserialize, Serialize};
 use crate::destination::ResolvedRepo;
 use crate::error::{ResticError, Result};
 
-/// One restic repository, ready to invoke commands against.
 pub struct ResticRepo {
     pub repository: String,
     /// Extra args every invocation gets, e.g. an `Ssh` destination's
     /// non-default-port `sftp.command` (see `destination::ssh_command_args`).
     pub extra_args: Vec<String>,
-    /// Env every invocation gets: `RESTIC_PASSWORD_FILE` (always) plus
-    /// whatever `ResolvedRepo::extra_env` and backend credentials the caller
-    /// resolved. Never holds the password itself - only the path to the temp
-    /// file the caller wrote it to, so this struct's own `Debug` can't leak
-    /// it.
+    /// Env every invocation gets: `RESTIC_PASSWORD_FILE` plus resolved extra env
+    /// and backend credentials. Never the password itself, only its file path, so
+    /// `Debug` cannot leak it.
     env: HashMap<String, String>,
 }
 
 impl ResticRepo {
-    /// `password_file` must already exist and hold the repo password -
-    /// callers write it from a sealed secret and clean it up afterward (see
-    /// `cl-secret` and the crate doc comment on why this is a file rather
-    /// than an env var: restic itself needs one or the other, and a file is
-    /// the one that doesn't show up in a process listing).
+    /// `password_file` must already exist and hold the repo password. A file
+    /// rather than an env var because it does not show up in a process listing.
     pub fn new(
         resolved: ResolvedRepo,
         extra_args: Vec<String>,
@@ -84,11 +77,10 @@ impl ResticRepo {
         cmd
     }
 
-    /// Makes sure the repository exists, creating it only when it really is
-    /// absent. `cat config` is the cheapest read restic offers, but it also
-    /// fails for a wrong password, a permissions or I/O problem, so its
-    /// failure alone must not trigger `init`: on an existing repo that only
-    /// reports "config file already exists" and hides the real cause.
+    /// Makes sure the repository exists, creating it only when really absent.
+    /// `cat config` also fails for a wrong password or I/O problem, so its failure
+    /// alone must not trigger `init`: on an existing repo that only reports
+    /// "config file already exists" and hides the real cause.
     pub fn ensure_initialized(&self) -> Result<()> {
         let output = self
             .command(&["cat", "config"])
@@ -117,10 +109,8 @@ impl ResticRepo {
         run(self.command(&["init"]))
     }
 
-    /// Runs `restic backup`, calling `on_progress` with restic's own
-    /// `percent_done` (0.0-1.0) as each `--json` status line streams in, so a
-    /// caller can surface live progress instead of only learning the outcome
-    /// once the whole (possibly very long) run finishes.
+    /// Runs `restic backup`, calling `on_progress` with restic's `percent_done`
+    /// (0.0-1.0) as each `--json` status line streams in.
     pub fn backup(
         &self,
         paths: &[&Path],
@@ -128,13 +118,11 @@ impl ResticRepo {
         mut on_progress: impl FnMut(f64),
     ) -> Result<BackupOutcome> {
         let mut args: Vec<String> = vec!["backup".into(), "--json".into()];
-        // Larger packs drastically cut index/metadata overhead for big
-        // datasets (700 GB+).  Default 4 MiB means millions of tiny packs;
-        // 32 MiB brings that to a manageable tens-of-thousands.
+        // Larger packs cut index overhead for big datasets (700 GB+); the 4 MiB
+        // default means millions of tiny packs.
         args.push("--pack-size".into());
         args.push("32".into());
-        // More disk readers in parallel: the default of 2 leaves NVMe /
-        // fast-USB storage underutilised during the scan+read phase.
+        // More parallel readers: the default of 2 underuses NVMe/fast-USB.
         args.push("--read-concurrency".into());
         args.push("4".into());
         for tag in tags {
@@ -196,9 +184,7 @@ impl ResticRepo {
         }
     }
 
-    /// No-op when `retention_args` is empty - see `retention::forget_args`'s
-    /// doc comment on why an unset policy means "keep forever", not "prune
-    /// with no policy" (which restic itself refuses to do anyway).
+    /// No-op when `retention_args` is empty (see `retention::forget_args`).
     pub fn forget(&self, retention_args: &[String]) -> Result<()> {
         if retention_args.is_empty() {
             return Ok(());
@@ -214,22 +200,18 @@ impl ResticRepo {
         run(self.command(&arg_refs))
     }
 
-    /// Restores `snapshot` into `target_dir`, treating `source_dir` - the
-    /// absolute path the snapshot was taken of - as the root of what is
-    /// restored.
+    /// Restores `snapshot` into `target_dir`, treating `source_dir` (the absolute
+    /// path the snapshot was taken of) as the root of what is restored.
     ///
-    /// restic stores the absolute paths it backed up and, by default,
-    /// recreates them under `--target`: restoring the snapshot of
-    /// `/srv/drives/fast` into `/srv/drives/fast` would land everything in
-    /// `/srv/drives/fast/srv/drives/fast`, and an `--include /vol` filter
-    /// would match nothing at all. The `snapshot:subfolder` form roots the
-    /// restore at `source_dir` instead, so its contents (`<volume>/...`) land
-    /// directly in `target_dir` and `include` is relative to it.
+    /// restic stores absolute paths and recreates them under `--target`, so
+    /// restoring `/srv/drives/fast` into itself would land in
+    /// `/srv/drives/fast/srv/drives/fast` and an `--include /vol` would match
+    /// nothing. The `snapshot:subfolder` form roots the restore at `source_dir`,
+    /// so `<volume>/...` lands directly in `target_dir`.
     ///
-    /// `include` scopes the restore to one path under `source_dir` (a volume
-    /// subdirectory, with a leading `/`); `None` restores everything, for a
-    /// whole-drive restore. Files in `target_dir` that the snapshot does not
-    /// contain are left alone.
+    /// `include` scopes the restore to one path under `source_dir` (leading `/`);
+    /// `None` restores everything. Files in `target_dir` absent from the snapshot
+    /// are left alone.
     pub fn restore(
         &self,
         snapshot: &str,
@@ -256,8 +238,7 @@ impl ResticRepo {
     }
 }
 
-/// The `restic restore` argument vector for `ResticRepo::restore`, separated
-/// out so its exact shape is unit-testable without a restic binary.
+/// The `restic restore` argument vector, separate so it is unit-testable.
 pub fn restore_args(
     snapshot: &str,
     source_dir: &str,
@@ -327,10 +308,8 @@ struct BackupJsonLine {
     total_bytes_processed: Option<u64>,
 }
 
-/// One line of `restic backup --json` output, categorized for `backup`'s
-/// streaming reader: a `"status"` line carries live progress, a `"summary"`
-/// line (always the last one restic prints) carries the final outcome, and
-/// everything else (`"verbose_status"`, `"error"`, ...) is ignored here.
+/// One line of `restic backup --json` output: `"status"` carries progress,
+/// `"summary"` (always last) the outcome, anything else is ignored.
 enum BackupLine {
     Status { percent_done: Option<f64> },
     Summary(Result<BackupOutcome>),
@@ -361,8 +340,8 @@ pub struct SnapshotInfo {
     pub time: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// The absolute paths the snapshot was taken of - what `restore` needs
-    /// as its subfolder root. Not part of the api's snapshot listing.
+    /// The absolute paths the snapshot was taken of; `restore` needs them as its
+    /// subfolder root. Not part of the api's snapshot listing.
     #[serde(default, skip_serializing)]
     pub paths: Vec<String>,
 }

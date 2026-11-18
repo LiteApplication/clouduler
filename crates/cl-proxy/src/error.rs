@@ -1,5 +1,3 @@
-//! Error type for the whole crate.
-
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, ProxyError>;

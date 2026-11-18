@@ -265,13 +265,13 @@ impl World {
     }
 
     fn supervisor(&self) -> Arc<ServedSupervisor<DeltaEngine>> {
-        ServedSupervisor::new(
+        ServedSupervisor::with_drain(
             self.raft.clone(),
             self.n2.registry.clone(),
             self.engine.clone(),
             self.host.clone(),
+            Duration::ZERO,
         )
-        .with_drain(Duration::ZERO)
     }
 
     /// The history every scenario starts from: n1 serves and has pushed its

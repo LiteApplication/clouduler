@@ -4,7 +4,6 @@
 
 use hyper::Method;
 
-/// A request the socket knows how to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Ping,
@@ -18,16 +17,12 @@ pub enum Route {
     PullImage(String),
 }
 
-/// Why a request was not routed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// Not an endpoint this socket serves at all.
     NotPermitted,
-    /// An endpoint it serves, asked for with the wrong verb or missing input.
     BadRequest(&'static str),
 }
 
-/// Drop the engine's `/v1.NN` version prefix.
 fn strip_version(path: &str) -> &str {
     let Some(rest) = path.strip_prefix("/v") else {
         return path;

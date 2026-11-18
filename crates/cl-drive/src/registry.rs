@@ -1,7 +1,6 @@
 //! Which drives this node implements, and safe path resolution within them.
 //!
-//! A volume name comes from a stack file, so it must never be trusted enough
-//! to let a mount escape its drive root. Validation is purely component-wise
+//! Volume names come from stack files, so validation is purely component-wise
 //! (reject `..`, empty and absolute components) rather than canonicalizing,
 //! since the target path may not exist yet.
 
@@ -14,20 +13,17 @@ use cl_raft::VolumeId;
 
 use crate::error::{DriveError, Result};
 
-/// Whether this node serves a drive's data, mounts it from whoever does, or
-/// keeps its own replica of it.
+/// How this node relates to a drive: serves it, mounts it, or keeps a replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveRole {
     /// A replicated drive: this node's copy is kept current by delta sync.
     Replicate,
-    /// A served drive, and this is the currently active server: the node
-    /// holding the drive's authoritative copy.
+    /// Served drive, and this node is the active server (holds the authoritative copy).
     Serve,
-    /// A served drive, and this node is one of the other candidates in
-    /// `served_by`: it keeps a synced backup copy but isn't answering
-    /// requests right now, and takes over if the active server drops out.
+    /// Served drive, and this node is another `served_by` candidate: keeps a synced
+    /// backup and takes over if the active server drops out.
     Standby,
-    /// A served drive, held by another node; this node mounts it over FUSE.
+    /// Served drive held by another node; this node mounts it over NFS.
     Mount,
 }
 
@@ -35,38 +31,27 @@ pub enum DriveRole {
 pub struct DriveRegistry {
     node: String,
     drives: BTreeMap<String, PathBuf>,
-    /// Candidate serving nodes for each drive in `served` mode, in priority
-    /// order. A drive absent here is replicated. Present so `role` can tell
-    /// serving from mounting without every caller having to carry the
-    /// cluster config around.
+    /// Candidate serving nodes per served drive, in priority order. A drive
+    /// absent here is replicated.
     served_by: BTreeMap<String, Vec<String>>,
-    /// The `NodeLocal` backup destination paths that live on this node: the
-    /// only locations a peer may ask this node to stage a volume next to.
-    /// Behind a lock because the destinations live in raft state, not in the
-    /// config this registry is built from, so the daemon refreshes them as
-    /// the cluster changes. Empty until it does, which refuses every staging
-    /// push rather than accepting an unvetted one.
+    /// `NodeLocal` backup destination paths on this node: the only places a peer
+    /// may ask it to stage a volume. Behind a lock because they live in raft
+    /// state and the daemon refreshes them; empty until then, which refuses every
+    /// staging push.
     staging_destinations: RwLock<Vec<PathBuf>>,
-    /// Where this node keeps its per-volume sync records, see
-    /// `record_synced`. `None` records nothing, which makes every copy read
-    /// as having no sync history.
+    /// Per-volume sync records (see `record_synced`). `None` records nothing.
     state_dir: Option<PathBuf>,
 }
 
 impl DriveRegistry {
     /// Build from the cluster config and this node's name.
     ///
-    /// A served drive is placeable on any node, not just the ones that
-    /// declare it (`cl_sched::place::rejection`'s carve-out for `served_drives`,
-    /// and `ClusterState::check_placement`'s matching one) - a node with no
-    /// static entry mounts the drive over the network instead of holding a
-    /// copy. Without a synthetic entry here, that node's registry disagreed
-    /// with the placement checks that had already let an instance land on it:
-    /// `implements`/`root` said `NotImplemented` for a drive placement had
-    /// just approved, which is exactly what turned a legitimate served-drive
-    /// migration into a `does not implement drive` failure. The synthetic
-    /// path mirrors `cl_sched::run::Scheduler::drive_roots`'s own convention
-    /// for the same case (`data_dir/volume-mounts/<name>`) so the two agree.
+    /// A served drive is placeable on any node (see
+    /// `cl_sched::place::rejection` and `ClusterState::check_placement`), so a
+    /// node with no static entry gets a synthetic one. Without it, `implements`/
+    /// `root` said `NotImplemented` for a drive placement had approved, failing
+    /// served-drive migrations. The path mirrors
+    /// `cl_sched::run::Scheduler::drive_roots` (`data_dir/volume-mounts/<name>`).
     pub fn new(config: &ClusterConfig, node: &str) -> Result<Self> {
         let entry = config
             .node(node)
@@ -93,9 +78,7 @@ impl DriveRegistry {
         })
     }
 
-    /// Build directly from a name to path map, for tests and standalone tools.
-    /// Every drive is treated as replicated; use `with_served_by` to mark
-    /// some as served.
+    /// Build from a name to path map, for tests and tools. All drives replicated.
     pub fn from_drives(node: impl Into<String>, drives: BTreeMap<String, PathBuf>) -> Self {
         Self {
             node: node.into(),
@@ -106,7 +89,7 @@ impl DriveRegistry {
         }
     }
 
-    /// Keep sync records under `dir`. For tests and standalone tools.
+    /// Keep sync records under `dir`. For tests and tools.
     pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
         self.state_dir = Some(dir);
         self
@@ -118,10 +101,9 @@ impl DriveRegistry {
         Some(dir.join(format!("{}-{}", id.drive, &key.as_str()[..16])))
     }
 
-    /// Remembers that this node's copy of a served volume held exactly the
-    /// tree `digest` (see `Manifest::digest`) when it last agreed with its
-    /// peer: after pushing it, or after receiving a push. A copy whose tree
-    /// no longer matches has been written since.
+    /// Remember that this copy held exactly the tree `digest` (see
+    /// `Manifest::digest`) when it last agreed with its peer; a differing tree
+    /// has been written since.
     pub fn record_synced(&self, id: &VolumeId, digest: &str) {
         let Some(path) = self.record_path(id) else {
             return;
@@ -135,7 +117,6 @@ impl DriveRegistry {
         }
     }
 
-    /// The digest `record_synced` last stored for a volume, if any.
     pub fn recorded_sync(&self, id: &VolumeId) -> Option<String> {
         std::fs::read_to_string(self.record_path(id)?)
             .ok()
@@ -143,32 +124,26 @@ impl DriveRegistry {
             .filter(|s| !s.is_empty())
     }
 
-    /// Mark drives as served, mapping each to its candidate serving nodes in
-    /// priority order. For tests and standalone tools that build a registry
-    /// by hand.
+    /// Mark drives as served, with candidate serving nodes in priority order.
+    /// For tests and tools.
     pub fn with_served_by(mut self, served_by: BTreeMap<String, Vec<String>>) -> Self {
         self.served_by = served_by;
         self
     }
 
-    /// Replace the set of backup destination paths this node may stage
-    /// volumes next to. See `check_staging_destination`.
+    /// Replace the allowed backup staging destinations.
     pub fn set_staging_destinations(&self, paths: Vec<PathBuf>) {
         *self
             .staging_destinations
             .write() = paths;
     }
 
-    /// Accept a peer-supplied staging path only if it is exactly a backup
-    /// destination configured for this node. The path arrives in the `Hello`
-    /// frame and is used to pick a directory to create and write into, so an
-    /// unchecked one lets any peer that can reach the port write under an
-    /// arbitrary absolute location. Anything but a normalized absolute path
-    /// (no `.`/`..`) is refused before the allowlist is even consulted, so a
-    /// lexically different spelling can never slip past the comparison.
+    /// Accept a peer-supplied staging path only if it is exactly a configured
+    /// backup destination. The path arrives in `Hello` and picks a directory to
+    /// write into, so an unchecked one would let any peer write anywhere.
+    /// Non-normalized or relative paths are refused before the allowlist check.
     pub fn check_staging_destination(&self, destination_path: &Path) -> Result<()> {
-        // Checked on the raw string: `Path::components` silently drops an
-        // interior `.` and a trailing slash, which would hide them.
+        // Raw string check: `Path::components` drops interior `.` and trailing slashes.
         let raw = destination_path.to_string_lossy();
         let normalized = destination_path.is_absolute()
             && !raw.contains('\0')
@@ -196,16 +171,14 @@ impl DriveRegistry {
         }
     }
 
-    /// The candidate serving nodes for a served drive, in priority order. An
-    /// empty slice for a drive this registry doesn't know as served.
+    /// Candidate serving nodes in priority order; empty for non-served drives.
     pub fn served_candidates(&self, drive: &str) -> &[String] {
         self.served_by.get(drive).map_or(&[], Vec::as_slice)
     }
 
-    /// The node currently serving a drive: the holder recorded in raft while
-    /// it is reachable, otherwise the first reachable candidate (see
-    /// `cl_raft::served::choose_active_server`). `None` if no candidate is
-    /// reachable, a handover is in progress, or this isn't a served drive.
+    /// The active server: the raft-recorded holder while reachable, else the first
+    /// reachable candidate (`cl_raft::served::choose_active_server`). `None` if
+    /// none reachable, a handover is in progress, or the drive isn't served.
     pub fn active_server<'a>(
         &'a self,
         drive: &str,
@@ -218,10 +191,8 @@ impl DriveRegistry {
         )
     }
 
-    /// Whether this node serves, mounts, backs up, or replicates a drive.
-    /// Unknown drives (this node doesn't implement it) come back as
-    /// `Replicate`, same as the default for an ordinary drive; callers that
-    /// care check `implements` first.
+    /// Serve, mount, back up, or replicate. Unknown drives come back as
+    /// `Replicate`; check `implements` first.
     pub fn role(&self, drive: &str, state: &cl_raft::ClusterState) -> DriveRole {
         let candidates = self.served_candidates(drive);
         if candidates.is_empty() {
@@ -236,8 +207,7 @@ impl DriveRegistry {
         }
     }
 
-    /// Whether a drive is served (either by this node or another), as
-    /// opposed to replicated.
+    /// Whether the drive is served (by anyone) rather than replicated.
     pub fn is_served(&self, drive: &str) -> bool {
         self.served_by.contains_key(drive)
     }
@@ -256,7 +226,6 @@ impl DriveRegistry {
             .map(|(name, path)| (name.as_str(), path.as_path()))
     }
 
-    /// Local directory backing `drive` on this node.
     pub fn root(&self, drive: &str) -> Result<&Path> {
         self.drives
             .get(drive)
@@ -267,13 +236,11 @@ impl DriveRegistry {
             })
     }
 
-    /// The local path for a volume, without touching the filesystem.
     pub fn volume_path(&self, id: &VolumeId) -> Result<PathBuf> {
         let root = self.root(&id.drive)?;
         resolve_relative(root, &id.volume)
     }
 
-    /// The local path for a volume, creating its directory if missing.
     pub fn ensure_volume(&self, id: &VolumeId) -> Result<PathBuf> {
         let path = self.volume_path(id)?;
         std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
@@ -283,14 +250,10 @@ impl DriveRegistry {
         Ok(path)
     }
 
-    /// Where a `NodeLocal` backup destination stages `drive` when this node
-    /// does not implement it: a hidden directory next to the destination's
-    /// own folder (`destination_path`, that destination's configured path),
-    /// not under this node's data dir - so the staged copy, which can be the
-    /// whole drive, lands on whatever volume the destination itself lives
-    /// on rather than filling up the root filesystem. Always available,
-    /// unlike `root`: staging a drive this node doesn't hold is exactly the
-    /// case this path exists for.
+    /// Where a `NodeLocal` backup destination stages `drive` when this node does
+    /// not implement it: a hidden directory next to the destination's folder
+    /// (`destination_path`), so a whole-drive copy lands on the destination's
+    /// volume rather than filling the root filesystem.
     pub fn staging_root_for(&self, destination_path: &Path, drive: &str) -> PathBuf {
         let hidden = destination_path
             .file_name()
@@ -299,9 +262,8 @@ impl DriveRegistry {
         destination_path.with_file_name(hidden).join(drive)
     }
 
-    /// `staging_root_for`, created if missing - the destination side of a
-    /// `NodeLocal`-elsewhere backup needs somewhere for restic to point at
-    /// even before any volume has landed there yet.
+    /// `staging_root_for`, created if missing (restic needs a target before any
+    /// volume lands).
     pub fn ensure_staging_root(&self, destination_path: &Path, drive: &str) -> Result<PathBuf> {
         let path = self.staging_root_for(destination_path, drive);
         std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
@@ -311,11 +273,8 @@ impl DriveRegistry {
         Ok(path)
     }
 
-    /// The staging path for one volume of a drive this node does not
-    /// implement, creating its directory if missing - the receive side of a
-    /// `NodeLocal`-elsewhere backup push (see `transport::receive`'s
-    /// `staging` handling). Mirrors `ensure_volume`, rooted next to the
-    /// destination instead of under `drives`.
+    /// Staging path for one volume of a drive this node does not implement,
+    /// created if missing (see `transport::receive`'s `staging` handling).
     pub fn ensure_staging_volume(&self, destination_path: &Path, id: &VolumeId) -> Result<PathBuf> {
         self.check_staging_destination(destination_path)?;
         let root = self.staging_root_for(destination_path, &id.drive);
@@ -328,12 +287,9 @@ impl DriveRegistry {
     }
 }
 
-/// Join `rel` onto `root`, rejecting anything that could climb out: empty
-/// components, `.`/`..`, and leading slashes (which show up as an empty
-/// first component once split). `rel == "."` is the one exception: it names
-/// the drive's own root directory (a whole-drive mount), not a subpath of
-/// it, so it resolves to `root` itself rather than being rejected as a
-/// no-op path component.
+/// Join `rel` onto `root`, rejecting empty components, `.`/`..` and leading
+/// slashes. `rel == "."` is the exception: it names the drive root itself
+/// (whole-drive mount).
 pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
         return Err(DriveError::PathEscape {
@@ -355,20 +311,16 @@ pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Resolve `rel` under `root` like `resolve_relative`, and additionally
-/// refuse to pass through a symlink on the way to the final component.
+/// Like `resolve_relative`, but also refuses to pass through a symlink on the
+/// way to the final component.
 ///
-/// Replication carries symlinks as ordinary content with arbitrary targets,
-/// and a container can plant one in a volume too, so a received path like
-/// `a/etc/cron.d/x` must not be allowed to walk through a link `a` that
-/// points at `/`. Every ancestor below `root` that exists must be a real
-/// directory (or a non-link of any kind, which later fails on its own with
-/// ENOTDIR); the first one that doesn't exist ends the walk, since nothing
-/// below it can be a link. The final component is deliberately not checked:
-/// it may be a symlink when the operation replaces or removes the link
-/// itself, and callers that would write *through* it must handle that
-/// themselves. `root` itself is trusted, as a drive directory may legitimately
-/// be a symlink to another disk.
+/// Replication carries symlinks with arbitrary targets and containers can plant
+/// them, so `a/etc/cron.d/x` must not walk through a link `a` pointing at `/`.
+/// Every existing ancestor below `root` must be a real directory (non-dirs fail
+/// later with ENOTDIR); the first missing one ends the walk. The final
+/// component is not checked: it may be a link being replaced or removed, and
+/// callers writing *through* it must handle that. `root` itself is trusted (it
+/// may be a symlink to another disk).
 pub fn resolve_no_follow(root: &Path, rel: &str) -> Result<PathBuf> {
     let resolved = resolve_relative(root, rel)?;
     let Ok(below_root) = resolved.strip_prefix(root) else {
@@ -397,15 +349,11 @@ pub fn resolve_no_follow(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Resolve `rel` under `root` the way `resolve_relative` does, then guard
-/// against a symlink already inside the drive pointing back out of it.
-/// `resolve_relative` only looks at path components, since a sync target
-/// may not exist yet; a served drive's paths usually do exist, and a
-/// crafted request could walk through a symlinked directory that
-/// component-checking alone can't see. Canonicalizing the deepest existing
-/// ancestor and checking it's still under the drive root catches that,
-/// while still allowing paths whose final component doesn't exist yet
-/// (`create`, `mkdir`, a rename target).
+/// Like `resolve_relative`, then guards against a symlink inside the drive
+/// pointing out of it. Component checks can't see that for paths that exist
+/// (served drives), so this canonicalizes the deepest existing ancestor and
+/// checks it is still under the root, allowing a non-existent final component
+/// (`create`, `mkdir`, rename target).
 pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
     let candidate = resolve_relative(root, rel)?;
 

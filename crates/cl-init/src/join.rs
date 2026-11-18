@@ -18,13 +18,11 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// A brand new cluster serves a self signed certificate, so there is no chain
-/// to check against. What can be checked is that the certificate is the one the
-/// operator expected, by its fingerprint.
+/// A new cluster serves a self signed certificate, so there is no chain to check;
+/// the certificate is verified by fingerprint instead.
 ///
 /// With a pin, a mismatch aborts the join. Without one, the certificate is
-/// accepted and its fingerprint recorded so init can print it and the operator
-/// can compare it with what the other node logged.
+/// accepted and its fingerprint recorded so the operator can compare it.
 #[derive(Debug)]
 struct PinnedVerifier {
     expected: Option<String>,
@@ -40,8 +38,7 @@ pub fn fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
-/// Fingerprints compare equal regardless of separators or case, so a value
-/// pasted from openssl, a browser or our own output all work.
+/// Fingerprints compare equal regardless of separators or case.
 fn same_fingerprint(a: &str, b: &str) -> bool {
     let normalize = |text: &str| {
         text.chars()
@@ -143,8 +140,7 @@ impl Peer {
         })
     }
 
-    /// Fingerprint of the certificate the peer presented, once a request has
-    /// been made.
+    /// Fingerprint of the certificate the peer presented, once a request was made.
     pub fn peer_fingerprint(&self) -> Option<String> {
         self.seen.lock().clone()
     }
@@ -165,7 +161,6 @@ impl Peer {
             .context("the cluster config the peer returned does not parse")
     }
 
-    /// Push the amended config.
     pub async fn push_config(&self, config: &ClusterConfig) -> Result<()> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -184,12 +179,10 @@ impl Peer {
         Ok(())
     }
 
-    /// Ask the cluster for its secret key, wrapped for `public_key` so only
-    /// this node's own keypair can open it, and open it.
+    /// Ask the cluster for its secret key, wrapped for `public_key`, and open it.
     ///
-    /// The raft channel authenticates with this very key, so a brand new node
-    /// has to get it over this https api before its daemon first starts. The
-    /// plaintext key never crosses the wire, only a copy wrapped to us.
+    /// The raft channel authenticates with this key, so a new node needs it
+    /// before its daemon starts. Only the wrapped copy crosses the wire.
     pub async fn fetch_cluster_key(
         &self,
         node_name: &str,
@@ -237,8 +230,7 @@ impl Peer {
     }
 }
 
-/// Turn a response into an error carrying what the api actually said, which is
-/// the difference between "fix your token" and a shrug.
+/// Turn a response into an error carrying what the api actually said.
 async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -270,7 +262,6 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     }
 }
 
-/// Accept a bare host, a host:port, or a full url.
 fn base_url(address: &str) -> String {
     let address = address.trim_end_matches('/');
     if address.starts_with("https://") || address.starts_with("http://") {

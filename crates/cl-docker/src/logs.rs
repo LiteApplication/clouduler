@@ -6,14 +6,12 @@ use futures::{Stream, StreamExt};
 use crate::client::Docker;
 use crate::error::{classify, Result};
 
-/// Which stream a log line came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStream {
     Stdout,
     Stderr,
 }
 
-/// A single line of container output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
     pub stream: LogStream,
@@ -21,14 +19,12 @@ pub struct LogLine {
     pub text: String,
 }
 
-/// How many lines to fetch from the end of the log before following.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tail {
     All,
     Lines(u32),
 }
 
-/// Options controlling which log lines are returned.
 #[derive(Debug, Clone)]
 pub struct LogOptions {
     pub follow: bool,
@@ -48,9 +44,8 @@ impl Default for LogOptions {
 }
 
 impl Docker {
-    /// Stream logs for a container. Timestamps are always requested from docker
-    /// and split off the front of each line, rather than parsed some other way.
-    pub fn logs(&self, name: &str, opts: LogOptions) -> impl Stream<Item = Result<LogLine>> + '_ {
+    /// Stream logs for a container. Timestamps are always requested and split off the front of each line.
+    pub fn logs(&self, name: &str, opts: &LogOptions) -> impl Stream<Item = Result<LogLine>> + '_ {
         let tail = match opts.tail {
             Tail::All => "all".to_string(),
             Tail::Lines(n) => n.to_string(),
@@ -71,10 +66,9 @@ impl Docker {
             .map(|item| item.map_err(classify).map(log_line_from_output))
     }
 
-    /// Why the container last failed to start, as a stderr line to show after
-    /// its logs. A container that never started has no output of its own, so
-    /// without this its log is empty and the reason is only in docker's state.
-    /// `None` when it started fine, or does not exist.
+    /// Why the container last failed to start, as a stderr line to show after its
+    /// logs (a never-started container has no output). `None` if it started fine
+    /// or does not exist.
     pub async fn start_failure_line(&self, name: &str) -> Option<LogLine> {
         let state = self.inspect(name).await.ok()??;
         if state.running {
@@ -93,17 +87,15 @@ fn log_line_from_output(output: bollard::container::LogOutput) -> LogLine {
     let (stream, bytes) = match output {
         LogOutput::StdOut { message } => (LogStream::Stdout, message),
         LogOutput::StdErr { message } => (LogStream::Stderr, message),
-        // stdin/console streams shouldn't occur for `logs`, but keep them rather
-        // than panic if docker ever sends one.
+        // Not expected for `logs`, but kept rather than panicking.
         LogOutput::StdIn { message } => (LogStream::Stdout, message),
         LogOutput::Console { message } => (LogStream::Stdout, message),
     };
     split_timestamp(stream, &String::from_utf8_lossy(&bytes))
 }
 
-/// Docker prefixes each line with an RFC3339 timestamp and a space when
-/// `timestamps(true)` is set. Split it off here instead of asking for logs
-/// twice (with and without timestamps).
+/// With `timestamps(true)` docker prefixes each line with an RFC3339 timestamp
+/// and a space; split it off rather than fetching logs twice.
 fn split_timestamp(stream: LogStream, line: &str) -> LogLine {
     let line = line.strip_suffix('\n').unwrap_or(line);
     match line.split_once(' ') {

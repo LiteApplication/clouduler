@@ -10,8 +10,7 @@ use crate::client::Docker;
 use crate::container::{LABEL_MANAGED, MANAGED_VALUE};
 use crate::error::{classify, Result};
 
-/// A container lifecycle event, mapped from docker's raw event stream down to
-/// the cases the reconcile loop actually needs to act on.
+/// A container lifecycle event, mapped down to the cases the reconcile loop acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContainerEvent {
     Started {
@@ -39,9 +38,8 @@ pub enum ContainerEvent {
 }
 
 impl Docker {
-    /// Subscribe to docker events for clouduler-managed containers. Events that
-    /// don't map to a `ContainerEvent` variant (attach, exec, rename, ...) are
-    /// silently dropped from the stream.
+    /// Subscribe to docker events for clouduler-managed containers. Unmapped
+    /// events (attach, exec, rename, ...) are dropped.
     pub fn events(&self) -> impl Stream<Item = Result<ContainerEvent>> + '_ {
         let mut filters: HashMap<String, Vec<String>> = HashMap::new();
         filters.insert("type".to_string(), vec!["container".to_string()]);

@@ -1,31 +1,26 @@
-//! Wiring egress and wireguard networks into the daemon: for every such
-//! network this node has a host interface address for, keep its bridge, its
-//! kill-switch iptables rules and its docker network up.
+//! Wiring egress and wireguard networks into the daemon: for every such network
+//! this node has a host interface address for, keep its bridge, its kill-switch
+//! iptables rules and its docker network up.
 //!
-//! Unlike `overlay`, this needs no leader-side allocation and no per-instance
+//! Unlike `overlay`, this needs no leader-side allocation or per-instance
 //! bookkeeping: the bridge's subnet is derived from the network's name alone
-//! (`cl_net::egress::egress_subnet`), so every node implementing the network
-//! computes it independently, and the network is brought up whether or not
-//! anything is currently scheduled on it — cheap and idempotent, and it means
-//! a container placed here on the very next sweep already has somewhere to
-//! attach.
+//! (`cl_net::egress::egress_subnet`), so every node computes it independently,
+//! and the network is brought up whether or not anything is scheduled on it. That
+//! is cheap, idempotent, and means a container placed here on the next sweep
+//! already has somewhere to attach.
 //!
 //! The reconcile loop re-reads the cluster config from raft every tick
-//! (`RECONCILE_INTERVAL`) instead of working off the snapshot the daemon
-//! booted with, so an egress network an operator just added comes up on this
-//! node's next tick rather than needing a restart — a bridge nothing is
-//! forwarding through yet has no cost to bringing up a tick late. See
-//! `docs/live-config.md` for the rest of what applies live and what doesn't.
+//! (`RECONCILE_INTERVAL`) rather than using the boot snapshot, so a newly added
+//! egress network comes up on the next tick without a restart. See
+//! `docs/live-config.md` for what applies live.
 //!
-//! A wireguard-kind network is an egress network whose interface clouduler
-//! itself creates and configures, from a config imported through the api and
-//! stored as a sealed secret (`cl_api::wireguard::wireguard_secret_name`),
-//! instead of one the admin brought up out of band. Once that interface is
-//! up, it is indistinguishable from a plain egress interface to everything
-//! below: the same bridge, kill-switch and docker network logic applies. A
-//! wireguard network additionally gets an ingress ruleset for ports let in
-//! through the tunnel and forwarded to this node's own address, where an
-//! already-published docker port bind picks them up.
+//! A wireguard-kind network is an egress network whose interface clouduler itself
+//! creates and configures, from a config imported through the api and stored as a
+//! sealed secret (`cl_api::wireguard::wireguard_secret_name`). Once up, it is
+//! indistinguishable from a plain egress interface to everything below (same
+//! bridge, kill-switch and docker network). It additionally gets an ingress
+//! ruleset for ports let in through the tunnel and forwarded to this node's own
+//! address, where an already-published docker port bind picks them up.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -62,10 +57,9 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 /// one stack, so a future per-stack sweep never mistakes it for orphaned.
 pub const OWNER: &str = "_cluster";
 
-/// Every egress or wireguard network this node implements, network name ->
-/// (kind, address). For a wireguard network the interface name inside the
-/// address is still the one stored in `node.network`, but it names a tunnel
-/// clouduler manages rather than one the admin set up.
+/// Every egress or wireguard network this node implements, network name -> (kind,
+/// address). For wireguard the interface name in the address is still the one in
+/// `node.network`, but names a tunnel clouduler manages.
 pub fn interfaces_of(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -83,11 +77,10 @@ pub fn interfaces_of(
         .collect()
 }
 
-/// The interface a network's traffic should actually leave through right
-/// now. Only an `egress`-kind address with a `fallback` configured ever
-/// probes anything; everything else (wireguard tunnels, egress addresses
-/// with no fallback) just uses its configured interface unconditionally, so
-/// a cluster that never opted into this costs nothing extra per tick.
+/// The interface a network's traffic should leave through right now. Only an
+/// `egress`-kind address with a `fallback` ever probes anything; everything else
+/// uses its configured interface unconditionally, so a cluster that never opted
+/// in pays nothing per tick.
 async fn effective_interface(kind: NetworkKind, addr: &InterfaceAddress, network: &str) -> String {
     if kind != NetworkKind::Egress {
         return addr.interface.clone();
@@ -114,13 +107,11 @@ async fn effective_interface(kind: NetworkKind, addr: &InterfaceAddress, network
     }
 }
 
-/// Reads the cluster config raft is currently carrying, parsed the same way
-/// the daemon parses it off disk at boot. Falls back to `previous` — the
-/// last config this loop successfully parsed, starting from the one the
-/// daemon booted with — if raft has nothing yet (a brand new node, mid
-/// bootstrap) or the stored yaml fails to parse (should not happen, since
-/// nothing accepts a config into raft without validating it first, but a
-/// reconcile loop should never crash over it either way).
+/// Reads the cluster config raft currently carries, parsed as at boot. Falls back
+/// to `previous` (the last config this loop parsed, initially the boot one) if
+/// raft has nothing yet (new node, mid bootstrap) or the yaml fails to parse
+/// (should not happen, since nothing is accepted into raft unvalidated, but the
+/// loop must never crash over it).
 async fn live_config(cluster: &ClusterNode, previous: &ClusterConfig) -> ClusterConfig {
     let Some(entry) = cluster.state().await.cluster_config else {
         return previous.clone();
@@ -615,14 +606,12 @@ async fn ensure_one(
 
     let iface_owned = iface.to_string();
     let bridge_owned = bridge.clone();
-    // Loose reverse-path filtering (2) rather than strict (1): a reply can
-    // arrive on the tunnel while the policy route for the bridge, not the main
-    // table, is what would route its source, and strict mode drops that
-    // asymmetric path. The last write sets the host-wide `all` value too, and
-    // the kernel applies the larger of `all` and the per-interface value, so
-    // this is a deliberate host-wide change: strict becomes loose (and off
-    // becomes loose) on every interface. Left as is; it is the documented
-    // price of policy routing here.
+    // Loose reverse-path filtering (2), not strict (1): a reply can arrive on the
+    // tunnel while the policy route for the bridge, not the main table, would
+    // route its source, and strict mode drops that asymmetric path. The last
+    // write sets the host-wide `all` value too and the kernel applies the larger
+    // of `all` and the per-interface value, so this deliberately loosens every
+    // interface; it is the documented price of policy routing.
     tokio::task::spawn_blocking(move || -> Result<()> {
         std::fs::write(
             format!("/proc/sys/net/ipv4/conf/{bridge_owned}/rp_filter"),
@@ -671,13 +660,10 @@ async fn ensure_one(
         };
 
         if kind == NetworkKind::Wireguard {
-            // A wireguard tunnel does cryptokey routing: there is no
-            // next-hop gateway address the way a plain ethernet egress
-            // interface has, so the table-scoped default route here is a
-            // bare device route, not a `via` route. The interface is
-            // clouduler's own (`ensure_tunnel` brought it up this same
-            // tick), so unlike the egress case below there is no "is this
-            // operator-managed interface actually up" check to do first.
+            // A wireguard tunnel does cryptokey routing: there is no next-hop
+            // gateway, so the table-scoped default route is a bare device route,
+            // not `via`. The interface is clouduler's own (brought up this tick
+            // by `ensure_tunnel`), so no up-check is needed.
             let status = std::process::Command::new("ip")
                 .args([
                     "route",
@@ -693,12 +679,10 @@ async fn ensure_one(
                 anyhow::bail!("ip route replace failed");
             }
         } else {
-            // `iface`'s own default route, if it has one: this must come from a
-            // route that already names `iface` as its device, never assumed from
-            // the host's overall default route, since on a multi-homed node the
-            // interface this egress network is pinned to may not be the one the
-            // host itself prefers (different metric, or not a default route
-            // candidate at all).
+            // `iface`'s own default route, if any: it must come from a route
+            // naming `iface` as its device, never the host's overall default
+            // route, since on a multi-homed node the pinned interface may not be
+            // the one the host prefers.
             let route_out = std::process::Command::new("ip")
                 .args(["route", "show", "default", "dev", &iface_for_route])
                 .output()?;
@@ -710,14 +694,11 @@ async fn ensure_one(
                 .and_then(|i| parts.get(i + 1))
                 .copied();
 
-            // No gateway found for `iface`: it has no working route out (down,
-            // no DHCP lease, cable unplugged, ...). Installing a `dev`-only
-            // default route here would silently blackhole every packet from
-            // this bridge ("No route to host") instead of the kill-switch's
-            // intended DROP, and would look like a healthy path while nothing
-            // actually reaches it. So install no policy route at all and let
-            // the kill-switch's plain `-o iface` FORWARD rule fail to match, as
-            // it should when the network's egress interface is down.
+            // No gateway found for `iface` (down, no DHCP lease, unplugged): a
+            // `dev`-only default route would blackhole every packet from this
+            // bridge instead of hitting the kill-switch's DROP, and look healthy.
+            // So install no policy route and let the kill-switch's plain `-o
+            // iface` FORWARD rule fail to match.
             let Some(via) = via else {
                 if existing_rules.contains(&rule_pattern) {
                     std::process::Command::new("ip")
@@ -822,12 +803,11 @@ async fn ensure_one(
     Ok(())
 }
 
-/// Bring up a nat-kind network's docker network: no interface and no
-/// iptables of clouduler's own — docker builds the bridge and NATs it out
-/// whatever the host's routing table picks, exactly like any bridge network
-/// docker would make on its own. The subnet itself is still ours to pick
-/// (see `cl_net::egress::nat_subnet`), so a same-node hairpin back into a
-/// gated route can be recognized and trusted (`proxy::trusted_overlay_subnets`).
+/// Bring up a nat-kind network's docker network: no interface or iptables of our
+/// own, docker builds the bridge and NATs out via the host's routing table. The
+/// subnet is still ours to pick (see `cl_net::egress::nat_subnet`) so a same-node
+/// hairpin back into a gated route can be recognized and trusted
+/// (`proxy::trusted_overlay_subnets`).
 async fn ensure_nat(docker: &Docker, network: &str) -> Result<()> {
     let name = nat_docker_name(network);
     let subnet = nat_subnet(network);

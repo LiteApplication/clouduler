@@ -2,29 +2,25 @@
 
 use crate::error::{DockerError, Result};
 
-/// Where the docker daemon's unix socket lives on the host, matching what
-/// `connect_with_socket_defaults` (and thus `Docker::connect`) actually talks
-/// to. Used to bind-mount the socket into a container that asks for it via
-/// `x-clouduler.docker_socket`.
+/// The docker daemon's unix socket on the host, matching what `Docker::connect`
+/// uses. Bind-mounted into containers asking for `x-clouduler.docker_socket`.
 pub const DOCKER_SOCKET_PATH: &str = "/var/run/docker.sock";
 
-/// Thin wrapper around a connected bollard client. All other modules in this
-/// crate add methods to this type via `impl Docker` blocks in their own files.
+/// Thin wrapper around a connected bollard client; other modules add methods via
+/// `impl Docker` blocks.
 #[derive(Clone)]
 pub struct Docker {
     pub(crate) inner: bollard::Docker,
 }
 
 impl Docker {
-    /// Connect to the docker daemon over the local unix socket.
     pub fn connect() -> Result<Self> {
         let inner =
             bollard::Docker::connect_with_socket_defaults().map_err(DockerError::Connect)?;
         Ok(Self { inner })
     }
 
-    /// Health check. Callers should use this at startup to fail fast rather than
-    /// discover a dead daemon on the first container operation.
+    /// Health check, for failing fast at startup on a dead daemon.
     pub async fn ping(&self) -> Result<()> {
         self.inner.ping().await.map_err(DockerError::Connect)?;
         Ok(())

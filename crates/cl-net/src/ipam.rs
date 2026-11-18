@@ -14,15 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{NetError, Result};
 
-/// Default overlay pool, carved into per-network `/24`s. Chosen well away from
-/// RFC1918 ranges people commonly use for their LAN or the cluster's internal
-/// network, so a default cluster config never needs to touch it.
+/// Default overlay pool, carved into per-network `/24`s. Away from common RFC1918 LAN ranges so the default never needs touching.
 pub const DEFAULT_OVERLAY_POOL: &str = "10.244.0.0/16";
 
-/// [`DEFAULT_OVERLAY_POOL`] as a checked-at-compile-time network.
 pub const DEFAULT_OVERLAY_NET: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(10, 244, 0, 0), 16);
 
-/// Prefix length handed to each stack network's subnet.
 pub const DEFAULT_SUBNET_PREFIX: u8 = 24;
 
 /// Address book for the container overlay: one subnet per stack network, one
@@ -39,7 +35,6 @@ pub struct Allocations {
 struct NetworkAllocation {
     subnet: Ipv4Net,
     instances: BTreeMap<InstanceId, Ipv4Addr>,
-    /// Addresses currently handed out.
     reserved: BTreeSet<Ipv4Addr>,
     /// Released addresses, oldest first. Kept out of rotation while any
     /// address that was never used is still available, so a restarting
@@ -55,8 +50,7 @@ struct NetworkAllocation {
 }
 
 impl Allocations {
-    /// A fresh allocator over the given pool, sliced into subnets of
-    /// `subnet_prefix` bits (must be >= the pool's own prefix and <= 32).
+/// A fresh allocator over `pool`, sliced into `subnet_prefix`-bit subnets (>= the pool prefix, <= 32).
     pub fn new(pool: Ipv4Net, subnet_prefix: u8) -> Self {
         Self {
             pool,
@@ -75,7 +69,6 @@ impl Allocations {
         serde_json::from_str(stored?).ok()
     }
 
-    /// Every instance holding an address on a network.
     pub fn instances(&self, network: &str) -> impl Iterator<Item = (&InstanceId, Ipv4Addr)> {
         self.networks
             .get(network)
@@ -83,40 +76,32 @@ impl Allocations {
             .flat_map(|n| n.instances.iter().map(|(id, ip)| (id, *ip)))
     }
 
-    /// Every network with a subnet, and that subnet's gateway.
     pub fn gateways(&self) -> impl Iterator<Item = (&str, Ipv4Addr)> {
         self.networks
             .iter()
             .map(|(name, n)| (name.as_str(), gateway_of(n.subnet)))
     }
 
-    /// Subnet the network already holds, if any.
     pub fn subnet(&self, network: &str) -> Option<Ipv4Net> {
         self.networks.get(network).map(|n| n.subnet)
     }
 
-    /// Every network with a subnet allocated, by name.
     pub fn network_names(&self) -> impl Iterator<Item = &str> {
         self.networks.keys().map(|s| s.as_str())
     }
 
-    /// Subnets of the given overlays, looked up by exact name (an overlay is
-    /// named `<stack>_<cluster network>`, see `cl_sched::run::overlay_name`).
-    /// Names with no allocation are skipped.
-    ///
-    /// The caller works out which overlays sit on a cluster network from
-    /// cluster state rather than by parsing names back: both halves may
-    /// contain `_`, so a suffix match can't tell stack `x` on network `a_b`
-    /// from stack `x_a` on network `b`.
-    ///
-    /// A container on one of these subnets reached a route the ordinary way,
-    /// clouduler placed it there, even when the packet that carries the
-    /// request never actually left the node: a client and a same-node
-    /// backend published on the same cluster network can have their traffic
-    /// delivered locally by the kernel (the destination address is one the
-    /// node already owns) instead of round-tripping through the underlay, so
-    /// the proxy sees the client's raw overlay address as the peer rather
-    /// than an address inside the cluster network's own subnet.
+/// Subnets of the given overlays, by exact name (an overlay is named
+/// `<stack>_<cluster network>`, see `cl_sched::run::overlay_name`). Names
+/// with no allocation are skipped.
+///
+/// The caller derives the overlays from cluster state rather than parsing
+/// names: both halves may contain `_`, so a suffix match cannot tell stack `x`
+/// on network `a_b` from stack `x_a` on network `b`.
+///
+/// A client and a same-node backend on one cluster network can be delivered
+/// locally by the kernel, so the proxy sees the client's raw overlay address
+/// instead of one in the cluster network's subnet. Containers on these subnets
+/// were placed by clouduler and are trusted.
     pub fn subnets_of_overlays<'a>(
         &'a self,
         overlays: impl IntoIterator<Item = &'a str> + 'a,
@@ -124,21 +109,15 @@ impl Allocations {
         overlays.into_iter().filter_map(|name| self.subnet(name))
     }
 
-    /// Gateway address for a network's subnet: always the first host address.
     pub fn gateway(&self, network: &str) -> Option<Ipv4Addr> {
         self.subnet(network).map(gateway_of)
     }
 
-    /// Address already held by an instance, if any.
     pub fn instance_ip(&self, network: &str, instance: &InstanceId) -> Option<Ipv4Addr> {
         self.networks.get(network)?.instances.get(instance).copied()
     }
 
-    /// Claim a subnet for a stack network out of the pool, skipping any
-    /// candidate that overlaps a subnet already claimed by another stack
-    /// network or by a declared cluster network (so the overlay can never
-    /// shadow the internal network or a private one). Idempotent: a network
-    /// that already has a subnet keeps it.
+/// Claim a subnet out of the pool, skipping candidates that overlap another stack network or a declared cluster network (so the overlay never shadows the internal or a private one). Idempotent.
     pub fn allocate_network(
         &mut self,
         network: &str,
@@ -147,9 +126,7 @@ impl Allocations {
         self.allocate_network_in(network, None, cluster_subnets)
     }
 
-    /// Like [`allocate_network`](Self::allocate_network), but claims exactly
-    /// `requested` when given, failing if it overlaps a cluster network or
-    /// another stack network's subnet instead of picking another one.
+/// Like [`allocate_network`](Self::allocate_network) but claims exactly `requested`, failing on overlap instead of picking another.
     pub fn allocate_network_in(
         &mut self,
         network: &str,
@@ -231,15 +208,12 @@ impl Allocations {
         })
     }
 
-    /// Drop a network's whole allocation, freeing its subnet and every
-    /// instance address in it.
+/// Drop a network's allocation, freeing its subnet and every instance address.
     pub fn release_network(&mut self, network: &str) {
         self.networks.remove(network);
     }
 
-    /// Allocate an address for an instance inside a network's subnet.
-    /// Idempotent: re-allocating for an instance that already has an address
-    /// returns the same one. `.1` is reserved for the bridge gateway.
+/// Allocate an instance address in the network's subnet. Idempotent; `.1` is the gateway.
     pub fn allocate_ip(&mut self, network: &str, instance: &InstanceId) -> Result<Ipv4Addr> {
         let net = self
             .networks
@@ -255,12 +229,10 @@ impl Allocations {
         Ok(chosen)
     }
 
-    /// Address already held by a node on a network, if any.
     pub fn node_ip(&self, network: &str, node: &str) -> Option<Ipv4Addr> {
         self.networks.get(network)?.nodes.get(node).copied()
     }
 
-    /// Every node address on a network, by node name.
     pub fn node_ips(&self, network: &str) -> impl Iterator<Item = (&str, Ipv4Addr)> {
         self.networks
             .get(network)
@@ -268,9 +240,7 @@ impl Allocations {
             .flat_map(|n| n.nodes.iter().map(|(node, ip)| (node.as_str(), *ip)))
     }
 
-    /// Allocate a node's address on a network. Same rules as `allocate_ip`:
-    /// idempotent, never the gateway, never an address an instance (or another
-    /// node) holds, and the same cooldown and exhaustion behaviour.
+/// Allocate a node's address on a network; same rules as `allocate_ip`.
     pub fn allocate_node_ip(&mut self, network: &str, node: &str) -> Result<Ipv4Addr> {
         let net = self
             .networks
@@ -284,8 +254,7 @@ impl Allocations {
         Ok(chosen)
     }
 
-    /// Release a node's address (to the back of the cooldown queue). A no-op
-    /// if the node holds none.
+/// Release a node's address to the back of the cooldown queue; no-op if none.
     pub fn release_node_ip(&mut self, network: &str, node: &str) {
         let Some(net) = self.networks.get_mut(network) else {
             return;
@@ -297,9 +266,7 @@ impl Allocations {
         net.cooldown.push_back(ip);
     }
 
-    /// Release an instance's address. A no-op if the instance holds none.
-    /// The address goes to the back of the cooldown queue rather than
-    /// becoming immediately available again.
+/// Release an instance's address to the back of the cooldown queue; no-op if none.
     pub fn release_ip(&mut self, network: &str, instance: &InstanceId) {
         let Some(net) = self.networks.get_mut(network) else {
             return;
@@ -313,8 +280,7 @@ impl Allocations {
 }
 
 impl NetworkAllocation {
-    /// Choose and reserve a free host address: a never-used one if any is
-    /// left, else the oldest released one. Never the gateway.
+/// Reserve a never-used address if any is left, else the oldest released one. Never the gateway.
     fn pick_address(&mut self, network: &str) -> Result<Ipv4Addr> {
         let subnet = self.subnet;
         let gateway = gateway_of(subnet);
@@ -349,7 +315,6 @@ impl Default for Allocations {
     }
 }
 
-/// First host address of a subnet, reserved for the bridge.
 fn gateway_of(subnet: Ipv4Net) -> Ipv4Addr {
     let net_addr: u32 = subnet.network().into();
     Ipv4Addr::from(net_addr.wrapping_add(1))

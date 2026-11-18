@@ -3,7 +3,6 @@
 use crate::message::{AlertMessage, Phase};
 use crate::settings::Severity;
 
-/// Cut `s` to at most `max` characters, ending in an ellipsis when cut.
 pub fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -56,7 +55,6 @@ pub fn human_time(secs: i64) -> String {
     )
 }
 
-/// `09:12`, for a digest line.
 pub fn clock(secs: i64) -> String {
     let t = secs.rem_euclid(86_400);
     format!("{:02}:{:02}", t / 3600, t % 3600 / 60)
@@ -98,7 +96,6 @@ pub fn title_with_phase(m: &AlertMessage) -> String {
     }
 }
 
-/// How long the alert was open, for a resolved message.
 pub fn open_for(m: &AlertMessage) -> Option<String> {
     (m.phase == Phase::Resolved && m.at > m.opened_at).then(|| human_duration(m.at - m.opened_at))
 }
@@ -118,7 +115,6 @@ pub fn is_http(url: &str) -> bool {
     (u.starts_with("https://") || u.starts_with("http://")) && !u.contains(char::is_whitespace)
 }
 
-/// The first usable link of an alert.
 pub fn primary_link(m: &AlertMessage) -> Option<&crate::message::Link> {
     m.links.iter().find(|l| is_http(&l.url))
 }

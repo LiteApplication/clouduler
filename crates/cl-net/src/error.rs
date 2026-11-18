@@ -21,11 +21,9 @@ pub enum NetError {
     )]
     PermissionDenied { interface: String },
 
-    /// No address left in a network's subnet.
     #[error("no free address left in subnet {subnet} for network {network}")]
     AddressExhausted { network: String, subnet: String },
 
-    /// No subnet left in the overlay pool.
     #[error("no free subnet left in overlay pool {pool}")]
     SubnetExhausted { pool: String },
 
@@ -38,15 +36,12 @@ pub enum NetError {
         conflicts: String,
     },
 
-    /// Referenced a stack network that has no allocation.
     #[error("unknown network {0}")]
     UnknownNetwork(String),
 
-    /// DNS zone or serving failure.
     #[error("dns error: {0}")]
     Dns(String),
 
-    /// A published port forwarder failed to bind or accept.
     #[error("io error on {context}: {source}")]
     Io {
         context: String,
@@ -56,8 +51,7 @@ pub enum NetError {
 }
 
 impl NetError {
-    /// Turn a raw netlink error into a `NetError`, recognising EPERM/EACCES so
-    /// callers get the CAP_NET_ADMIN message instead of a bare errno.
+/// Map a raw netlink error, recognising EPERM/EACCES as the CAP_NET_ADMIN message.
     pub fn from_netlink(interface: impl Into<String>, source: rtnetlink::Error) -> Self {
         let interface = interface.into();
         if is_permission_error(&source) {

@@ -29,8 +29,6 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-/// Strips hop-by-hop headers, including any extra ones the `Connection`
-/// header names.
 pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let mut extra: Vec<String> = Vec::new();
     for value in headers.get_all("connection") {
@@ -46,8 +44,6 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// Whether this request is a websocket (or other) upgrade, in which case
-/// `Connection`/`Upgrade` must survive `strip_hop_by_hop`.
 pub fn is_upgrade(headers: &HeaderMap) -> bool {
     let has_upgrade_token = headers
         .get_all("connection")
@@ -103,7 +99,6 @@ pub fn apply_headers(
     }
 }
 
-/// Whether `policy` allows `origin` to read the response.
 pub fn cors_origin_allowed(policy: &CorsPolicy, origin: &str) -> bool {
     policy.origins.iter().any(|o| o == "*" || o == origin)
 }

@@ -1,10 +1,6 @@
 //! The join, end to end: a real api server over real TLS, and init's client
-//! walking the whole exchange against it.
-//!
-//! Everything below the http boundary is exercised for real, because the parts
-//! that break here are exactly the ones a unit test cannot see: the pinned
-//! certificate verifier, the auth header, the config round trip through serde,
-//! and the edit landing in raft rather than only on one node's disk.
+//! walking the exchange against it, so the pinned certificate verifier, auth
+//! header, serde config round trip and the raft edit are exercised for real.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -51,9 +47,8 @@ struct Server {
     _dir: TempDir,
 }
 
-/// Stand up one node's api on loopback with a self signed certificate, exactly
-/// as a freshly initialised cluster serves it. `key` stands in for whatever
-/// this node already holds on disk, `None` matching a fresh, keyless node.
+/// Stand up one node's api on loopback with a self signed certificate. `key`
+/// is what this node already holds on disk, `None` for a fresh keyless node.
 async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Server {
     // main does this at startup; tests never run main.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -136,7 +131,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
         cluster: cluster.clone(),
         docker: cl_docker::DockerHandle::new(cl_docker::Docker::connect().ok()),
         pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
-        migration_sync: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
+        migration_sync: std::sync::Arc::new(parking_lot::RwLock::new(Default::default())),
         node_name: "n1".into(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: config.clone(),
@@ -296,17 +291,13 @@ async fn a_bad_api_key_is_reported_as_a_bad_api_key() {
     assert!(error.contains("api key"), "{error}");
 }
 
-/// The whole point of the per-node keypair scheme: a joining node ends up
-/// with a working cluster key without anyone copying a file by hand.
+/// A joining node ends up with a working cluster key without anyone copying a
+/// file by hand.
 ///
-/// n1 holds the plaintext key from the start (standing in for a founding
-/// node). n2 is represented only at the raft level; it publishes a real
-/// keypair's public half, exactly as `report_self` would after `n2` actually
-/// joined and started, and a second `ApiServer` is stood up against that
-/// same shared cluster with `n2`'s private half and no key on disk, standing
-/// in for n2's own daemon. Both servers' background reconciliation loops
-/// (`spawn_wrap_for_new_nodes` on n1, `spawn_unwrap_own_key` on n2) are real,
-/// not mocked, and this proves they actually meet in the middle through raft.
+/// n1 holds the plaintext key. n2 exists only in raft, publishing a real public
+/// key as `report_self` would, with a second `ApiServer` holding n2's private
+/// half and no key on disk. The real reconciliation loops
+/// (`spawn_wrap_for_new_nodes`, `spawn_unwrap_own_key`) must meet through raft.
 #[tokio::test]
 async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_step() {
     let cluster_key = cl_secret::ClusterKey::generate();
@@ -348,7 +339,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
         cluster: server.cluster.clone(),
         docker: cl_docker::DockerHandle::default(),
         pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
-        migration_sync: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
+        migration_sync: std::sync::Arc::new(parking_lot::RwLock::new(Default::default())),
         node_name: "n2".into(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: founding_config(),
@@ -414,9 +405,8 @@ async fn fetching_the_key_from_a_node_that_holds_none_is_an_error() {
     assert!(error.contains("no cluster key"), "{error}");
 }
 
-/// What `clouduler init --yes --join` does for the key: nothing to answer, the
-/// key ends up on disk, and the node keypair it was wrapped for sits where the
-/// daemon will load the same one.
+/// `clouduler init --yes --join` for the key: nothing to answer, the key ends up
+/// on disk, next to the node keypair it was wrapped for.
 #[tokio::test]
 async fn init_installs_the_fetched_key_without_a_prompt() {
     let cluster_key = cl_secret::ClusterKey::generate();

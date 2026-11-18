@@ -1,52 +1,42 @@
 //! `clouduler backup restore-{drive,volume,service}`: restore a restic
 //! snapshot back onto a drive's real directory.
 //!
-//! Always stops the affected containers first - unlike backup, this isn't
-//! configurable: restoring under a live container is unsafe, with no
-//! acceptable degraded mode. The three `restore_*` functions are CLI-invoked
-//! and one-shot, run directly on the node that holds the drive (matching
-//! `folder_import`'s convention of operating on the local machine).
+//! Always stops the affected containers first: restoring under a live container
+//! is unsafe, so unlike backup this is not configurable. The `restore_*`
+//! functions are CLI-invoked and one-shot.
 //!
-//! [`start_restore_watcher`] is the api's path to the same three functions:
-//! `cl-api` cannot call into this binary crate directly (wrong dependency
-//! direction - it's a library `clouduler` depends on, not the reverse), so an
-//! api handler instead submits a `RestoreRequest` through raft and this
-//! per-node watcher claims and executes whichever ones it can serve, the same
-//! "submit an intent, the node that can act on it does" pattern
-//! `backup_runner` uses for scheduled/manual backups.
+//! [`start_restore_watcher`] is the api's path to the same functions: `cl-api`
+//! cannot call into this binary crate, so a handler submits a `RestoreRequest`
+//! through raft and the per-node watcher claims whichever ones it can serve (the
+//! same "submit an intent, the node that can act does" pattern as
+//! `backup_runner`).
 //!
-//! A restore can be started from any node. Each job (one drive's worth) is
-//! carried out by the one node that can: the node holding the authoritative
-//! copy when it can read the repository ([`Mode::Local`] - restic restores
-//! straight onto the drive), or, when the repository is a `NodeLocal`
-//! directory on some other node, that node ([`Mode::Push`] - restic restores
-//! into a staging directory next to the repository, which is then pushed to
-//! the authoritative node over the drive transport, the same way a backup
-//! stages a drive on a `NodeLocal`-elsewhere destination). A CLI run on a
-//! node that can do neither submits a `RestoreRequest` and waits for it.
+//! A restore can be started from any node, but each job (one drive) is carried
+//! out by the one node that can: the node holding the authoritative copy when it
+//! can read the repository ([`Mode::Local`], restic restores straight onto the
+//! drive), or, when the repository is a `NodeLocal` directory on another node,
+//! that node ([`Mode::Push`]: restic restores into a staging directory, which is
+//! then pushed to the authoritative node over the drive transport). A CLI run on
+//! a node that can do neither submits a `RestoreRequest` and waits for it.
 //!
 //! ## Which node, and what happens to the replicas
 //!
-//! The restore must also run on the node holding the authoritative copy: the
-//! primary of every volume it touches for a replicated drive, or the active
-//! server of a served one (`restore_authority`). Restoring onto a replica
-//! would be overwritten by the next sync from the real primary. After a
-//! successful restore the volumes' generation is bumped with this node as
-//! primary (`Request::TouchVolume`), so every replica re-pulls the restored
-//! data rather than a stale one syncing backwards over it - the failure mode
-//! described in `clouduler-volume-primary-desync`.
+//! The authoritative node is the primary of every volume touched for a
+//! replicated drive, or the active server of a served one (`restore_authority`);
+//! a restore onto a replica would be overwritten by the next sync. After success
+//! the volumes' generation is bumped with this node as primary
+//! (`Request::TouchVolume`) so replicas re-pull instead of a stale one syncing
+//! backwards over the restored data.
 //!
 //! ## Ordering and failure
 //!
-//! Everything that can be checked without touching anything - the node is
-//! authoritative, the destination is reachable from here, the snapshot
-//! exists and belongs to the drive - is checked before a single container is
-//! stopped. Only instances that were running are stopped (and only those are
-//! started again); a stop that cannot be confirmed aborts the restore and
-//! restarts what was stopped. If `restic restore` itself fails the volume may
-//! be half-restored, so the containers are deliberately LEFT STOPPED rather
-//! than started on a mix of old and new files that would then replicate
-//! outward; the recorded error says so.
+//! Everything checkable without side effects (authority, destination
+//! reachability, snapshot exists and belongs to the drive) is checked before any
+//! container is stopped. Only running instances are stopped and restarted; an
+//! unconfirmed stop aborts and restarts what was stopped. If `restic restore`
+//! itself fails the volume may be half-restored, so containers are deliberately
+//! LEFT STOPPED rather than started on a mix of old and new files that would
+//! replicate outward; the recorded error says so.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -74,14 +64,11 @@ use crate::backup_secrets::{self, TempFileGuard};
 use cl_raft::client::client_for;
 use cl_raft::state::instances_touching_volumes;
 
-/// How often every node checks for `Pending` restore requests it can serve.
 const RESTORE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Per-node: claims and executes `Pending` `RestoreRequest`s whose drive this
-/// node implements *and* holds the authoritative copy of - see the module doc
-/// comment. Runs on every node, not just the leader, the same as
-/// `backup_runner::start_runner`: "can serve this drive" is a local fact each
-/// node checks about itself, not a decision that needs a single writer.
+/// Per-node: claims and executes `Pending` `RestoreRequest`s this node can serve
+/// as authority. Runs on every node, not just the leader: "can serve this drive"
+/// is a local fact, not a decision needing a single writer.
 pub fn start_restore_watcher(
     cfg: ClusterConfig,
     cluster: Arc<ClusterNode>,
@@ -123,11 +110,8 @@ pub fn start_restore_watcher(
                         continue;
                     }
                 };
-                // Not this node's job unless it can carry out every job:
-                // either it is authoritative for the drive and can read the
-                // repository, or it holds the `NodeLocal` repository and can
-                // push the result to the authoritative node. Every other
-                // node simply skips, so exactly one node ever claims.
+                // Exactly one node claims: the authoritative node that can read the
+                // repository, or the `NodeLocal` repository holder that can push.
                 if plan
                     .jobs
                     .iter()
@@ -196,14 +180,10 @@ fn unix_now() -> i64 {
 }
 
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
-/// How often a CLI that handed its restore to the cluster checks on it, and
-/// how long it waits before saying nobody has claimed it.
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const REQUEST_UNCLAIMED_WARNING: Duration = Duration::from_secs(60);
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// What one restore touches, per drive: either the whole drive or specific
-/// volumes. Drives that this restore reaches are in `drives`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Footprint {
     /// drive -> `None` for the whole drive, or the volumes restored on it.
@@ -270,8 +250,6 @@ fn authority_problem(
     }
 }
 
-/// The drives/volumes a restore request touches, resolved against cluster
-/// state.
 fn scope_footprint(state: &ClusterState, scope: &RestoreScope) -> Result<Footprint> {
     let mut drives = std::collections::BTreeMap::new();
     match scope {
@@ -315,9 +293,6 @@ fn volume_footprint(volumes: &[VolumeId]) -> Option<Vec<VolumeId>> {
     }
 }
 
-/// Restore an entire drive from its most recent snapshot at `destination_id`
-/// (or a specific one, if `snapshot` is given), stopping and restarting
-/// every instance that mounts anything on it.
 pub async fn restore_drive(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -341,9 +316,6 @@ pub async fn restore_drive(
     .await
 }
 
-/// Restore a single volume out of the drive's whole-drive snapshot, stopping
-/// and restarting only the instances that mount that volume (or the whole
-/// drive root, which contains it).
 pub async fn restore_volume(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -389,15 +361,12 @@ pub async fn restore_service(
     restore_scope(cfg, node_name, &scope, destination_id, snapshot, via, true).await
 }
 
-/// Everything a restore needs to know before anything is touched.
 struct Plan {
     /// Every instance to stop for the duration.
     instances: Vec<InstanceId>,
     jobs: Vec<Job>,
 }
 
-/// Resolves a restore's scope against cluster state into the jobs and the
-/// instances that must be down while they run.
 fn plan(state: &ClusterState, scope: &RestoreScope, destination_id: Option<&str>) -> Result<Plan> {
     let footprint = scope_footprint(state, scope)?;
     let instances: Vec<InstanceId> = match scope {
@@ -433,7 +402,6 @@ fn plan(state: &ClusterState, scope: &RestoreScope, destination_id: Option<&str>
     Ok(Plan { instances, jobs })
 }
 
-/// What a restore is called in progress messages.
 fn scope_subject(scope: &RestoreScope) -> String {
     match scope {
         RestoreScope::Drive { drive } => drive.clone(),
@@ -491,23 +459,14 @@ async fn restore_scope(
     Ok(())
 }
 
-/// How this node can carry out one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// This node holds the authoritative copy and can read the repository:
-    /// restic restores straight onto the drive.
     Local,
-    /// The repository is a `NodeLocal` directory on this node, but the
-    /// authoritative copy lives elsewhere: restic restores into a staging
-    /// directory here and the result is pushed to the authoritative node
-    /// over the drive transport.
     Push,
 }
 
-/// Whether the repository at `destination` can be opened from `node`: a
-/// `NodeLocal` directory is only on its own node, everything else is reached
-/// over the network. An unknown destination counts as readable so the
-/// attempt fails with the precise error rather than waiting forever.
+/// Whether the repository at `destination` can be opened from `node`. An unknown
+/// destination counts as readable so the attempt fails with the precise error.
 fn destination_readable_from(state: &ClusterState, destination_id: &str, node: &str) -> bool {
     match state
         .restic_destinations
@@ -519,9 +478,9 @@ fn destination_readable_from(state: &ClusterState, destination_id: &str, node: &
     }
 }
 
-/// How `registry`'s node can carry out `job`, or `None` if it can't. Exactly
-/// one node qualifies for a job: the authority when it can read the
-/// repository, else the node holding the `NodeLocal` repository.
+/// How `registry`'s node can carry out `job`, or `None`. Exactly one node
+/// qualifies: the authority if it can read the repository, else the
+/// `NodeLocal` repository holder.
 fn job_mode(registry: &DriveRegistry, state: &ClusterState, job: &Job) -> Option<Mode> {
     let holds_repo = matches!(
         state.restic_destinations.get(&job.destination_id).map(|d| &d.kind),
@@ -549,8 +508,6 @@ fn push_is_optional(volume: &VolumeId, state: &ClusterState) -> bool {
     !state.volumes.contains_key(volume)
 }
 
-/// The node that holds the authoritative copy of `volume`: the active server
-/// of a served drive, otherwise the volume's recorded primary.
 fn authority_node(
     registry: &DriveRegistry,
     state: &ClusterState,
@@ -669,8 +626,6 @@ struct PushJob {
     volumes: Option<Vec<VolumeId>>,
 }
 
-/// Shared plumbing every restore flow needs: the cluster client, this node's
-/// drive registry, and the cluster key to open sealed backup secrets with.
 struct Ctx {
     client: cl_raft::client::Client,
     registry: DriveRegistry,
@@ -705,8 +660,6 @@ impl Ctx {
         })
     }
 
-    /// The whole restore: pre-flight, stop, restore, re-sync bookkeeping,
-    /// restart - see the module doc comment for the failure policy.
     async fn run(
         &self,
         state: &ClusterState,
@@ -714,8 +667,6 @@ impl Ctx {
         jobs: Vec<Job>,
         snapshot: Option<&str>,
     ) -> Result<()> {
-        // 1. Everything that can fail without side effects, before anything
-        //    is stopped.
         let mut modes = Vec::new();
         for job in &jobs {
             match job_mode(&self.registry, state, job) {
@@ -731,7 +682,6 @@ impl Ctx {
             prepared.push(self.prepare(state, job, mode, snapshot).await?);
         }
 
-        // 2. Stop what is running (and only that).
         let running = currently_running(state, &instances);
         println!("stopping {} running instance(s)", running.len());
         let mut stopped: Vec<InstanceId> = Vec::new();
@@ -745,8 +695,7 @@ impl Ctx {
             });
         }
 
-        // 3. The restore proper. A failure here may leave the data
-        //    half-restored, so containers stay down.
+        // A failure here may leave the data half-restored, so containers stay down.
         let mut touch: Vec<(VolumeId, String)> = Vec::new();
         for job in prepared {
             let Prepared {
@@ -796,10 +745,8 @@ impl Ctx {
             touch.extend(job_touch);
         }
 
-        // 4. Make the restored copy the one replicas pull from.
         let touched = self.touch(&touch).await;
 
-        // 5. Bring back what was running.
         let restarted = self.restart(&stopped).await;
         match (touched, restarted) {
             (Ok(()), Ok(())) => Ok(()),
@@ -815,8 +762,6 @@ impl Ctx {
         }
     }
 
-    /// Resolves destination, repository and snapshot for one job. No
-    /// containers are touched.
     async fn prepare(
         &self,
         state: &ClusterState,
@@ -884,9 +829,6 @@ impl Ctx {
                 (self.registry.root(&job.drive)?.to_path_buf(), touch, None)
             }
             Mode::Push => {
-                // Everything that can be refused is refused before a
-                // container is stopped, including a volume nobody can
-                // receive.
                 for volume in job.volumes.iter().flatten() {
                     authority_node(&self.registry, state, volume)?;
                 }
@@ -928,7 +870,6 @@ impl Ctx {
         })
     }
 
-    /// Why this node cannot carry out `jobs`, for an error message.
     fn job_problems(&self, state: &ClusterState, jobs: &[Job]) -> String {
         let mut problems = Vec::new();
         for job in jobs
@@ -958,8 +899,6 @@ impl Ctx {
         )
     }
 
-    /// Hands the restore to the cluster as a `RestoreRequest` - the node that
-    /// can carry it out claims it - and waits for the outcome.
     async fn submit_and_wait(
         &self,
         scope: &RestoreScope,
@@ -1018,9 +957,6 @@ impl Ctx {
         }
     }
 
-    /// Pushes what a [`Mode::Push`] restore left in `staging` to each
-    /// volume's authoritative node, then clears the staging directory.
-    /// Returns the volumes whose generation to bump, with their primary.
     async fn push_staged(
         &self,
         state: &ClusterState,
@@ -1110,8 +1046,6 @@ impl Ctx {
         wait_for_stopped(&self.client, &self.node_name, all, deadline).await
     }
 
-    /// Sets every instance back to `Running`, attempting all of them even if
-    /// one fails.
     async fn restart(&self, stopped: &[InstanceId]) -> std::result::Result<(), String> {
         let mut failures = Vec::new();
         for instance in stopped {
@@ -1132,8 +1066,6 @@ impl Ctx {
         }
     }
 
-    /// `TouchVolume` for each restored volume with this node as primary:
-    /// bumps the generation so every other replica is stale and re-pulls.
     async fn touch(&self, volumes: &[(VolumeId, String)]) -> std::result::Result<(), String> {
         let mut failures = Vec::new();
         for (id, primary) in volumes {
@@ -1240,15 +1172,10 @@ pub(crate) fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> 
         .unwrap_or(default)
 }
 
-/// Same shape as `folder_import`'s helper of the same name: polls local
-/// docker for instances assigned to `node_name`, and the cluster's
-/// self-reported `container_status` (see
-/// `cl_sched::run::Scheduler::report_container_status`) for anything
-/// assigned elsewhere, rather than blindly sleeping out `deadline` for those.
-///
-/// Fails - rather than returning quietly - if docker cannot be reached for a
-/// local container or anything is still not confirmed stopped at `deadline`:
-/// restoring under a running container corrupts it.
+/// Polls local docker for instances assigned to `node_name`, and the cluster's
+/// self-reported `container_status` for those assigned elsewhere.
+/// Fails if docker cannot be reached or anything is not confirmed stopped at
+/// `deadline`: restoring under a running container corrupts it.
 pub(crate) async fn wait_for_stopped(
     client: &cl_raft::client::Client,
     node_name: &str,
@@ -1425,8 +1352,6 @@ mod tests {
         }
     }
 
-    /// `db` is primary on `primary`, and the `local` destination lives on
-    /// `dest_node`.
     fn restore_state(primary: &str, dest_node: &str) -> ClusterState {
         let mut state = ClusterState::default();
         state

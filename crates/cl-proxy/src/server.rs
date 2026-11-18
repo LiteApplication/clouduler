@@ -40,8 +40,6 @@ use crate::route::{RedirectTarget, Route, RouteTable, STICKY_COOKIE};
 const ACME_CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-/// The single body type every response and outbound request in this crate
-/// uses, so both listeners and the backend client agree on one shape.
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
 pub(crate) fn empty_body() -> ProxyBody {
@@ -58,9 +56,6 @@ fn incoming_to_proxy_body(b: Incoming) -> ProxyBody {
     b.map_err(|e| Box::new(e) as BoxError).boxed()
 }
 
-/// The outbound clients and gate a request may need once a route is found,
-/// bundled together so passing them down to a connection handler is one
-/// argument instead of three.
 #[derive(Clone)]
 struct Backends {
     client: Client<BackendConnector, ProxyBody>,
@@ -75,14 +70,11 @@ struct Backends {
     peers: Arc<PeerPolicies>,
 }
 
-/// Runs the plain HTTP and TLS listeners for one routing table and cert store.
 pub struct ProxyServer {
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
     client: Client<BackendConnector, ProxyBody>,
     client_h2: Client<BackendConnector, ProxyBody>,
-    /// How backends are dialed: directly, or through the relay of the node
-    /// running a container this node does not (see `with_dialer`).
     dialer: Dialer,
     /// `None` when nothing needs it yet: only built once a route actually
     /// carries the `authenticated` middleware.
@@ -90,38 +82,25 @@ pub struct ProxyServer {
     /// ACME HTTP-01 challenge responses, served out of the plain HTTP
     /// listener regardless of which route (if any) matches the request host.
     http01: Arc<Http01Store>,
-    /// Per-stack host allow lists, shared with whatever keeps them current.
     peers: Arc<PeerPolicies>,
 }
 
-/// How long a backend gets to accept a TCP connection before it's treated as
-/// unreachable, through its node's relay included. Without this, a dial
-/// falls back to the OS's own SYN retry timeout (minutes, not seconds) on a
-/// backend that never sends a SYN-ACK or RST, or on a relay whose node just
-/// died, instead of failing fast.
+/// How long a backend (or its node's relay) gets to accept a TCP connection.
+/// Without it a dial waits out the OS SYN retry timeout (minutes) on a backend
+/// that never answers or a relay whose node just died.
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Cap on how long a backend has to return response headers when the route
-/// itself doesn't configure `response_timeout`. `RouteOptions::response_timeout`
-/// defaults to `None` (unbounded) - fine when the backend is always reachable
-/// instantly, not fine as the only thing standing between a stalled backend
-/// and a request that never completes.
+/// Cap on response headers when the route sets no `response_timeout`; without
+/// one a stalled backend leaves the request hanging forever.
 const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a pooled backend connection may sit idle before this client
-/// proactively drops it instead of reusing it. Without this,
-/// `hyper_util`'s legacy pool only notices a dead connection when it tries
-/// to poll it ready for reuse, which detects a graceful close but not a
-/// hard reset - a container that gets killed (not stopped gracefully) while
-/// a keep-alive connection to it is idle in the pool resets the socket
-/// instead of closing it, and the next real request to reuse that
-/// connection fails outright with a `SendRequest` error (confirmed live on
-/// `stalwart`, a backend that restarts in well under 30s and was otherwise
-/// completely healthy). Keeping the idle budget short bounds how long a
-/// connection can go stale in the pool before it's evicted.
+/// Idle time before a pooled backend connection is dropped. `hyper_util`'s
+/// pool only notices a gracefully closed connection, not a hard reset: a
+/// container killed while a keep-alive connection sat idle resets the socket
+/// and the next request on it fails with `SendRequest` (seen live on
+/// `stalwart`). A short idle budget bounds how stale a pooled connection gets.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The pooled client every proxied request goes out on.
 fn backend_client(dialer: Dialer) -> Client<BackendConnector, ProxyBody> {
     Client::builder(TokioExecutor::new())
         .pool_timer(TokioTimer::new())
@@ -190,16 +169,13 @@ impl ProxyServer {
         }
     }
 
-    /// Enforce `peers`: a caller whose stack restricted the network a route
-    /// is published on gets a 403 for any host it did not list.
     pub fn with_peer_policies(mut self, peers: Arc<PeerPolicies>) -> Self {
         self.peers = peers;
         self
     }
 
-    /// Dial backends through `dialer`, so a container another node runs is
-    /// reached through that node's relay. Without it every backend is dialed
-    /// directly from this host, which only reaches containers running here.
+    /// Dial backends through `dialer`; without it every backend is dialed
+    /// directly, which only reaches containers running on this node.
     pub fn with_dialer(mut self, dialer: Dialer) -> Self {
         self.client = backend_client(dialer.clone());
         self.client_h2 = backend_client_h2(dialer.clone());
@@ -218,8 +194,6 @@ impl ProxyServer {
         }
     }
 
-    /// Serves plain HTTP forever: 308-redirects tls routes to https, proxies
-    /// everything else directly.
     pub async fn serve_http(&self, addr: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
         self.serve_http_on(listener).await
@@ -261,7 +235,6 @@ impl ProxyServer {
         self.serve_https_on(listener).await
     }
 
-    /// Like `serve_https`, on a listener the caller already bound.
     pub async fn serve_https_on(&self, listener: TcpListener) -> Result<()> {
         ensure_crypto_provider();
         let resolver = Arc::new(CertResolver::new(self.certs.clone()));
@@ -333,12 +306,10 @@ async fn accept_tls(
     Ok(())
 }
 
-/// An h2 request carries its host in `:authority` (the URI), not a `Host`
-/// header, but routing, the gates and the forwarded headers all read `Host`.
-/// Synthesise it so every code path below sees the same thing for HTTP/1.1
-/// and HTTP/2 clients. For HTTP/2 `:authority` always wins over a `Host`
-/// header the client also sent (RFC 9113 §8.3.1), so a request cannot be
-/// routed by one name and checked against another.
+/// An h2 request carries its host in `:authority`, not a `Host` header, but
+/// routing, the gates and forwarded headers all read `Host`. `:authority` wins
+/// over any `Host` the client also sent (RFC 9113 §8.3.1), so a request cannot
+/// be routed by one name and checked against another.
 fn ensure_host_header(req: &mut Request<Incoming>) {
     if req.version() != Version::HTTP_2 && req.headers().contains_key(HOST) {
         return;
@@ -412,12 +383,9 @@ fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-/// Rejects a request whose TCP peer does not sit inside the route's
-/// `allowed_subnets`, or one of its `trusted_overlay_subnets` (see that
-/// field's doc for why a same-node client needs the latter). A route with no
-/// restriction (a public network) always passes. This is a check on the real
-/// socket peer, not a header, so it cannot be spoofed by a client claiming a
-/// different address.
+/// Rejects a request whose TCP peer is outside the route's `allowed_subnets`
+/// and `trusted_overlay_subnets` (see that field for why). Checks the real
+/// socket peer, not a header, so it cannot be spoofed.
 fn gate_by_network(
     route: &Route,
     peer: SocketAddr,
@@ -457,9 +425,8 @@ fn gate_by_network(
     ))
 }
 
-/// Refuses a request whose caller's stack did not list the host on the
-/// network the route is published on. The check is against the real socket
-/// peer, like `gate_by_network`.
+/// Refuses a request whose caller's stack did not list the host on the route's
+/// network. Checks the real socket peer, like `gate_by_network`.
 fn gate_by_allowed_hosts(
     peers: &PeerPolicies,
     route: &Route,
@@ -480,7 +447,6 @@ fn gate_by_allowed_hosts(
     ))
 }
 
-/// Answers a redirect route directly, never touching a backend.
 fn respond_redirect(redirect: &RedirectTarget, path_and_query: &str) -> Response<ProxyBody> {
     let location = if redirect.preserve_path {
         format!("{}{path_and_query}", redirect.url)
@@ -495,12 +461,9 @@ fn respond_redirect(redirect: &RedirectTarget, path_and_query: &str) -> Response
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-/// Reject an oversized body before reading it, when the client declared one.
-///
-/// This is the cheap half of the limit: a `Content-Length` over the cap is
-/// refused without touching the body at all, so an upload that was never going
-/// to be accepted does not get streamed across the network first. A chunked
-/// request has no length to check, and is caught by `Limited` while streaming.
+/// Rejects an oversized body up front when `Content-Length` is over the cap, so
+/// an upload that will never be accepted is not streamed first. Chunked bodies
+/// have no length and are caught by `Limited` while streaming.
 fn declared_length_exceeds(headers: &hyper::HeaderMap, max: u64) -> bool {
     headers
         .get(hyper::header::CONTENT_LENGTH)
@@ -521,8 +484,6 @@ fn limited_body(body: Incoming, max: Option<u64>) -> ProxyBody {
     }
 }
 
-/// The full URL a redirect (fixed-string or regex) needs to match/build
-/// against: `{scheme}://{host}{path_and_query}`, mirroring `respond_redirect`.
 fn full_url(scheme: &str, host: &str, path_and_query: &str) -> String {
     format!("{scheme}://{host}{path_and_query}")
 }
@@ -688,7 +649,6 @@ async fn handle_https(
     Ok(proxy(req, &route, "https", peer, &backends).await)
 }
 
-/// Applies `strip_prefix` to the request path.
 fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
     if route
         .middlewares
@@ -711,7 +671,6 @@ fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
     }
 }
 
-/// The route's `headers` middleware, if it has one.
 fn headers_config(route: &Route) -> Option<&cl_config::Headers> {
     route.middlewares.iter().find_map(|m| match m {
         cl_config::Middleware::Headers(cfg) => Some(cfg),
@@ -719,7 +678,6 @@ fn headers_config(route: &Route) -> Option<&cl_config::Headers> {
     })
 }
 
-/// The route's `cors` middleware, if it has one.
 fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
     route.middlewares.iter().find_map(|m| match m {
         cl_config::Middleware::Cors(policy) => Some(policy),
@@ -727,7 +685,6 @@ fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
     })
 }
 
-/// The route's `authenticated` middleware, if it has one.
 fn authenticated_policy(route: &Route) -> Option<&cl_config::Authenticated> {
     route.middlewares.iter().find_map(|m| match m {
         cl_config::Middleware::Authenticated(policy) => Some(policy),
@@ -929,7 +886,6 @@ fn response_limit(options: &crate::route::RouteOptions) -> Option<Duration> {
     }
 }
 
-/// Whether the client's `TE` header lists `trailers`.
 fn wants_trailers(headers: &hyper::HeaderMap) -> bool {
     headers
         .get_all(hyper::header::TE)
@@ -960,8 +916,6 @@ fn extract_cookie(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
     })
 }
 
-/// Adds `X-Forwarded-For` (appending to any existing chain), `X-Forwarded-Proto`
-/// and `X-Forwarded-Host`.
 fn add_forwarded_headers(
     headers: &mut hyper::HeaderMap,
     scheme: &str,
@@ -984,9 +938,6 @@ fn add_forwarded_headers(
     }
 }
 
-/// Proxies a websocket (or other `Upgrade`) request: sends the request to the
-/// backend over its own connection, and once both sides have upgraded,
-/// splices the two raw connections together.
 async fn proxy_websocket(
     mut req: Request<Incoming>,
     backend: SocketAddr,
@@ -1002,15 +953,11 @@ async fn proxy_websocket(
     if let Ok(host) = HeaderValue::from_str(&backend.to_string()) {
         parts.headers.insert(HOST, host);
     }
-    // Unlike the regular path (which goes through hyper_util's pooled Client and
-    // gets its absolute-form URI normalized to origin-form automatically), this
-    // sends over a raw hyper::client::conn connection that writes parts.uri to
-    // the wire verbatim. An absolute-form request-target (http://addr/path)
-    // reaches the backend as `GET http://addr/path HTTP/1.1`, which Node's
-    // upgrade handler passes through as req.url unchanged — engine.io/socket.io
-    // then fails to match it against the expected path and silently drops the
-    // connection. Origin-form (path+query only) is what a reverse proxy must
-    // send to an origin server.
+    // Unlike the pooled Client, which normalizes absolute-form URIs, a raw
+    // `hyper::client::conn` writes parts.uri verbatim. An absolute-form target
+    // (`GET http://addr/path`) makes Node's upgrade handler pass it through as
+    // req.url, so engine.io/socket.io fail to match the path and drop the
+    // connection. A reverse proxy must send origin-form.
     let path_and_query = parts
         .uri
         .path_and_query()

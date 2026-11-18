@@ -258,6 +258,18 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
         engine: Arc<E>,
         host: Arc<dyn ServedHost>,
     ) -> Arc<Self> {
+        Self::with_drain(node, registry, engine, host, DRAIN)
+    }
+
+    /// `new` with a custom wait between cutting clients off and the final
+    /// sync, for tests that do not want to wait it out.
+    pub fn with_drain(
+        node: Arc<ClusterNode>,
+        registry: Arc<DriveRegistry>,
+        engine: Arc<E>,
+        host: Arc<dyn ServedHost>,
+        drain: Duration,
+    ) -> Arc<Self> {
         let quorum = node.quorum();
         Arc::new(Self {
             node,
@@ -267,17 +279,8 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
             quorum,
             busy: Mutex::default(),
             last_failure: Mutex::default(),
-            drain: DRAIN,
+            drain,
         })
-    }
-
-    /// How long a handover waits between cutting clients off and the final
-    /// sync. For tests that do not want to wait it out.
-    pub fn with_drain(mut self: Arc<Self>, drain: Duration) -> Arc<Self> {
-        Arc::get_mut(&mut self)
-            .expect("set before the supervisor is shared")
-            .drain = drain;
-        self
     }
 
     pub async fn run(self: Arc<Self>) {

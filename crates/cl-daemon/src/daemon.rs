@@ -100,12 +100,11 @@ pub async fn run(
         "starting"
     );
 
-    // Every overlay bridge needs `ethtool -K <bridge> tx off` the moment a
-    // container lands on it (see `cl_net::vxlan::disable_tx_checksum_offload`)
-    // or that container's real traffic gets silently dropped by a checksum
-    // the host never actually fills in - a failure mode with no error to
-    // grep for. Checked once, loudly, at startup instead of only being
-    // discoverable as "why do my requests to this backend keep timing out".
+    // Every overlay bridge needs `ethtool -K <bridge> tx off` once a container
+    // lands on it (see `cl_net::vxlan::disable_tx_checksum_offload`), or its real
+    // traffic is silently dropped for want of a checksum the host never fills in.
+    // Checked once, loudly, at startup, since that failure has no error to grep
+    // for.
     if !cl_net::ethtool_available() {
         warn!(
             "ethtool is not on PATH - overlay networks will come up but every container on one \
@@ -116,11 +115,10 @@ pub async fn run(
 
     bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
-    // Anyone in the `clouduler` group can operate this cluster from the cli,
-    // the same way root can - see permissions for why that is
-    // just a matter of file ownership rather than a second auth mechanism.
-    // Run before the key files are loaded below so a freshly chowned key is
-    // what validation and the rest of startup actually see.
+    // Anyone in the `clouduler` group can operate the cluster from the cli, like
+    // root (see permissions: it is just file ownership, not a second auth
+    // mechanism). Run before the key files are loaded so a freshly chowned key is
+    // what the rest of startup sees.
     cl_init::permissions::ensure(&cfg, &data_dir, &config_path);
 
     // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is
@@ -141,13 +139,11 @@ pub async fn run(
         .as_ref()
         .map(cl_secret::NodeKeypair::public_key_encoded);
 
-    // Broadcasts the cluster config and cluster key to every subsystem that
-    // needs a cheap, always-current read rather than a snapshot frozen at
-    // boot. `config_tx` is fed by `watch_cluster_config` on every generation
-    // bump it already polls for; `key_tx` is fed by `cl-api`'s existing
-    // in-process key delivery (`spawn_unwrap_own_key`, the manual upload
-    // route), so a node that starts with no key still picks one up live once
-    // another node delivers it.
+    // Broadcast the cluster config and key to every subsystem that needs a cheap,
+    // always-current read instead of a boot snapshot. `config_tx` is fed by
+    // `watch_cluster_config`; `key_tx` by `cl-api`'s in-process key delivery
+    // (`spawn_unwrap_own_key`, the manual upload route), so a node started with
+    // no key picks one up live.
     let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(cfg.clone()));
     let (key_tx, key_rx) = tokio::sync::watch::channel(key.clone());
     // Kept for SIGHUP, which re-reads the key file; `key_tx` itself goes to the api.
@@ -200,15 +196,12 @@ pub async fn run(
         }
         None => Fence::new(),
     };
-    // Shared between the fence watcher and the scheduler, which consults it
-    // before doing anything, as a `FenceState`.
     let fenced = Arc::new(AtomicU8::new(fence.state().as_u8()));
-    // Separate from `fenced` itself: it starts `Closed` purely as a
-    // starting default, not because quorum was checked and found missing.
-    // The scheduler needs to tell those apart — see the gate closure below —
-    // or its first sweep, which can easily land before `run_fence`'s first
-    // tick, reads "fenced" and stops every container this node already owns,
-    // only to start them all back up a sweep later once the fence catches up.
+    // Separate from `fenced`, which starts `Closed` only as a default, not
+    // because quorum was checked and found missing. The scheduler must tell those
+    // apart (see the gate closure below), or its first sweep, which can land
+    // before `run_fence`'s first tick, would stop every container this node owns
+    // only to restart them a sweep later.
     let observed = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(tokio::sync::Notify::new());
     let fencing = tokio::spawn(run_fence(
@@ -225,29 +218,22 @@ pub async fn run(
     // lands. A node whose dockerd is slow or absent still has to be reachable,
     // since the web ui is where someone would go to find out why.
     let docker = cl_docker::DockerHandle::default();
-    // Shared between the scheduler (which marks/unmarks it around an image
-    // pull) and the api (which reads it to report a "pulling" instance
-    // state) — see `cl_sched::PullTracker`.
     let pulling: cl_sched::PullTracker = Arc::default();
-    // How far along an in-progress migration's volume sync is, shared with
-    // the api the same way `pulling` is, so it can report live progress
-    // instead of only a coarse docker state. (Redeploy and update steps are
-    // replicated instead: see `ClusterState::instance_updates`.)
+    // Progress of an in-progress migration's volume sync, shared with the api
+    // like `pulling`. (Redeploy and update steps are replicated instead: see
+    // `ClusterState::instance_updates`.)
     let migration_sync: cl_drive::MigrationSyncTracker = Arc::default();
 
-    // Fires the same clean shutdown path `ctrl_c()` drives, so the internal
-    // self-update restart route can trigger it programmatically after
-    // swapping in a new binary.
+    // Fires the same clean shutdown as `ctrl_c()`, so the self-update restart
+    // route can trigger it after swapping in a new binary.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
     let rollback_shutdown = shutdown_tx.clone();
 
-    // Shared by the api's cross-node forwarding and by self-update's peer
-    // calls. Accepts invalid certs for both: peers are authenticated by an
-    // HMAC header, not TLS trust, since every node's certificate is self
-    // signed until ACME issues a real one, and there is no shared CA to check
-    // it against.
-    // No read timeout: log and event follows through it are legitimately idle.
-    // A connect timeout is safe, though, and keeps a dead peer from hanging a call.
+    // Shared by the api's cross-node forwarding and self-update's peer calls.
+    // Accepts invalid certs: peers are authenticated by an HMAC header, not TLS
+    // trust, since every certificate is self signed until ACME issues one and
+    // there is no shared CA. No read timeout, since log and event follows are
+    // legitimately idle; a connect timeout keeps a dead peer from hanging a call.
     let internal_http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .danger_accept_invalid_certs(true)
@@ -260,9 +246,8 @@ pub async fn run(
     // proxy and the expose forwarders reach it through that node's relay.
     let relay = crate::relay::start(&cfg, &node_name, &cluster, key_rx.clone());
 
-    // Started before the api so the api can hand out `proxy.health`, the
-    // reverse proxy's own active backend health checks, from the moment it
-    // comes up rather than needing a second wiring pass later.
+    // Started before the api so it can hand out `proxy.health` from the moment it
+    // comes up.
     let nudges = cl_api::Nudges::default();
     let proxy = crate::proxy::start(crate::proxy::StartProxyArgs {
         cfg: &cfg,
@@ -326,11 +311,10 @@ pub async fn run(
     // of the process would vote but run nothing until someone restarted it.
     crate::systemd::extend_timeout(DOCKER_WAIT + Duration::from_secs(30));
     docker.set(connect_docker().await).await;
-    // Keeps retrying afterwards: a node whose dockerd was not up yet during
-    // the wait above, or whose dockerd is later bounced independently of this
-    // process, gets a working `Docker` handle again without a restart. Every
-    // subsystem below holds the same `Arc`, so this is the one place that
-    // needs to notice.
+    // Keeps retrying afterwards, so a node whose dockerd was late or is later
+    // bounced gets a working `Docker` handle again without a restart. Every
+    // subsystem holds the same handle, so this is the one place that has to
+    // notice.
     let docker_reconnect = tokio::spawn(run_docker_reconnect(docker.clone()));
 
     let materializer = Materializer::new(&data_dir, key_rx.clone());
@@ -399,10 +383,9 @@ pub async fn run(
         ));
     }
 
-    // The api records a move and returns; this is what carries it out. It
-    // needs both halves of the job, a docker to stop the container with and a
-    // registry to find the volume on disk, so a node missing either runs no
-    // migrations, which is correct: it can hold no volume to move.
+    // The api records a move; this carries it out. It needs a docker to stop the
+    // container and a registry to find the volume, so a node missing either runs
+    // no migrations, which is correct: it can hold no volume to move.
     let migrations = crate::migration::start(
         config_rx.clone(),
         &node_name,
@@ -551,8 +534,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Stand up the http api and the web ui.
-///
 /// Every node listens; a node that is not the leader answers with a redirect to
 /// the one that is. That is simpler than starting and stopping a listener on
 /// every election, and it means someone who bookmarked a node still gets in.
@@ -673,18 +654,14 @@ async fn start_api(
     (Some(handle), Some(state))
 }
 
-/// Where a self-update artifact this node built or fetched is staged.
 fn self_update_artifact_path(data_dir: &Path) -> PathBuf {
     data_dir.join("self-update").join("artifact")
 }
 
-/// Wire up the leader-gated orchestrator and the per-node worker for
-/// GitHub-release-based self-update, alongside the scheduler. Both hold a
-/// live `key_rx` rather than a key loaded once: a node started with no
-/// cluster key still gets self-update working once one is delivered to it,
-/// without a restart. Unlike the old build pipeline this needs no docker
-/// connection: downloading a prebuilt binary and swapping it in are both
-/// plain filesystem operations.
+/// Wire up the leader-gated orchestrator and per-node worker for GitHub-release
+/// self-update. Both hold a live `key_rx`, so a node started with no cluster key
+/// gets self-update once one is delivered. No docker connection needed:
+/// downloading a prebuilt binary and swapping it in are filesystem operations.
 fn start_self_update(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -720,14 +697,11 @@ fn start_self_update(
     Some((tokio::spawn(orchestrator.run()), tokio::spawn(worker.run())))
 }
 
-/// Keep `docker` pointed at a live client for as long as the process runs.
-///
-/// The initial connect in `run` waits `DOCKER_WAIT` and gives up; this picks
-/// up from there and keeps trying, so a node whose dockerd was not up yet at
-/// boot (or whose dockerd is later restarted on its own) gets a working
-/// client again without restarting the daemon. bollard's client normally
-/// reconnects its own socket transparently per call once it has one, so the
-/// steady-state cost here is just a cheap ping.
+/// Keep `docker` pointed at a live client for as long as the process runs. The
+/// initial connect in `run` waits `DOCKER_WAIT` and gives up; this keeps trying,
+/// so a node whose dockerd was late or is later restarted gets a client again.
+/// bollard reconnects its socket per call once it has one, so steady state is a
+/// cheap ping.
 async fn run_docker_reconnect(docker: cl_docker::DockerHandle) {
     const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut ticker = tokio::time::interval(RETRY_INTERVAL);
@@ -756,12 +730,9 @@ async fn run_docker_reconnect(docker: cl_docker::DockerHandle) {
     }
 }
 
-/// Connect to docker, waiting for it to come up.
-///
-/// The wait is what makes a node that reboots with the cluster come back with
-/// its containers: the daemon and dockerd start at the same time, and the
-/// first connect often loses that race by a second or two. Giving up for the
-/// life of the process over that would leave the node voting but idle.
+/// Connect to docker, waiting for it to come up. A node rebooting with the
+/// cluster often loses the dockerd start race by a second or two; giving up for
+/// the life of the process would leave it voting but idle.
 async fn connect_docker() -> Option<cl_docker::Docker> {
     let deadline = Instant::now() + DOCKER_WAIT;
     let mut last = None;
@@ -779,8 +750,6 @@ async fn connect_docker() -> Option<cl_docker::Docker> {
     None
 }
 
-/// Load the key that opens stored secrets, creating it on first launch.
-///
 /// A node without a key is not an error: it replicates sealed secrets like any
 /// other state and simply cannot run containers that need them. That is the
 /// intended setup for a worker you do not want holding the keys to everything.
@@ -815,13 +784,10 @@ pub fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> 
     }
 }
 
-/// Load this node's own asymmetric keypair, creating it on first launch.
-///
-/// Every node has one, unlike the cluster key: it is what lets another node
-/// wrap a copy of the cluster key for this one without ever putting the
-/// plaintext on the wire. Not fatal on failure: a node that somehow cannot
-/// get one just never receives an automatic key delivery, the same steady
-/// state as before this existed.
+/// Load this node's own asymmetric keypair, creating it on first launch. Every
+/// node has one, unlike the cluster key: it lets another node wrap a copy of the
+/// cluster key for this one without plaintext on the wire. Not fatal on failure:
+/// the node just never receives an automatic key delivery.
 pub fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> {
     let path = &cfg.secrets.node_key_file;
     match cl_secret::NodeKeypair::load_or_create(path) {
@@ -838,12 +804,10 @@ pub fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> 
     }
 }
 
-/// Stop this node's containers once it has been without a quorum for longer
-/// than `failover.fence_timeout`.
-///
-/// This is the other half of the failure handling: the leader will hand our
-/// containers to another node after `node_timeout`, and we must have let go of
-/// them before that happens, or the same volume ends up with two writers.
+/// Stop this node's containers once it has been without a quorum for longer than
+/// `failover.fence_timeout`. The leader hands our containers to another node
+/// after `node_timeout`, and we must have let go before that, or the same volume
+/// gets two writers.
 async fn run_fence(
     cluster: Arc<ClusterNode>,
     failover: FailoverConfig,
@@ -868,7 +832,6 @@ async fn run_fence(
             _ = ticker.tick() => {}
             changed = quorum.changed() => {
                 if !changed {
-                    // The sender is gone: fall back to the plain interval.
                     ticker.tick().await;
                 }
             }
@@ -913,53 +876,30 @@ async fn run_fence(
             }
             FenceAction::None => {}
         }
-        // Every call is an observation, whatever it decided — this is what
-        // lets the scheduler tell "genuinely fenced" apart from "hasn't been
-        // asked yet" instead of treating its own first sweep's guess as fact.
+        // Every call is an observation, whatever it decided; this lets the
+        // scheduler tell "genuinely fenced" from "not asked yet".
         observed.store(fence.is_observed(), Ordering::Relaxed);
     }
 }
 
-/// Write the replicated cluster config to this node's config file whenever it
-/// changes, and broadcast the parsed config to every live subsystem through
-/// `config_tx`.
-///
-/// This is what makes an edit in the web ui reach every node: the api submits
-/// it through raft, and each daemon lands its own copy here. A node that was
-/// down during the edit picks it up on its next tick after rejoining, rather
-/// than coming back with a stale file.
-///
-/// Most of what a config edit can change now applies live, through
-/// `config_tx` (see `docs/live-config.md`) — the file write remains so a
-/// restarted daemon boots from the config the cluster last agreed on, not a
-/// possibly-reverted local copy. What still needs a restart is raft's own
-/// listen address, data dir and cluster identity: rebuilding raft membership
-/// or transport under a running cluster is not something to do unattended.
-/// How often the leader checks whether a git export is due. Short, since a
-/// change should be pushed promptly rather than waiting for a slow poll -
-/// the actual git2/age work runs off this loop's task via `spawn_blocking`
-/// (see `run_git_export`), so a fast poll here never risks blocking the
-/// executor.
+/// How often the leader checks whether a git export is due. Short, so a change is
+/// pushed promptly; the git2/age work runs via `spawn_blocking` (see
+/// `run_git_export`), so polling fast never blocks the executor.
 const GIT_BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Leader-only: mirrors `cluster_config`/stacks/configs/secrets into the
-/// admin's git repo whenever `cfg.backup` is set and something tracked has
-/// changed, pushing as soon as a change is seen. Generates the cluster's ssh
-/// deploy keypair on the first tick it finds missing.
+/// Leader-only: mirrors `cluster_config`/stacks/configs/secrets into the admin's
+/// git repo whenever `cfg.backup` is set and something tracked changed, pushing
+/// as soon as a change is seen. Generates the cluster's ssh deploy keypair on the
+/// first tick it finds it missing.
 ///
-/// Every export is a full rebuild of the tracked tree straight from raft
-/// state (`cl_backup::tree::build`), which used to make this loop race the
-/// webhook-triggered pull (`routes::git_backup::run_pull`): a commit pushed
-/// directly to the repo (bypassing the api) sits on the remote, unseen by
-/// raft, until its webhook lands - and if any unrelated stack/config/secret
-/// happened to change in the meantime, this loop's very next tick rebuilt
-/// the tree straight from (stale) raft state and force-pushed over the
-/// manual commit, silently reverting it. Once the webhook's pull eventually
-/// landed, the following tick's export re-applied it - two commits, each
-/// mislabeled with whatever unrelated change actually happened to trigger
-/// them. `api_state`, when the api came up, lets this loop pull through the
-/// exact same path right before it would otherwise export, so a pending
-/// remote-only commit is folded into raft first and never gets clobbered.
+/// Every export is a full rebuild of the tracked tree from raft state
+/// (`cl_backup::tree::build`). That used to race the webhook-triggered pull
+/// (`routes::git_backup::run_pull`): a commit pushed straight to the repo sat
+/// unseen by raft until its webhook landed, and an unrelated change in between
+/// made the next export force-push stale raft state over it, silently reverting
+/// it. `api_state`, when the api is up, lets this loop pull through the same path
+/// right before exporting, so a pending remote-only commit is folded into raft
+/// first.
 async fn watch_git_backup(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
@@ -968,11 +908,9 @@ async fn watch_git_backup(
     api_state: Option<cl_api::AppState>,
 ) {
     let dir = data_dir.join("git-backup");
-    // The pull path no longer needs a separate working copy: it computes
-    // its "known good" baseline fresh each call from the cluster's live
-    // raft state, so there is no persisted local state to desync across
-    // leadership changes. The export path uses this single bare repo for
-    // pushing.
+    // The pull path computes its baseline fresh from live raft state each call,
+    // so there is no persisted local state to desync across leadership changes.
+    // The export path uses this single bare repo for pushing.
     let cache_path = data_dir.join("git_backup_cache.json");
     let mut ticker = tokio::time::interval(GIT_BACKUP_POLL_INTERVAL);
     let cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
@@ -1010,11 +948,9 @@ async fn watch_git_backup(
             continue;
         }
 
-        // Something tracked changed and an export is about to rebuild the
-        // whole tree from raft state - pull first, so a commit sitting on
-        // the remote that raft hasn't seen yet (a manual push, or a webhook
-        // still in flight) is folded in before that rebuild can clobber it.
-        // See this function's doc comment for the race this closes.
+        // Pull first: an export rebuilds the whole tree from raft state, and a
+        // commit on the remote that raft has not seen (manual push, webhook in
+        // flight) would be clobbered. See this function's doc comment.
         let state = match &api_state {
             Some(app_state) => {
                 if let Err(e) = cl_api::routes::git_backup::run_pull(app_state).await {
@@ -1026,8 +962,6 @@ async fn watch_git_backup(
         };
         let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
         if last_snapshot.as_ref() == Some(&snapshot) {
-            // The pull above resolved the only outstanding difference and
-            // left nothing else to export this tick.
             continue;
         }
         let changes =
@@ -1116,7 +1050,7 @@ fn run_git_export(
     dir: &Path,
     message: &str,
     secret_cache: &mut cl_backup::tree::SecretCache,
-    author: Option<(String, String)>,
+    author: Option<&(String, String)>,
 ) -> anyhow::Result<Option<String>> {
     let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)?;
     let private_key_pem = cl_backup::deploy_key::load_private(state, key)
@@ -1131,7 +1065,7 @@ fn run_git_export(
         tracing::warn!(error = %e, "git backup: could not read committed secrets from the remote");
     }
     let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
-    let author_ref = author.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
+    let author_ref = author.map(|(n, e)| (n.as_str(), e.as_str()));
     let oid = repo.sync(&files, message, &private_key_pem, author_ref)?;
     Ok(oid.map(|oid| oid.to_string()))
 }
@@ -1159,7 +1093,7 @@ async fn run_git_export_blocking(
             &dir,
             &message,
             &mut secret_cache,
-            author,
+            author.as_ref(),
         );
         (result, secret_cache)
     })
@@ -1233,6 +1167,12 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
+/// Write the replicated cluster config to this node's config file whenever it
+/// changes, and broadcast the parsed config through `config_tx`. This is how a
+/// web ui edit reaches every node, including one that was down during it. Most
+/// config changes apply live via `config_tx` (see `docs/live-config.md`); the
+/// file write makes a restarted daemon boot from the last agreed config. Still
+/// restart-only: raft's listen address, data dir and cluster identity.
 async fn watch_cluster_config(
     cluster: Arc<ClusterNode>,
     config_path: PathBuf,
@@ -1348,24 +1288,18 @@ pub fn live_config(state: &cl_raft::state::ClusterState, boot: &ClusterConfig) -
 }
 
 /// Keep the replicated roster in step with the config for as long as this node
-/// leads. Seeding is done on every leadership change and, in between, on a
-/// timer.
+/// leads: seeded on every leadership change and on a timer in between.
 ///
-/// The timer is not just a safety net: a node newly added to the config is
-/// never itself a raft voter/learner yet, so it can never appear in
-/// `quorum`'s `reachable` set, so adding it can never itself flip
-/// `quorum.changed()`. Without the timer, `seed_roster` - the only thing that
-/// calls `add_manager`/`add_worker` - would simply never rerun for it. The
-/// timer breaks that chicken-and-egg deadlock; `probe_interval` is reused
-/// from `failover` for the same reason `reap_removed_nodes` does, a plain
-/// state write doesn't move the raft-metrics needle `quorum.changed()` gates
-/// on.
+/// The timer is not just a safety net: a node newly added to the config is not
+/// yet a raft voter/learner, so it never appears in `quorum`'s `reachable` set
+/// and adding it never flips `quorum.changed()`. Without the timer `seed_roster`
+/// (the only caller of `add_manager`/`add_worker`) would never rerun for it.
+/// `probe_interval` is reused from `failover`, as in `reap_removed_nodes`.
 ///
-/// `cfg` is only the config this node booted with; a node joining after that
-/// changes the replicated `ClusterConfig`, not this snapshot. So the roster is
-/// seeded from the replicated config (already fresh, since a join pushes it
-/// straight into raft), falling back to `cfg` only for the brief window before
-/// `seed_config` has published anything.
+/// `cfg` is only the boot config; a node joining later changes the replicated
+/// `ClusterConfig`, which a join pushes straight into raft. So the roster is
+/// seeded from that, falling back to `cfg` only before `seed_config` has
+/// published anything.
 async fn watch_leadership(
     cfg: ClusterConfig,
     config_path: PathBuf,
@@ -1394,12 +1328,10 @@ async fn watch_leadership(
                 warn!(error = %e, "could not publish the node roster");
             }
 
-            // `status.reachable` (including this node itself) growing past
-            // one voter is the cluster's own signal that another manager
-            // `clouduler emergency` left for dead has come back - end
-            // emergency mode right here rather than wait for an operator, so
-            // every other stack resumes on its own. See
-            // `ClusterState::emergency_stack`.
+            // `status.reachable` (including this node) growing past one voter is
+            // the signal that a manager `clouduler emergency` left for dead is
+            // back: end emergency mode here instead of waiting for an operator.
+            // See `ClusterState::emergency_stack`.
             if status.reachable.len() > 1 && cluster.state().await.in_emergency() {
                 match cluster.submit(Request::ClearEmergency).await {
                     Ok(response) if response.error.is_none() => {
@@ -1424,20 +1356,15 @@ async fn watch_leadership(
     }
 }
 
-/// Ask any other configured peer whether this node was deleted through the
-/// API while it was down, and if so, wipe local secrets rather than let it
-/// rejoin (or keep holding cluster key material for a machine an operator
-/// has already decommissioned).
+/// Ask any other configured peer whether this node was deleted through the API
+/// while down, and if so wipe local secrets rather than rejoin (or keep cluster
+/// key material for a decommissioned machine).
 ///
-/// A restarting node has no way to tell this from its own state: raft simply
-/// stops delivering it new log entries the moment it drops out of
-/// membership, so its own copy of `removed` is frozen at whatever it last
-/// saw before going down. A live peer's copy is authoritative.
-///
-/// An unreachable peer is not evidence of removal - this only acts once a
-/// peer actually confirms it, and gives up quietly if none answer (e.g. this
-/// is the very first node, still forming the cluster, or the network is
-/// briefly partitioned).
+/// A restarting node cannot tell from its own state: raft stops delivering log
+/// entries once it leaves membership, so its `removed` copy is frozen. A live
+/// peer's copy is authoritative. An unreachable peer is not evidence of removal:
+/// this only acts on a peer's confirmation and gives up quietly if none answer
+/// (first node still forming, or a brief partition).
 async fn bail_if_removed(
     cfg: &ClusterConfig,
     this_node: &Node,
@@ -1503,8 +1430,6 @@ fn wipe_local_secrets(cfg: &ClusterConfig, data_dir: &Path) {
     }
 }
 
-/// Form the cluster on first boot.
-///
 /// The first manager by name is the one that forms it. That rule is
 /// deterministic, so several managers starting at once cannot each form their
 /// own cluster.
@@ -1587,15 +1512,12 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             continue;
         };
 
-        // Same name, different id: this node was re-provisioned fresh under
-        // an identity `RemoveNode` never tombstoned, because the name never
-        // left the roster - `clouduler init --force` after local state was
-        // lost, or a co-manager `force_quorum` demoted rather than dropped,
-        // just came back under a new id via `init --join`. The old id is
-        // still sitting in raft membership as a learner nothing will ever
-        // reach again, at the same address the new one now owns. Retiring
-        // it here, once, is what lets `reap_removed_nodes` clean it out on
-        // its own timer instead of it lingering forever.
+        // Same name, different id: this node was re-provisioned under an identity
+        // `RemoveNode` never tombstoned (`clouduler init --force` after local
+        // state was lost, or a co-manager `force_quorum` demoted rather than
+        // dropped, then rejoined via `init --join`). The old id is still in raft
+        // membership as a learner nothing will reach, at the address the new one
+        // owns. Retiring it here, once, lets `reap_removed_nodes` clean it out.
         if let Some(previous) = known.nodes.get(name) {
             if previous.id != node.id {
                 let response = cluster
@@ -1607,15 +1529,11 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             }
         }
 
-        // A node the roster has never seen is one that joined after the
-        // cluster was formed, so it still has to be added to raft
-        // membership. A manager gets a second check even once known: unlike
-        // a learner, a voter can be demoted without being dropped from the
-        // roster - `force_quorum`'s disaster recovery does exactly that, on
-        // purpose, so the demoted node comes back as a learner rather than a
-        // stranger. Re-checking here is what turns that back into a voter
-        // the moment it is reachable again, with nothing for an operator to
-        // run by hand.
+        // A node the roster has never seen joined after the cluster formed, so it
+        // must be added to raft membership. A manager is checked again even once
+        // known: a voter can be demoted without leaving the roster
+        // (`force_quorum` disaster recovery does so on purpose), and re-checking
+        // turns it back into a voter as soon as it is reachable.
         let id = node_id(node.id);
         let needs_membership = match node.role {
             NodeRole::Manager => !cluster.is_voter(id).await,
@@ -1627,20 +1545,17 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
                 NodeRole::Worker => cluster.add_worker(id, rpc_addr).await,
             };
             if let Err(e) = result {
-                // Usually the node is not up yet. Retried on the next pass.
                 warn!(node = %name, error = %e, "could not add the node to raft membership");
                 continue;
             }
         }
 
-        // A member whose configured address no longer matches the one raft
-        // holds was re-addressed (moved onto another network or subnet).
-        // Peers dial the membership address, so it has to follow the config,
-        // for voters and learners alike and without changing who votes. The
-        // move is only committed once the node answers as itself at the new
-        // address; until then membership, and with it the roster entry
-        // below, keeps the old one, and this pass retries every tick. A
-        // config edited back lands in the same place.
+        // A member whose configured address differs from the one raft holds was
+        // re-addressed. Peers dial the membership address, so it must follow the
+        // config, for voters and learners alike, without changing who votes. The
+        // move commits only once the node answers as itself at the new address;
+        // until then membership and the roster entry keep the old one and this
+        // pass retries every tick.
         if needs_readdress(cluster.member_addr(id).as_deref(), rpc_addr) {
             if let Err(e) = cluster.readdress(id, rpc_addr).await {
                 warn!(node = %name, to = %rpc_addr, error = %e, "could not move the node to its new address yet");
@@ -1666,14 +1581,11 @@ fn needs_readdress(member_addr: Option<&str>, configured: std::net::SocketAddr) 
     member_addr.is_some_and(|held| held != configured.to_string())
 }
 
-/// Drop nodes removed through the API from actual raft membership.
-///
-/// Separate from `watch_leadership`, which only reruns on a quorum status
-/// change: a plain `RemoveNode` write does not itself change quorum status
-/// (leader, voters, reachability), so a removal could otherwise sit in the
-/// `removed` tombstone set indefinitely without ever being applied to raft
-/// membership. `remove_node` is a no-op once the node is gone, so retrying on
-/// every tick is harmless.
+/// Drop nodes removed through the API from actual raft membership. Separate from
+/// `watch_leadership`, which only reruns on a quorum status change: a plain
+/// `RemoveNode` write does not change it, so a removal could sit in the `removed`
+/// tombstones without ever reaching raft. `remove_node` is a no-op once the node
+/// is gone, so retrying every tick is harmless.
 async fn reap_removed_nodes(cluster: Arc<ClusterNode>, interval: Duration) {
     let mut ticker = tokio::time::interval(interval);
     loop {
@@ -1774,16 +1686,14 @@ fn to_state(
     }
 }
 
-/// Keep this node's own `arch`, `binary_hash`, `version`, `memory_total_bytes` and `gpus`
-/// accurate in the roster. Unlike the rest of a `NodeState`, these fields
-/// describe facts only the node itself can observe, so every node runs this
-/// about itself regardless of leadership — the leader-driven `seed_roster`
-/// never touches them.
+/// Keep this node's own `arch`, `binary_hash`, `version`, `memory_total_bytes`
+/// and `gpus` accurate in the roster. These are facts only the node itself can
+/// observe, so every node runs this about itself regardless of leadership;
+/// `seed_roster` never touches them.
 ///
-/// Also the fix for a node whose roster entry predates one of these fields:
-/// such an entry keeps whatever was stored (empty/zero) forever otherwise,
-/// since `to_state` only fills a field in when the node is being created for
-/// the first time.
+/// Also heals a roster entry that predates one of these fields: `to_state` only
+/// fills a field in when creating the node, so it would otherwise stay empty/zero
+/// forever.
 async fn report_self(
     node_name: String,
     cluster: Arc<ClusterNode>,
@@ -1809,7 +1719,6 @@ async fn report_self(
             .clone()
             .map(Box::new)
             .unwrap_or_else(|| current.gpus.clone());
-        // Keep what is stored while docker cannot be asked.
         let client = docker.get().await;
         let images = match client {
             Some(d) => match d.list_local_images().await {
@@ -1848,13 +1757,10 @@ async fn report_self(
     }
 }
 
-/// Blake3 hash of the running binary, hex encoded.
-///
-/// Used by the self-update orchestrator to confirm a restarted node actually
-/// came back on the freshly built binary rather than just coming back at all.
-/// Empty on any failure to locate or read the executable, which is treated as
-/// "unknown" rather than a startup error: reporting the roster is more
-/// important than this one field.
+/// Blake3 hash of the running binary, hex encoded. The self-update orchestrator
+/// uses it to confirm a restarted node came back on the new binary. Empty on any
+/// failure to read the executable, treated as "unknown" rather than a startup
+/// error.
 fn current_binary_hash() -> String {
     let Ok(path) = std::env::current_exe() else {
         return String::new();

@@ -23,17 +23,12 @@ use crate::error::{NetError, Result};
 use crate::iptables::{self, ChainSpec, IptablesPlan, Jump};
 use crate::vxlan::Overlay;
 
-/// Linux interface names are capped at `IFNAMSIZ - 1` usable bytes.
-///
-/// Shared with `wireguard`, whose interface names are capped the same way.
+/// Linux interface names are capped at `IFNAMSIZ - 1` usable bytes. Shared with `wireguard`.
 pub(crate) const IFNAMSIZ_USABLE: usize = 15;
 
-/// iptables chain names are capped at 28 bytes.
-///
-/// Shared with `wireguard`, whose ingress chains are capped the same way.
+/// iptables chain names are capped at 28 bytes. Shared with `wireguard`.
 pub(crate) const CHAIN_USABLE: usize = 28;
 
-/// The `ip rule` priority of every egress bridge's policy rule.
 pub const POLICY_RULE_PRIORITY: u32 = 5100;
 
 /// Chain-name prefixes this module and `wireguard` create. The orphan sweep
@@ -48,33 +43,26 @@ pub fn egress_docker_name(network: &str) -> String {
     format!("egress_{network}")
 }
 
-/// The docker network name for a nat-kind cluster network. Same idea as
-/// `egress_docker_name`, its own prefix only so the two read apart in
-/// `docker network ls`.
+/// Docker network name for a nat-kind network; own prefix so the two read apart in `docker network ls`.
 pub fn nat_docker_name(network: &str) -> String {
     format!("nat_{network}")
 }
 
-/// Deterministic interface name for an egress network's bridge.
 pub fn egress_bridge_name(network: &str) -> String {
     short_name("clex-", network, IFNAMSIZ_USABLE)
 }
 
-/// The nat-table chain holding an egress bridge's masquerade rule.
 pub fn egress_nat_chain(bridge: &str) -> String {
     short_name(NAT_CHAIN_PREFIX, bridge, CHAIN_USABLE)
 }
 
-/// The filter chain holding an egress bridge's kill-switch.
 pub fn egress_fwd_chain(bridge: &str) -> String {
     short_name(FWD_CHAIN_PREFIX, bridge, CHAIN_USABLE)
 }
 
-/// Build a `<= cap` byte name from a prefix and a network name. Short names
-/// pass through unchanged; long ones get truncated and a hash suffix
-/// appended so two networks that truncate to the same prefix don't collide.
-///
-/// Shared with `wireguard` and `vxlan`, which derive their names the same way.
+/// Build a `<= cap` byte name from a prefix and a network name. Long names are
+/// truncated with a hash suffix so truncations never collide. Shared with
+/// `wireguard` and `vxlan`.
 pub(crate) fn short_name(prefix: &str, name: &str, cap: usize) -> String {
     let full = format!("{prefix}{name}");
     if full.len() <= cap {
@@ -107,13 +95,10 @@ pub fn egress_subnet(network: &str) -> Ipv4Net {
     Ipv4Net::new_assert(Ipv4Addr::new(10, EGRESS_POOL_BASE, second_octet, 0), 24)
 }
 
-/// A node-local `/24` for a nat network's docker bridge, deterministically
-/// derived from its name inside its own reserved pool, same idea as
-/// `egress_subnet`. Explicit rather than left to docker's own IPAM so that a
-/// same-node client hairpinning back through it - see `gate_by_network` in
-/// `cl-proxy` and `trusted_overlay_subnets` in the daemon's proxy wiring -
-/// arrives from an address every node can compute and trust without any
-/// cluster-wide coordination.
+/// A node-local `/24` for a nat network's docker bridge, derived from its name
+/// like `egress_subnet`. Explicit rather than docker IPAM so a same-node client
+/// hairpinning back (see `gate_by_network` in `cl-proxy`) arrives from an
+/// address every node can compute and trust.
 pub fn nat_subnet(network: &str) -> Ipv4Net {
     let second_octet = cl_config::subnet_octet(network);
     Ipv4Net::new_assert(Ipv4Addr::new(10, NAT_POOL_BASE, second_octet, 0), 24)
@@ -131,12 +116,10 @@ pub fn container_pools() -> Vec<Ipv4Net> {
     ]
 }
 
-/// The pool stack overlay networks are carved from.
 pub fn overlay_pool() -> Ipv4Net {
     crate::ipam::DEFAULT_OVERLAY_NET
 }
 
-/// The bridge's own address on its subnet: the first host address.
 pub fn egress_gateway(subnet: Ipv4Net) -> Ipv4Addr {
     let base = subnet.network();
     let octets = base.octets();
@@ -217,7 +200,6 @@ pub fn egress_iptables_plan(bridge: &str, subnet: Ipv4Net, iface: Option<&str>) 
     }
 }
 
-/// The nat chain `overlay_snat_plan` fills.
 pub const OVERLAY_SNAT_CHAIN: &str = "CLDR-OVL-SNAT";
 
 /// Source-NATs a container's overlay address when it talks to another node's
@@ -300,7 +282,6 @@ pub fn overlay_snat_plan(
     }
 }
 
-/// The filter chain `container_input_plan` fills.
 pub const CONTAINER_INPUT_CHAIN: &str = "CLDR-IN";
 
 /// Host services a container is allowed to reach, besides DNS.
@@ -316,8 +297,7 @@ pub struct HostServices {
     pub restricted: Vec<crate::restrict::Restriction>,
 }
 
-/// The `INPUT` filter that keeps containers away from the host's own
-/// listeners.
+/// The `INPUT` filter that keeps containers away from the host's own listeners.
 ///
 /// Bridges carry host addresses (`10.244.x.1`, `10.245.x.1`, `10.246.x.1`), so
 /// anything the host listens on at `0.0.0.0` (the API, the raft RPC, the drive
@@ -435,8 +415,7 @@ pub fn container_input_plan(
     }
 }
 
-/// Ensure the bridge exists, with the gateway address for `subnet`, up. No
-/// VXLAN device: unlike a stack overlay this bridge is node-local only.
+/// Ensure the node-local bridge exists with the gateway address for `subnet`, up. No VXLAN device.
 pub async fn ensure_egress_bridge(
     overlay: &Overlay,
     network: &str,
@@ -450,15 +429,10 @@ pub async fn ensure_egress_bridge(
     Ok(bridge)
 }
 
-/// How long to wait for a reply before treating the primary interface as
-/// down. Short: this runs on every reconcile tick, and a node with a truly
-/// dead interface should not stall the rest of that tick's work on it.
+/// Short: this runs every reconcile tick and a dead interface must not stall it.
 const PROBE_TIMEOUT_SECS: u32 = 2;
 
-/// Args for a single ICMP echo sent out `iface` to `target`, used to decide
-/// whether an egress network's primary interface still reaches the
-/// internet. Pure and unit tested; `probe_reachable` below is the privileged
-/// half that actually runs it.
+/// Args for one ICMP echo sent out `iface` to `target`, to decide whether an egress interface still reaches the internet.
 pub fn ping_plan(iface: &str, target: IpAddr) -> Vec<String> {
     argv(&[
         "-I",
@@ -471,12 +445,10 @@ pub fn ping_plan(iface: &str, target: IpAddr) -> Vec<String> {
     ])
 }
 
-/// True if `target` answered a single ICMP echo sent out `iface`. Needs the
-/// `ping` binary (iputils) and CAP_NET_RAW, same as the rest of this module
-/// needs CAP_NET_ADMIN — `ping` handles the raw socket itself. A missing
-/// binary, a permission error, and a real timeout are all indistinguishable
-/// here on purpose: any of them means "cannot confirm this interface still
-/// works," which is exactly when a caller wants to fail over.
+/// True if `target` answered one ICMP echo out `iface`. Needs `ping` and
+/// CAP_NET_RAW. A missing binary, a permission error and a timeout are
+/// deliberately indistinguishable: all mean "cannot confirm", when a caller
+/// wants to fail over.
 pub fn probe_reachable(iface: &str, target: IpAddr) -> bool {
     Command::new("ping")
         .args(ping_plan(iface, target))
@@ -495,22 +467,18 @@ fn argv(parts: &[&str]) -> Vec<String> {
 /// called `wg-something`.
 pub const WIREGUARD_LINK_ALIAS: &str = "clouduler:wireguard";
 
-/// Every egress-side object this node should currently have.
 #[derive(Debug, Clone, Default)]
 pub struct Wanted {
     /// Bridge names (`egress_bridge_name`) of every network this node
     /// implements, plus any whose docker network could not be removed yet and
     /// whose kill-switch must therefore stay up.
     pub bridges: BTreeSet<String>,
-    /// Wireguard interface names this node should hold.
     pub wg_ifaces: BTreeSet<String>,
-    /// Container-kind network names this node implements.
     pub container_networks: BTreeSet<String>,
     /// Their routing tables (`container_net::container_tables`, both of each).
     pub container_tables: BTreeSet<u32>,
 }
 
-/// One `ip rule` of ours, as `ip rule show` prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyRule {
     pub priority: u32,
@@ -518,39 +486,31 @@ pub struct PolicyRule {
     pub table: u32,
 }
 
-/// What currently exists on the host that a sweep might remove.
 #[derive(Debug, Clone, Default)]
 pub struct HostObjects {
     pub filter_chains: Vec<String>,
     pub nat_chains: Vec<String>,
     pub policy_rules: Vec<PolicyRule>,
-    /// `clex-*` links that are bridges.
     pub bridges: Vec<String>,
-    /// Links carrying [`WIREGUARD_LINK_ALIAS`].
     pub wg_links: Vec<String>,
     pub mangle_chains: Vec<String>,
     pub raw_chains: Vec<String>,
-    /// Every `ip rule` that `container_net` would own.
     pub container_rules: Vec<crate::container_net::IpRule>,
-    /// `clch-*` links.
     pub container_links: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SweepAction {
-    /// Unhook every jump, flush, delete.
     RemoveChain {
         table: &'static str,
         chain: String,
     },
     DelRule(PolicyRule),
-    /// A container-network rule (`container_net::IpRule`).
     DelIpRule(crate::container_net::IpRule),
     FlushTable(u32),
     DelLink(String),
 }
 
-/// Chains this crate creates and sweeps, by name prefix.
 fn is_swept_chain(name: &str) -> bool {
     [
         NAT_CHAIN_PREFIX,
@@ -562,8 +522,7 @@ fn is_swept_chain(name: &str) -> bool {
     .any(|prefix| name.starts_with(prefix))
 }
 
-/// Decide what to remove. Pure, so what is and is not touched is tested
-/// without root.
+/// Decide what to remove. Pure, so it is tested without root.
 ///
 /// Conservative on purpose: only objects with clouduler's own naming prefixes
 /// (and, for wireguard links, its alias) are ever considered, and only those
@@ -710,7 +669,6 @@ pub fn parse_policy_rules(output: &str) -> Vec<PolicyRule> {
         .collect()
 }
 
-/// Read what exists on the host. Needs root, like everything here.
 pub fn scan_host() -> Result<HostObjects> {
     let rules = Command::new("ip")
         .args(["rule", "show"])
@@ -752,15 +710,13 @@ pub fn scan_host() -> Result<HostObjects> {
     Ok(host)
 }
 
-/// Outcome of [`run_sweep`]: what was removed, and what failed.
 #[derive(Debug, Default)]
 pub struct SweepReport {
     pub removed: Vec<String>,
     pub failed: Vec<String>,
 }
 
-/// Carry out [`plan_sweep`]'s actions. One failure does not stop the rest, and
-/// a failed step is simply tried again on the next tick.
+/// Carry out [`plan_sweep`]'s actions. A failed step is retried next tick.
 pub fn run_sweep(actions: &[SweepAction]) -> SweepReport {
     let mut report = SweepReport::default();
     for action in actions {

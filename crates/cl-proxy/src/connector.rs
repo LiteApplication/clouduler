@@ -23,7 +23,6 @@ use tokio::net::TcpStream;
 #[derive(Clone)]
 pub(crate) struct BackendConnector {
     dialer: Dialer,
-    /// Bounds the whole dial, a relayed one included.
     timeout: Duration,
 }
 

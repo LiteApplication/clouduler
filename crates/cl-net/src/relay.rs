@@ -57,8 +57,7 @@ use tracing::{debug, warn};
 /// raft or drive channel cannot open this one.
 pub const AUTH_LABEL: &str = "relay";
 
-/// The relay listens on the node's internal address at its rpc port + 2, next
-/// to the drive transport at + 1 (`cl_drive::transport::drive_port`).
+/// Listens on the internal address at rpc port + 2 (the drive transport is + 1).
 pub fn relay_port(rpc_port: u16) -> u16 {
     rpc_port.wrapping_add(2)
 }
@@ -73,7 +72,6 @@ const MAX_PENDING_HANDSHAKES: usize = 64;
 /// descriptors and a task.
 const MAX_RELAYED: usize = 4096;
 
-/// How long an authenticated client has to name its target.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the owning node waits for the container to accept. Matches the
@@ -87,25 +85,20 @@ const TARGET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// closing it.
 const UDP_RELAY_IDLE: Duration = Duration::from_secs(180);
 
-/// Largest UDP payload, and so the largest datagram frame.
 const MAX_DATAGRAM: usize = 65_507;
 
-/// Cap on the reason text an error status carries.
 const MAX_REASON: usize = 512;
 
 const STATUS_OK: u8 = 0;
 const STATUS_ERROR: u8 = 1;
 
-/// What the client wants spliced to its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Tcp = 1,
     Udp = 2,
 }
 
-/// Dials containers on the host's behalf: directly when this node runs them,
-/// through the owning node's relay otherwise. Cheap to clone; every clone
-/// shares one relay table, which the daemon refreshes from placement.
+/// Dials containers for the host: directly when this node runs them, else through the owning node's relay. Clones share one relay table.
 #[derive(Clone, Default)]
 pub struct Dialer {
     inner: Arc<DialerInner>,
@@ -121,13 +114,11 @@ struct DialerInner {
 }
 
 impl Dialer {
-    /// A dialer that always connects directly, for callers with no cluster
-    /// around them.
+/// A dialer that always connects directly.
     pub fn direct() -> Self {
         Self::default()
     }
 
-    /// A dialer that authenticates to relays with the live cluster key.
     pub fn new(keys: KeyWatch) -> Self {
         Self {
             inner: Arc::new(DialerInner {
@@ -137,8 +128,7 @@ impl Dialer {
         }
     }
 
-    /// Replace the whole relay table: container address -> relay endpoint of
-    /// its node, for every container this node does not run itself.
+/// Replace the relay table (container address -> its node's relay endpoint).
     pub fn set_relays(&self, relays: HashMap<IpAddr, SocketAddr>) {
         let mut table = self.inner.relays.write();
         if **table != relays {
@@ -146,7 +136,6 @@ impl Dialer {
         }
     }
 
-    /// The relay to go through for `ip`, or `None` to dial it directly.
     pub fn relay_for(&self, ip: IpAddr) -> Option<SocketAddr> {
         self.inner
             .relays
@@ -155,8 +144,7 @@ impl Dialer {
             .copied()
     }
 
-    /// A TCP connection to `target`, through its node's relay when another
-    /// node runs it. `timeout` bounds the whole dial, relay included.
+/// A TCP connection to `target`, via its node's relay when another node runs it. `timeout` bounds the whole dial.
     pub async fn connect_tcp(
         &self,
         target: SocketAddr,
@@ -175,10 +163,7 @@ impl Dialer {
         }
     }
 
-    /// A stream of `len || payload` datagram frames to the UDP `target`
-    /// through `relay` (see `relay_for`), for a forwarder whose backend runs
-    /// on another node. Read and write frames with `read_datagram` and
-    /// `write_datagram`.
+/// A stream of `len || payload` datagram frames to the UDP `target` through `relay`, for a forwarder whose backend runs on another node.
     pub async fn connect_udp(
         &self,
         relay: SocketAddr,
@@ -247,7 +232,6 @@ impl Dialer {
     }
 }
 
-/// `e` with `what` in front of its message, keeping its kind.
 fn context(e: io::Error, what: &str) -> io::Error {
     io::Error::new(e.kind(), format!("{what}: {e}"))
 }
@@ -334,7 +318,6 @@ async fn read_status<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<()> {
     }
 }
 
-/// Write one datagram as a `len (u16 be) || payload` frame.
 pub async fn write_datagram<S: AsyncWrite + Unpin>(
     stream: &mut S,
     datagram: &[u8],
@@ -365,10 +348,7 @@ pub async fn read_datagram<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<O
     Ok(Some(datagram))
 }
 
-/// Serve relay requests on `listener` until it fails. `allowed` is every
-/// address range the listener will dial for a peer: the container overlay.
-/// `keys` is read per connection, so a rotated key applies at once, and a
-/// node with no key refuses everyone.
+/// Serve relay requests on `listener` until it fails. `allowed` is the address ranges it will dial (the container overlay). `keys` is read per connection, so a rotated key applies at once and a node with no key refuses everyone.
 pub async fn serve(listener: TcpListener, keys: KeyWatch, allowed: Vec<IpNet>) -> io::Result<()> {
     let handshakes = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
     let relayed = Arc::new(Semaphore::new(MAX_RELAYED));
@@ -475,9 +455,7 @@ async fn handle(
     }
 }
 
-/// Carry one relayed UDP flow: frames from the stream go out the connected
-/// socket as datagrams, datagrams back from the target go into the stream as
-/// frames, until the client closes the stream or the flow goes idle.
+/// Carry one relayed UDP flow until the client closes the stream or it goes idle.
 async fn pump_udp(stream: TcpStream, socket: UdpSocket) -> io::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let socket = Arc::new(socket);

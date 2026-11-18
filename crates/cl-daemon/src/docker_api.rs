@@ -42,7 +42,6 @@ pub struct ClusterBackend {
     pub http: reqwest::Client,
 }
 
-/// How a peer read ended.
 enum Peer<T> {
     Found(T),
     /// Answered, and does not hold it.
@@ -63,7 +62,6 @@ impl ClusterBackend {
             .ok_or_else(|| BackendError::Other("docker is not reachable on this node".into()))
     }
 
-    /// Every other node that is not known to be down, with its api origin.
     async fn peers(&self) -> Vec<(String, String)> {
         let state = self.cluster.state().await;
         let cfg = self.config.borrow().clone();
@@ -86,7 +84,6 @@ impl ClusterBackend {
         ))
     }
 
-    /// `GET /api/images/internal/<op>?name=<name>` on a peer, decoded as json.
     async fn peer_json(&self, base: &str, op: &str, name: Option<&str>) -> Peer<Value> {
         let path = match name {
             Some(name) => format!("/api/images/internal/{op}?{}", encode_name(name)),
@@ -112,7 +109,6 @@ impl ClusterBackend {
         }
     }
 
-    /// The first peer that holds `name`, with its answer to `op`.
     async fn ask_any_peer(&self, op: &str, name: &str) -> Option<Value> {
         for (node, base) in self.peers().await {
             if let Peer::Found(v) = self.peer_json(&base, op, Some(name)).await {

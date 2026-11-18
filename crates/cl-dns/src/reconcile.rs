@@ -9,7 +9,6 @@ use crate::desired::DesiredRecord;
 use crate::error::{DnsError, Result};
 use crate::ownership::{parse_tag, record_key, tag_content, tag_name};
 
-/// Changes needed to bring a zone's live records in line with desired state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
     pub create: Vec<RecordInput>,
@@ -183,8 +182,6 @@ pub fn plan_with_known(
     out
 }
 
-/// Whether a live non-tag record already holds exactly `want`'s name, type
-/// and content (names are expected lowercased already).
 fn has_identical_live(live: &[Record], want: &DesiredRecord) -> bool {
     live.iter().any(|r| {
         !is_tag_record(r) && r.kind == want.kind && r.name == want.fqdn && r.content == want.content
@@ -207,19 +204,13 @@ fn note_unclaimed(key: &str) {
     }
 }
 
-/// Collapses a desired set down to something DNS can actually represent
-/// before anything gets diffed against live records: a CNAME can't share a
-/// name with any other record, and can only ever point at one target.
-/// `records_for` computes each node's contribution independently (a node
-/// can publish an IP and a domain at once, and several nodes' answers get
-/// merged for a routing-mesh hostname in `all-nodes` mode), so nothing
-/// upstream guarantees the merged set is valid — this is the one place
-/// that enforces it. An address record (A/AAAA) always wins over a CNAME
-/// for the same name, since an address is usable on its own and a CNAME
-/// isn't once it has to coexist with something; among competing CNAMEs for
-/// the same name, the first one in `desired`'s order survives (`desired`'s
-/// callers build that order deterministically - sorted node names - so this
-/// picks the same target every pass instead of flapping).
+/// Collapses a desired set to something DNS can represent: a CNAME can't share a
+/// name with any other record and can only have one target. `records_for`
+/// computes each node's contribution independently, so nothing upstream
+/// guarantees the merged set is valid; this enforces it. An A/AAAA record wins
+/// over a CNAME for the same name; among competing CNAMEs the first in
+/// `desired`'s order survives (callers sort by node name, so the same target is
+/// picked every pass instead of flapping).
 pub fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
     let lowered: Vec<DesiredRecord> = desired
         .iter()
@@ -253,13 +244,10 @@ pub fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
     kept
 }
 
-/// Deletes any live record - owned or not - that Cloudflare's CNAME-exclusivity
-/// rule would refuse to let a desired record coexist with: a CNAME can't
-/// share a name with anything else, so a stale CNAME blocking a new A/AAAA
-/// (or a stale A/AAAA blocking a new CNAME) is queued for deletion even
-/// without an ownership tag. Records of the same kind as something desired
-/// are left alone here - they're handled (or deliberately left for `create`
-/// to fail on) by the ownership-scoped logic above.
+/// Deletes any live record, owned or not, that Cloudflare's CNAME-exclusivity
+/// rule would refuse to let a desired record coexist with (a stale CNAME
+/// blocking a new A/AAAA or vice versa). Same-kind records are left to the
+/// ownership-scoped logic above.
 fn delete_conflicting_live_records(desired: &[DesiredRecord], live: &[Record], out: &mut Plan) {
     let mut desired_kinds_by_name: HashMap<&str, HashSet<RecordType>> = HashMap::new();
     for d in desired {
@@ -296,21 +284,16 @@ fn delete_conflicting_live_records(desired: &[DesiredRecord], live: &[Record], o
     }
 }
 
-/// Applies a plan against a zone. Cloudflare's "record already exists"
-/// errors on create are swallowed: they mean a previous run (or a race with
-/// another node) already got us to the desired state.
+/// Applies a plan against a zone. "Record already exists" errors on create are
+/// swallowed: a previous run or another node already got us there.
 ///
-/// Deletes run first, before creates and updates: a stale owned record can
-/// share a name with a newly desired record of a different type (e.g. a
-/// hostname that used to resolve via a CNAME now wants a plain A record),
-/// and Cloudflare refuses to create the new record while the old one still
-/// occupies the name. Running deletes first clears the way instead of
-/// failing on that collision every pass.
+/// Deletes run first: a stale owned record can share a name with a newly
+/// desired record of another type (a hostname moving from a CNAME to an A), and
+/// Cloudflare refuses the create while the old one occupies the name.
 ///
-/// A failing record does not stop the rest of the plan from applying: one
-/// hostname's bad state must not block every other hostname in the same
-/// zone from converging. All failures are collected and returned together
-/// so the caller can attribute each one to its own record.
+/// One failing record does not stop the rest, so one hostname's bad state
+/// cannot block the zone from converging; all failures are collected so the
+/// caller can attribute each to its own record.
 pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
     let mut errors = Vec::new();
 
@@ -369,7 +352,6 @@ fn is_owning_tag(r: &Record, cluster: &str, key: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Keys (type:name) of live records tagged as owned by `cluster`.
 fn owned_keys(cluster: &str, live: &[Record]) -> HashSet<String> {
     live.iter()
         .filter(|r| is_tag_record(r))

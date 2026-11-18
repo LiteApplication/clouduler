@@ -27,46 +27,28 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use crate::error::{NetError, Result};
 use crate::relay::{read_datagram, write_datagram, Dialer};
 
-/// How long a UDP session is kept alive with no traffic in either direction
-/// before its resources are reclaimed. UDP has no close handshake, so idle
-/// sessions have to be reaped on a timer instead.
+/// Idle UDP sessions are reaped on a timer, since UDP has no close handshake.
 const UDP_SESSION_IDLE: Duration = Duration::from_secs(60);
 
-/// How many TCP connections one published port serves at once. Every accepted
-/// connection costs two file descriptors and a task, and these ports are open
-/// to whoever can reach the node, so without a cap a flood of connections (or a
-/// slow-loris) exhausts the daemon's descriptors and takes the whole process
-/// down with it. Past the cap a new connection is closed immediately.
+/// Cap on concurrent TCP connections per published port: each costs two fds and a task, and the ports are open to anyone who can reach the node, so a flood or slow-loris would exhaust the daemon. Past it a new connection is closed.
 const MAX_TCP_CONNECTIONS: usize = 4096;
 
-/// How long to wait for the backend to accept before giving up on a client. A
-/// backend on a node that just died would otherwise hold the client (and its
-/// permit) for the kernel's multi-minute SYN retry schedule.
+/// A backend on a dead node would otherwise hold the client (and its permit) for the kernel's multi-minute SYN retry.
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long to back off after an `accept` fails for a reason that is not the
-/// listener's fault (out of descriptors, a connection reset before accept).
+/// Back-off after an `accept` failure that is not the listener's fault (out of fds, reset before accept).
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// How many UDP client sessions one published port tracks. Each is a socket
-/// and a task, and the source address of a UDP packet is trivially forged, so
-/// this bounds what a flood of distinct sources can allocate.
+/// Cap on UDP sessions per port (each a socket and a task); source addresses are trivially forged.
 const MAX_UDP_SESSIONS: usize = 4096;
 
-/// Datagrams queued per UDP session. Past this the datagram is dropped, which
-/// is what an overloaded UDP path does anyway, instead of buffering without
-/// bound behind a slow backend.
+/// Datagrams queued per session; past it they are dropped, as an overloaded UDP path would.
 const UDP_SESSION_QUEUE: usize = 64;
 
-/// How often finished UDP sessions are removed from the table. A session that
-/// went idle exits on its own; without this its entry would stay until the same
-/// client happened to send again.
+/// Finished UDP sessions are pruned on this interval; otherwise an idle one lingers until its client sends again.
 const UDP_PRUNE_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The current backend for every published port this node forwards. Shared
-/// between the reconciler (which calls `set` as placement changes) and the
-/// forwarder tasks (which call `subscribe` once at accept time and then
-/// watch for changes for the life of the connection).
+/// The current backend for every published port. The reconciler calls `set`; forwarders `subscribe` at accept time and watch for the life of the connection.
 #[derive(Clone, Default)]
 pub struct Routes {
     inner: std::sync::Arc<Mutex<BTreeMap<u16, watch::Sender<Option<SocketAddr>>>>>,
@@ -77,9 +59,7 @@ impl Routes {
         Self::default()
     }
 
-    /// Watch channel for a published port's current backend. Creates the
-    /// channel (initially routeless) the first time a port is referenced,
-    /// either by `set` or `subscribe`, whichever happens first.
+/// Watch channel for a port, created (routeless) on first reference.
     fn channel(&self, published: u16) -> watch::Sender<Option<SocketAddr>> {
         let mut inner = self.inner.lock();
         inner
@@ -88,16 +68,12 @@ impl Routes {
             .clone()
     }
 
-    /// Subscribe to a published port's backend. The receiver always starts
-    /// with the current value, so a forwarder that just accepted a
-    /// connection sees the right backend immediately.
+/// The receiver starts with the current value.
     pub fn subscribe(&self, published: u16) -> watch::Receiver<Option<SocketAddr>> {
         self.channel(published).subscribe()
     }
 
-    /// Point a published port at a backend, or clear it with `None` when the
-    /// instance isn't running anywhere right now. Any forwarder currently
-    /// serving that port notices on its next watch poll.
+/// Point a port at a backend, or clear it with `None` when the instance runs nowhere.
     pub fn set(&self, published: u16, backend: Option<SocketAddr>) {
         // send_if_modified avoids waking every watcher on a reconcile pass
         // that didn't actually change anything.
@@ -112,18 +88,12 @@ impl Routes {
     }
 }
 
-/// Serve a published TCP port, forwarding accepted connections to whatever
-/// `routes` currently says the backend is. Runs until the listener errors;
-/// callers spawn this as a background task per published port.
+/// Serve a published TCP port, forwarding to whatever `routes` currently says.
+/// Runs until the listener errors; callers spawn one task per port.
 ///
-/// `proxy_protocol` prepends a PROXY v2 header to each backend connection so
-/// the backend learns who actually connected. See [`ExposePort::proxy_protocol`]
-/// for why that matters and why it is opt in.
-///
-/// [`ExposePort::proxy_protocol`]: https://docs.rs/cl-config
-///
-/// `dialer` reaches the backend: directly when this node runs it, through
-/// its own node's relay otherwise.
+/// `proxy_protocol` prepends a PROXY v2 header to each backend connection (see
+/// `ExposePort::proxy_protocol` for why it is opt in). `dialer` reaches the
+/// backend directly or through its node's relay.
 pub async fn serve_tcp(
     bind: SocketAddr,
     published: u16,
@@ -178,8 +148,7 @@ pub async fn serve_tcp(
     }
 }
 
-/// Whether an `accept` error is a passing condition of this one connection or
-/// of the process, not a sign the listener is broken.
+/// Whether an `accept` error is a passing condition rather than a broken listener.
 pub(crate) fn is_transient_accept_error(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     // EMFILE, ENFILE, ENOMEM, ENOBUFS: out of descriptors or memory. They
@@ -197,8 +166,7 @@ pub(crate) fn is_transient_accept_error(error: &std::io::Error) -> bool {
         .is_some_and(|errno| TRANSIENT_ERRNO.contains(&errno))
 }
 
-/// Splice one accepted TCP connection to its current backend, aborting if
-/// the route changes or there is no backend at all.
+/// Splice one accepted connection to its current backend, aborting if the route changes or vanishes.
 ///
 /// `header`, when present, is written to the backend before any client bytes.
 /// Through a relay it still is: the relay passes the stream through untouched
@@ -257,24 +225,17 @@ async fn forward_tcp(
     }
 }
 
-/// The 12 byte signature every PROXY v2 header starts with. Chosen by the
-/// spec to be something no real protocol would ever begin with, so a backend
-/// can tell a header from ordinary traffic.
+/// The 12 byte signature every PROXY v2 header starts with; no real protocol begins with it.
 const PROXY_V2_SIGNATURE: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
-/// Encode a PROXY protocol v2 header announcing `client` as the real peer of
-/// a connection that arrived for `local`.
+/// Encode a PROXY protocol v2 header announcing `client` as the real peer of a
+/// connection that arrived for `local`.
 ///
-/// v2 (binary) rather than v1 (text) because it is what current servers
-/// implement and it cannot be confused with a real request line. The address
-/// family follows the pair: both are always the same family here, since
-/// `local` is the local end of the very socket `client` connected to.
-///
-/// Deliberately no TLVs. They are optional in the spec, nothing here has
-/// anything to put in one, and every byte of this header is parsed by the
-/// backend before it will talk to us.
+/// v2 (binary) because current servers implement it and it cannot be confused
+/// with a request line. No TLVs: nothing to put in one, and the backend parses
+/// every byte before it will talk to us.
 fn proxy_v2_header(client: SocketAddr, local: SocketAddr) -> Vec<u8> {
     let mut header = Vec::with_capacity(28);
     header.extend_from_slice(&PROXY_V2_SIGNATURE);
@@ -312,11 +273,7 @@ fn proxy_v2_header(client: SocketAddr, local: SocketAddr) -> Vec<u8> {
     header
 }
 
-/// Serve a published UDP port. Each distinct client address gets its own
-/// session bound to the backend that was current when the session started;
-/// the session is torn down (and a new one started fresh) if the route
-/// changes or the session goes idle. A backend on another node is reached
-/// through that node's relay, which `dialer` knows.
+/// Serve a published UDP port. Each client address gets a session bound to the backend current when it started; it ends on route change or idle. `dialer` reaches remote backends through their relay.
 pub async fn serve_udp(
     bind: SocketAddr,
     published: u16,
@@ -406,9 +363,7 @@ pub async fn serve_udp(
     }
 }
 
-/// One client's UDP session: a dedicated socket connected to the backend,
-/// pumping datagrams in both directions until idle, the route changes, or
-/// the backend goes away.
+/// One client's UDP session: a socket connected to the backend, pumping datagrams until idle, route change or backend loss.
 async fn run_udp_session(
     published: std::sync::Arc<UdpSocket>,
     client_addr: SocketAddr,
@@ -457,11 +412,7 @@ async fn run_udp_session(
     }
 }
 
-/// `run_udp_session` for a backend another node runs: the session's
-/// datagrams travel as frames over one stream to that node's relay, which
-/// exchanges them with the backend from the node where the backend's gateway
-/// is its own. Ends the same ways a direct session does, and also when the
-/// relay closes the stream.
+/// `run_udp_session` for a backend on another node: datagrams travel as frames over one stream to that node's relay. Also ends when the relay closes the stream.
 async fn run_relayed_udp_session(
     published: std::sync::Arc<UdpSocket>,
     client_addr: SocketAddr,

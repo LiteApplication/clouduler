@@ -1,11 +1,7 @@
 //! Mount lifecycle for served drives this node uses but does not serve.
 //!
-//! Mounts a real NFSv4 filesystem directly via `mount(2)` — no `mount.nfs`
-//! helper needed. Unlike NFSv3, NFSv4 has no separate MOUNT-protocol round
-//! trip to fetch a root filehandle: the kernel client negotiates it itself,
-//! in-band, from the well-known root, so a plain text options string handed
-//! straight to `mount(2)` is enough to bring a mount up with no external
-//! process involved.
+//! Mounts real NFSv4 directly via `mount(2)`, no `mount.nfs` helper: NFSv4 has
+//! no separate MOUNT round trip, so a text options string suffices.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
@@ -18,44 +14,33 @@ use tracing::warn;
 
 use crate::error::{DriveError, Result};
 
-/// How long the kernel NFS client waits for a reply before it counts as a
-/// timeout, in deciseconds (so 50 = 5s).
+/// Kernel NFS client reply timeout in deciseconds (50 = 5s).
 const TIMEO_DECISECONDS: u32 = 50;
-/// How many times the client retries a timed-out request before giving up
-/// and returning an error to the caller. Combined with `soft` below (as
-/// opposed to the kernel default of `hard`, which retries forever and never
-/// surfaces an error), this is what makes a dead server detected rather than
-/// hung on indefinitely.
+/// Retries of a timed-out request before erroring. With `soft` (the default
+/// `hard` retries forever) this makes a dead server detected rather than hung on.
 const RETRANS: u32 = 3;
 
-/// One served drive (or one volume of one) this node mounts, resolved to a
-/// concrete server address by the caller (the daemon knows how to turn
-/// `served_by` plus the cluster config into a `SocketAddr`; this crate does
-/// not).
+/// One served drive (or volume of one) this node mounts, resolved to a server
+/// address by the caller (the daemon turns `served_by` plus config into a
+/// `SocketAddr`).
 #[derive(Debug, Clone)]
 pub struct MountSpec {
     pub drive: String,
-    /// `Some` mounts just that one volume's subtree (the export still covers
-    /// the whole drive root; only the client mounts a subpath of it), so
-    /// several independent mounts of the same drive can coexist. `None`
-    /// mounts the drive's whole root.
+    /// `Some` mounts just that volume's subtree (the export still covers the whole
+    /// drive), so several mounts of one drive coexist. `None` mounts the root.
     pub volume: Option<String>,
     pub mountpoint: PathBuf,
     pub server: SocketAddr,
-    /// The drive's real directory on `server`, as that node declared it
-    /// (`Node.drives`). Needed because an NFSv4 mount source is a path in
-    /// the server's *real* filesystem, not one relative to the export: with
-    /// no `fsid=0` root export declared, the kernel's pseudo-filesystem
-    /// mirrors the server's real absolute path down to each export rather
-    /// than starting a fresh namespace at it, so mounting a volume means
-    /// giving the server's real path to it, not just `/<volume>`.
+    /// The drive's real directory on `server` (`Node.drives`). An NFSv4 mount
+    /// source is a path in the server's *real* filesystem: with no `fsid=0` root
+    /// export, the pseudo-filesystem mirrors real absolute paths, so mounting a
+    /// volume needs its real path, not `/<volume>`.
     pub remote_root: PathBuf,
 }
 
 impl MountSpec {
-    /// Unique key identifying this mount, used as the `MountManager` table
-    /// key: a bare drive name for a whole-drive mount, `drive/volume` for a
-    /// per-volume one, so two volumes of the same drive don't collide.
+    /// Unique `MountManager` table key: drive name for a whole-drive mount,
+    /// `drive/volume` for a per-volume one.
     pub fn key(&self) -> String {
         match &self.volume {
             Some(volume) => format!("{}/{volume}", self.drive),
@@ -63,9 +48,8 @@ impl MountSpec {
         }
     }
 
-    /// The path portion of the NFS source spec (`server:/path`): the
-    /// server's real path to the drive root, or to the volume subdirectory
-    /// within it.
+    /// The path of the NFS source spec (`server:/path`): the real path to the
+    /// drive root or volume subdirectory.
     fn export_path(&self) -> String {
         match &self.volume {
             Some(volume) => self.remote_root.join(volume).display().to_string(),
@@ -74,10 +58,7 @@ impl MountSpec {
     }
 }
 
-/// Whether this process can call `mount(2)` at all. Unlike FUSE, an NFS
-/// mount has no `allow_other`-style opt-in for a non-root user to make it
-/// readable by other uids — `mount(2)` itself needs `CAP_SYS_ADMIN`, which in
-/// practice means root.
+/// Whether this process can call `mount(2)`: needs `CAP_SYS_ADMIN`, in practice root.
 pub fn mount_permission() -> Result<()> {
     if nix::unistd::geteuid().is_root() {
         Ok(())
@@ -88,16 +69,11 @@ pub fn mount_permission() -> Result<()> {
     }
 }
 
-/// Whether this host's kernel can mount NFSv4 at all: the client module is
-/// either built in or already loaded.
+/// Whether the kernel can mount NFSv4: client module built in or loaded.
 ///
-/// This daemon calls `mount(2)` directly rather than going through the
-/// `mount.nfs4` helper, which on a normal system is what makes the kernel
-/// autoload the module on first use (`request_module()`). Bypassing that
-/// helper means bypassing the autoload too — on a host where `nfsv4` isn't
-/// already loaded, the very first mount just fails outright instead of
-/// pulling the module in on demand, so this needs to be checked and loaded
-/// (`modprobe nfsv4`) up front rather than discovered as a mount error.
+/// Calling `mount(2)` directly bypasses `mount.nfs4`, which normally triggers
+/// module autoload (`request_module()`), so a host without `nfsv4` loaded would
+/// fail the first mount outright. Check and load (`modprobe nfsv4`) up front.
 pub fn client_available() -> Result<()> {
     client_available_from("/proc/filesystems", "/proc/modules")
 }
@@ -130,10 +106,8 @@ fn cstring(s: &str) -> Result<CString> {
 }
 
 fn mount_options(server_ip: std::net::IpAddr, port: u16) -> String {
-    // `noatime` is deliberately not here: it's a VFS-level mount flag
-    // (`MS_NOATIME`), not an NFS filesystem-specific option, and the kernel
-    // rejects it with EINVAL if it shows up in this text blob — it belongs
-    // in `do_mount`'s `flags` argument instead.
+    // `noatime` is not here: it's a VFS flag (`MS_NOATIME`), and the kernel rejects
+    // it with EINVAL in this text blob; it belongs in `do_mount`'s `flags`.
     format!(
         "vers=4.2,proto=tcp,port={port},addr={server_ip},soft,timeo={TIMEO_DECISECONDS},\
          retrans={RETRANS},nolock"
@@ -154,10 +128,8 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
     let c_fstype = cstring("nfs4")?;
     let c_data = cstring(&data)?;
 
-    // `MS_NOATIME` is the one VFS-level flag this mount wants; everything
-    // NFS-specific goes through the text `data` string instead (and must — the
-    // kernel's NFS option parser rejects a VFS-level option like `noatime`
-    // showing up there).
+    // `MS_NOATIME` is the one VFS-level flag; NFS options go through the text
+    // `data` string (the parser rejects VFS options like `noatime` there).
     nix::mount::mount(
         Some(c_source.as_c_str()),
         c_target.as_c_str(),
@@ -171,16 +143,13 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
     })
 }
 
-/// Lazily unmount whatever is (or claims to be) at `path`, ignoring every
-/// failure: it's a best-effort cleanup of a stale mount this process never
-/// owned (a previous daemon crashed or was killed without unmounting), so a
-/// missing mountpoint, a non-mount directory, or a permission error are all
-/// fine to swallow and let the caller's own error handling take over.
+/// Lazily unmount whatever is at `path`, ignoring every failure: best-effort
+/// cleanup of a stale mount from a crashed daemon; the caller's own error
+/// handling takes over.
 fn force_unmount(path: &Path) {
     let _ = nix::mount::umount2(path, nix::mount::MntFlags::MNT_DETACH);
 }
 
-/// A clean unmount; fails if the mountpoint is busy.
 fn unmount_clean(path: &Path) -> Result<()> {
     nix::mount::umount2(path, nix::mount::MntFlags::empty()).map_err(|errno| DriveError::Io {
         path: path.to_path_buf(),
@@ -188,10 +157,8 @@ fn unmount_clean(path: &Path) -> Result<()> {
     })
 }
 
-/// Whether `path` currently appears as a mounted filesystem, read from
-/// `/proc/self/mountinfo` rather than trusted from this process's own
-/// bookkeeping — catches a mount the kernel dropped on its own (e.g. after
-/// repeated `NFS4ERR_STALE`) that an in-memory table alone wouldn't notice.
+/// Whether `path` is mounted per `/proc/self/mountinfo`, not this process's
+/// bookkeeping: catches a mount the kernel dropped (e.g. repeated `NFS4ERR_STALE`).
 fn is_mount_point(path: &Path) -> bool {
     let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return false;
@@ -201,10 +168,9 @@ fn is_mount_point(path: &Path) -> bool {
         .any(|line| line.split_whitespace().nth(4) == Some(target.as_ref()))
 }
 
-/// A bounded `stat()` on `path`, run off the async runtime since it's a
-/// blocking syscall that a wedged (but still `soft`-mounted) filesystem
-/// could otherwise stall on. Times out rather than hanging, so a mount that
-/// is present but unresponsive is still caught as unhealthy.
+/// A bounded `stat()` on `path`, off the async runtime: a wedged `soft`-mounted
+/// filesystem could stall it. Times out so a present-but-unresponsive mount is
+/// caught as unhealthy.
 async fn stat_within(path: &Path, timeout: Duration) -> bool {
     let path = path.to_path_buf();
     let probe = tokio::task::spawn_blocking(move || std::fs::metadata(&path).is_ok());
@@ -215,8 +181,7 @@ struct ActiveMount {
     spec: MountSpec,
 }
 
-/// Mounts and unmounts every served drive this node uses. One instance per
-/// daemon; every mount it owns comes down together in `unmount_all`.
+/// Mounts and unmounts every served drive this node uses; one per daemon.
 #[derive(Default)]
 pub struct MountManager {
     mounts: Mutex<HashMap<String, ActiveMount>>,
@@ -227,8 +192,8 @@ impl MountManager {
         Self::default()
     }
 
-    /// Mount every spec. Stops and unwinds on the first failure, so the
-    /// daemon never starts up half mounted.
+    /// Mount every spec, unwinding on the first failure so the daemon never
+    /// starts half mounted.
     pub fn mount_all(&self, specs: Vec<MountSpec>) -> Result<()> {
         let mut mounted = Vec::new();
         for spec in specs {
@@ -250,9 +215,7 @@ impl MountManager {
         mount_permission()?;
         client_available()?;
         if is_mount_point(&spec.mountpoint) {
-            // A stale mount from a previous process (daemon restart or
-            // crash without a clean unmount) is squatting on this
-            // mountpoint. Force it off before laying a fresh one down.
+            // A stale mount from a previous process squats on this mountpoint; force it off.
             force_unmount(&spec.mountpoint);
         }
         do_mount(&spec)?;
@@ -263,9 +226,7 @@ impl MountManager {
         Ok(())
     }
 
-    /// Unmount one key (see `MountSpec::key`). Not currently mounted is a
-    /// no-op, not an error, so shutdown and convergence can call this
-    /// unconditionally.
+    /// Unmount one key (see `MountSpec::key`); not mounted is a no-op.
     pub fn unmount(&self, key: &str) -> Result<()> {
         let active = self.mounts.lock().remove(key);
         if let Some(active) = active {
@@ -274,9 +235,7 @@ impl MountManager {
         Ok(())
     }
 
-    /// Unmount everything, for a clean daemon shutdown. Keeps going after a
-    /// failure so one stuck mount doesn't block the others from coming
-    /// down; returns the first error seen, if any.
+    /// Unmount everything for shutdown, continuing past failures; returns the first error.
     pub fn unmount_all(&self) -> Result<()> {
         let keys: Vec<String> = self
             .mounts
@@ -294,8 +253,7 @@ impl MountManager {
         first_err.map_or(Ok(()), Err)
     }
 
-    /// Every key currently mounted (see `MountSpec::key`), for a caller that
-    /// needs to converge the mount set against what's actually needed.
+    /// Every key currently mounted, for converging against what is needed.
     pub fn mounted_keys(&self) -> BTreeSet<String> {
         self.mounts
             .lock()
@@ -310,15 +268,11 @@ impl MountManager {
             .contains_key(key)
     }
 
-    /// Fail a mount over to a new active server. Unlike the old FUSE client
-    /// (whose server address was a shared `Arc<Mutex<_>>` read on the next
-    /// RPC), a kernel NFS mount bakes its server address (and its real
-    /// remote path — see `MountSpec::remote_root`) in at `mount(2)` time —
-    /// there is no live retarget, so this unmounts and remounts against
-    /// `new_spec` instead. `new_spec` carries the failed-over server's own
-    /// address and drive root, which can differ node to node. A no-op
-    /// (`Ok(false)`) if `key` isn't mounted, or is already pointed at the
-    /// same server and root.
+    /// Fail a mount over to a new active server. A kernel NFS mount bakes in its
+    /// server address and real remote path (`MountSpec::remote_root`) at
+    /// `mount(2)` time, so this unmounts and remounts against `new_spec` (which
+    /// can differ node to node). `Ok(false)` if `key` isn't mounted or already
+    /// points at the same server and root.
     pub fn retarget(&self, key: &str, new_spec: MountSpec) -> Result<bool> {
         {
             let mounts = self.mounts.lock();
@@ -338,14 +292,10 @@ impl MountManager {
         Ok(true)
     }
 
-    /// Confirm every mount this manager owns is actually healthy — still
-    /// present in `/proc/self/mountinfo`, and a bounded `stat()` on it
-    /// doesn't time out — and force-remount any that aren't. This is the
-    /// direct replacement for the old FUSE `remount_dead`: a `soft` NFS
-    /// mount never dies the way a FUSE session visibly could, it just
-    /// serves `EIO`/`ETIMEDOUT` per call forever once its server is gone,
-    /// so recovery has to actively probe rather than wait for a session to
-    /// end on its own.
+    /// Check every mount is healthy (in `/proc/self/mountinfo` and a bounded
+    /// `stat()` succeeds) and force-remount any that aren't. A `soft` NFS mount
+    /// never visibly dies; it serves `EIO`/`ETIMEDOUT` forever once its server is
+    /// gone, so recovery must probe.
     pub async fn check_health(&self) {
         let specs: Vec<MountSpec> = {
             let mounts = self.mounts.lock();
@@ -367,9 +317,7 @@ impl MountManager {
         }
     }
 
-    /// Run forever, periodically health-checking and remounting any
-    /// unhealthy mount. Intended to be spawned as a background task
-    /// alongside the sync scheduler.
+    /// Run forever, health-checking and remounting; spawn as a background task.
     pub async fn supervise(&self, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {

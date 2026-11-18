@@ -26,7 +26,6 @@ use crate::egress::{short_name, CHAIN_USABLE, IFNAMSIZ_USABLE, WIREGUARD_LINK_AL
 use crate::error::{NetError, Result};
 use crate::iptables::{ChainSpec, IptablesPlan, Jump};
 
-/// Deterministic interface name for a wireguard network's tunnel.
 pub fn wireguard_iface_name(network: &str) -> String {
     short_name("wg-", network, IFNAMSIZ_USABLE)
 }
@@ -52,9 +51,7 @@ pub struct WireguardPeer {
     pub persistent_keepalive: Option<u16>,
 }
 
-/// Parse a wg-quick `.conf`. Rejects anything missing `PrivateKey` or
-/// `Address` on the interface, or a peer missing `PublicKey` -- those three
-/// are the minimum a tunnel needs to come up at all.
+/// Parse a wg-quick `.conf`. Needs `PrivateKey` and `Address` on the interface and `PublicKey` per peer.
 pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
     let mut private_key = None;
     let mut address = None;
@@ -168,9 +165,7 @@ fn parse_err(msg: &str) -> NetError {
     }
 }
 
-/// Bring up `name` as a wireguard interface configured per `cfg`. Idempotent:
-/// safe to call every reconcile tick, whether or not the interface already
-/// exists with the right settings.
+/// Bring up `name` per `cfg`. Idempotent; safe every reconcile tick.
 pub fn ensure_wireguard_interface(name: &str, cfg: &WireguardConfig) -> Result<()> {
     let add = Command::new("ip")
         .args(["link", "add", name, "type", "wireguard"])
@@ -197,7 +192,6 @@ pub fn ensure_wireguard_interface(name: &str, cfg: &WireguardConfig) -> Result<(
     Ok(())
 }
 
-/// Tear the interface down. Not an error if it is already gone.
 pub fn teardown_wireguard_interface(name: &str) -> Result<()> {
     let out = Command::new("ip")
         .args(["link", "del", name])
@@ -239,7 +233,6 @@ fn wg_setconf_body(cfg: &WireguardConfig) -> String {
     out
 }
 
-/// Feed `body` to `wg setconf <name> /dev/stdin`.
 fn wg_setconf(name: &str, body: &str) -> Result<()> {
     let mut child = Command::new("wg")
         .args(["setconf", name, "/dev/stdin"])
@@ -317,35 +310,27 @@ pub struct IngressRule {
 /// prefix, in both the filter and nat tables.
 pub(crate) const INGRESS_CHAIN_PREFIX: &str = "CLDR-WGIN-";
 
-/// The ingress chain of a tunnel interface (same name in filter and nat).
 pub fn wireguard_ingress_chain(iface: &str) -> String {
     short_name(INGRESS_CHAIN_PREFIX, iface, CHAIN_USABLE)
 }
 
-/// The rules that let specific ports in through `iface`, and refuse
-/// everything else new that arrives on it.
+/// The rules that let specific ports in through `iface` and refuse every
+/// other new connection from it.
 ///
-/// A tunnel's far end is not trusted the way the internal network is, and
-/// docker publishes container ports on every address of the host, the tunnel's
-/// included, so without a default deny every `-p` port is reachable from the
-/// VPN whatever was configured. The filter chain therefore ends in `DROP` for
-/// anything from `iface` that is not a reply or an explicitly opened port, and
-/// is jumped to from both places such a packet is judged: `INPUT` (a local
-/// listener, this daemon's own expose forwarders included) and `DOCKER-USER`
-/// (docker's DNAT-ed published ports, which are forwarded, never input).
+/// A tunnel's far end is not trusted, and docker publishes container ports on
+/// every host address, the tunnel's included, so without a default deny every
+/// `-p` port is reachable from the VPN. The filter chain ends in `DROP` for
+/// anything from `iface` that is not a reply or an opened port, and is jumped
+/// to from `INPUT` (local listeners, expose forwarders) and `DOCKER-USER`
+/// (docker's DNAT-ed ports, which are forwarded, never input).
 ///
-/// An opened port is matched on its *original* destination port
-/// (`--ctorigdstport`), which survives both our own `PREROUTING` DNAT below
-/// and docker's. Matching on `--dport` instead would see the post-DNAT port,
-/// so a rule that renumbers (2222 -> 22) would never be accepted.
+/// Ports match on the *original* destination port (`--ctorigdstport`), which
+/// survives our PREROUTING DNAT and docker's; `--dport` would see the
+/// post-DNAT port, so a renumbering rule (2222 -> 22) would never match.
 ///
-/// `target_addr`, when known, is the node's own address, so an already
-/// published docker `-p` bind (which listens on `0.0.0.0`) answers there too,
-/// with no need for `route_localnet` the way a loopback target would. Without
-/// it only the default deny is installed.
-///
-/// Scoped to `-i <iface>` throughout: never opens these ports on the bridge,
-/// the internal network, or anywhere else.
+/// `target_addr`, when known, is the node's own address, so a docker `-p`
+/// bind on `0.0.0.0` answers there without `route_localnet`. Without it only
+/// the default deny is installed. Scoped to `-i <iface>` throughout.
 pub fn wireguard_ingress_iptables_plan(
     iface: &str,
     target_addr: Option<IpAddr>,

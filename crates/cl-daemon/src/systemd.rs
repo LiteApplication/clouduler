@@ -84,7 +84,6 @@ pub fn take_listen_fds() -> Vec<std::net::TcpListener> {
     listeners
 }
 
-/// The daemon is up and serving. `STATUS` is what `systemctl status` shows.
 pub fn ready(status: &str) {
     notify(&format!("READY=1\nSTATUS={status}"));
 }
@@ -112,7 +111,6 @@ fn monotonic_usec() -> u128 {
         .unwrap_or_default()
 }
 
-/// Ask for more time to start, for the slow steps (waiting on dockerd).
 pub fn extend_timeout(by: Duration) {
     notify(&format!("EXTEND_TIMEOUT_USEC={}", by.as_micros()));
 }
@@ -152,7 +150,6 @@ pub fn spawn_watchdog() -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
-/// What the service manager or an operator asked of a running daemon.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     Stop,

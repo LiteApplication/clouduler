@@ -1,45 +1,33 @@
-//! Drives `restic_targets` through to `restic_runs`: decide what's due
-//! (leader-side), then, on whichever node(s) actually hold the data, stop
-//! affected instances if configured to, get the bytes to the destination,
-//! run restic, and restart.
+//! Drives `restic_targets` through to `restic_runs`: decide what is due
+//! (leader-side), then, on the node(s) holding the data, stop affected
+//! instances if configured to, get the bytes to the destination, run restic,
+//! and restart.
 //!
-//! Two loops, matching `watch_git_backup` / `crate::migration::start`'s
-//! split between "decide" and "do":
+//! Two loops, split between "decide" and "do":
 //!
 //! - [`start_due_checker`] runs only on the leader (a single writer avoids
-//!   every manager racing to start the same run) and turns an `is_due`
-//!   target into a `Running` `BackupRun`, plus fails any `Running` run that
-//!   has sat unclaimed for too long - the crash/partition safety net, since
-//!   nothing here is phase-recorded the way `cl_drive::migration` is: restic's
-//!   own repository lock already makes a retried run safe, and there is no
-//!   point-of-no-return step like migration's `Switching` to protect.
-//! - [`start_runner`] runs on every node and claims the `Running` runs that
-//!   are its job to execute - see `is_local_source` and the `NodeLocal`
-//!   handling below for what "its job" means.
+//!   racing to start the same run), turns an `is_due` target into a `Running`
+//!   `BackupRun`, and fails any `Running` run unclaimed for too long. Runs are
+//!   not phase-recorded: restic's repository lock already makes a retry safe,
+//!   and there is no point-of-no-return step to protect.
+//! - [`start_runner`] runs on every node and claims the `Running` runs that are
+//!   its job (see `is_local_source` and the `NodeLocal` handling below).
 //!
 //! ## The `NodeLocal`-elsewhere handoff
 //!
-//! restic always runs as a host process against a real local path, so a
-//! `NodeLocal` destination on a node that doesn't already hold the drive
-//! needs the data pushed there first (`start_runner`'s push branch skips
-//! this entirely when the destination node already implements the drive -
-//! e.g. it's itself a replica - since it already has the data to back up
-//! directly). See `push_drive_once`, using the same
-//! one-off `SyncEngine::sync` call `cl_drive::migration` makes - deliberately
-//! never followed by `SetVolumeReplica`, since this is a point-in-time copy
-//! for restic to read, not a standing replica). `SyncEngine::sync` only ever
-//! pushes from the caller outward, so the source node and the destination
-//! node are necessarily two different nodes' loops cooperating with no
-//! direct channel between them beyond the shared `Running` run: the source
-//! pushes once (best effort, guarded in-memory so a slow push isn't retried
-//! every tick) and the destination, once it is past a fixed grace period
-//! from `started_at`, just runs restic against whatever has landed. This is
-//! a deliberate simplification - a real "sync is done" signal would need a
-//! new cross-node channel this feature doesn't otherwise need - and a push
-//! that is still in flight when the grace period elapses just means that
-//! occurrence's restic run reads a partial tree; the next scheduled run
-//! (or the stale-run watchdog, for a source that never got there at all)
-//! corrects it.
+//! restic runs as a host process against a real local path, so a `NodeLocal`
+//! destination on a node that does not hold the drive needs the data pushed
+//! there first (skipped when the destination node already implements the drive,
+//! e.g. as a replica). See `push_drive_once`: the same one-off `SyncEngine::sync`
+//! as `cl_drive::migration`, deliberately never followed by `SetVolumeReplica`,
+//! since this is a point-in-time copy for restic, not a standing replica.
+//!
+//! The source and destination loops have no direct channel beyond the shared
+//! `Running` run: the source pushes once (best effort, guarded in-memory so a
+//! slow push is not retried every tick) and the destination, after a fixed grace
+//! period from `started_at`, runs restic against whatever has landed. A push
+//! still in flight then yields a partial tree for that run; the next scheduled
+//! run (or the stale-run watchdog) corrects it.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -65,35 +53,26 @@ use uuid::Uuid;
 
 use crate::backup_secrets;
 
-/// How often the leader checks for due targets and stale runs.
 const DUE_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// How often every node checks for `Running` runs that are its job.
 const RUN_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// A `Running` run whose progress has not moved for `frequency_secs * this`
-/// (bounded below by `STALE_RUN_FLOOR_SECS` and above by
-/// `STALE_RUN_CAP_SECS`) is presumed abandoned (the node that claimed it
-/// crashed or partitioned) and failed so the target is eligible to be picked
-/// up again on schedule. Failing a run that is in fact still going would let a
-/// second restic start against the same repository, so the clock restarts
-/// every time the run's reported progress changes, and the floor keeps a
-/// frequent schedule (a 5 minute target would otherwise give up after 15)
-/// from condemning a legitimately long first backup.
+/// (clamped to `STALE_RUN_FLOOR_SECS`..`STALE_RUN_CAP_SECS`) is presumed
+/// abandoned and failed. The clock restarts whenever reported progress changes,
+/// since failing a live run would let a second restic hit the same repository;
+/// the floor keeps a frequent schedule from condemning a long first backup.
 const STALE_RUN_MULTIPLIER: i64 = 3;
 const STALE_RUN_FLOOR_SECS: i64 = 12 * 3600;
 const STALE_RUN_CAP_SECS: i64 = 72 * 3600;
-/// How long a `NodeLocal`-elsewhere destination waits, once a run starts,
-/// before running restic against whatever the source's one-off push has
-/// landed so far - see the module doc comment.
+/// How long a `NodeLocal`-elsewhere destination waits before running restic on
+/// whatever the source's one-off push has landed.
 const SYNC_GRACE_SECS: i64 = 120;
 /// How long a local, non-primary copy of a drive is given to catch up with
 /// its primary before a backup runs against it anyway.
 const DRIVE_SYNC_GRACE_SECS: i64 = 120;
-/// On top of the affected services' own `stop_grace_period`, how long to
-/// wait for local containers to actually stop before giving up and failing
-/// the run (restarting what was stopped) - mirrors `folder_import`'s margin.
+/// On top of the services' `stop_grace_period`, how long to wait for local
+/// containers to stop before failing the run.
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
-/// Leader-side: turn due targets into `Running` runs, and fail stale ones.
 pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(DUE_POLL_INTERVAL);
@@ -110,11 +89,7 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 if !cl_restic::schedule::is_due(target, now) {
                     continue;
                 }
-                // A manual run (or a previous scheduled one that hasn't
-                // finished yet) already owns this target; the state machine
-                // would reject a second `Running` run for it anyway, but
-                // skipping here avoids a pointless submit every poll while
-                // it's in flight.
+                // Already owned by a manual or earlier run; skip to avoid a pointless submit each poll.
                 let already_running = state.restic_runs.values().any(|r| {
                     r.target_id == target.id
                         && matches!(r.outcome, BackupRunOutcome::Running { .. })
@@ -169,8 +144,6 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
     })
 }
 
-/// How long without progress before a `Running` run of a target with this
-/// `frequency_secs` is presumed abandoned.
 fn stale_after_secs(frequency_secs: Option<u64>) -> i64 {
     match frequency_secs {
         Some(freq) => (freq.min(i64::MAX as u64 / 4) as i64 * STALE_RUN_MULTIPLIER)
@@ -205,7 +178,6 @@ impl ProgressTracker {
         entry.1
     }
 
-    /// Forget runs that are no longer `Running`.
     fn retain_running(&mut self, state: &ClusterState) {
         self.seen.retain(|id, _| {
             state
@@ -216,7 +188,6 @@ impl ProgressTracker {
     }
 }
 
-/// Per-node: claim and execute the `Running` runs that are this node's job.
 pub fn start_runner(
     cluster: Arc<ClusterNode>,
     node_name: String,
@@ -227,11 +198,8 @@ pub fn start_runner(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(RUN_POLL_INTERVAL);
-        // Runs this node has already claimed (`execute_and_finish` is in
-        // flight for them) or already pushed once as a `NodeLocal`-elsewhere
-        // source - both reset on restart, which is harmless: a retried
-        // execute is safe (restic's repo lock) and a retried push is cheap
-        // (delta-based).
+        // Reset on restart, which is harmless: a retried execute is safe (restic's
+        // repo lock) and a retried push is cheap (delta-based).
         let in_flight: Arc<Mutex<BTreeSet<String>>> = Arc::default();
         let pushed: Arc<Mutex<BTreeSet<String>>> = Arc::default();
 
@@ -255,14 +223,9 @@ pub fn start_runner(
                 let Some(destination) = state.restic_destinations.get(&run.destination_id) else {
                     continue;
                 };
-                // No blanket `registry.implements(&run.drive)` gate here:
-                // `is_source` below already requires it for every branch
-                // that needs to read the drive, but the `NodeLocal { node
-                // == node_name }` destination branch must run even when
-                // this node does *not* implement the drive - that's exactly
-                // the `NodeLocal`-elsewhere case (see the module doc
-                // comment), and gating on it here would skip that branch
-                // entirely, leaving those runs stuck `Running` forever.
+                // No blanket `registry.implements` gate: the `NodeLocal { node ==
+                // node_name }` branch must run even when this node does not
+                // implement the drive, or those runs would stay `Running` forever.
                 let is_source = is_local_source(&registry, &state, &run.drive);
 
                 match &destination.kind {
@@ -288,14 +251,8 @@ pub fn start_runner(
                     BackupDestinationKind::NodeLocal { node, path }
                         if pushes_volumes(&registry, &state, &run.drive) && node != &node_name =>
                     {
-                        // If the destination node already implements this
-                        // drive (e.g. it's itself a replica), it has the
-                        // data locally already - pushing a staged copy here
-                        // would just duplicate it on disk. That node's own
-                        // `NodeLocal { node == node_name }` branch below
-                        // runs restic straight off its existing copy
-                        // instead, once its grace period elapses (see
-                        // `execute`'s `registry.implements` check).
+                        // A destination that already implements the drive has the data;
+                        // its own `NodeLocal` branch runs restic off it after the grace period.
                         if state
                             .nodes
                             .get(node)
@@ -311,14 +268,9 @@ pub fn start_runner(
                                 .await
                         {
                             warn!(run = %run.id, drive = %run.drive, destination = %node, error = %e, "one-off backup sync failed");
-                            // The destination can't run restic against data
-                            // that never landed, and it can't tell a push
-                            // that's still in flight from one that already
-                            // failed outright - only the source knows that.
-                            // Fail the run itself rather than leaving it
-                            // `Running` until the stale-run watchdog gets to
-                            // it, which can be up to `STALE_RUN_CAP_SECS`
-                            // later.
+                            // The destination cannot tell an in-flight push from a failed
+                            // one; only the source knows. Fail now rather than wait up to
+                            // `STALE_RUN_CAP_SECS` for the watchdog.
                             let mut failed = run.clone();
                             failed.finished_at = Some(unix_now());
                             failed.outcome = BackupRunOutcome::Failed {
@@ -414,9 +366,7 @@ async fn execute(
     let instances = instances_using_drive(state, &run.drive);
     let should_stop = resolve_stop_containers(target, state, &instances);
 
-    // Only instances that are supposed to be running are stopped, and only
-    // those are started again: one an operator already stopped on purpose
-    // must not be resurrected by a backup.
+    // One an operator stopped on purpose must not be resurrected by a backup.
     let mut stopped: Vec<InstanceId> = Vec::new();
     let result = stop_and_back_up(
         cluster,
@@ -434,15 +384,13 @@ async fn execute(
     )
     .await;
 
-    // Always bring back what this run stopped, whatever the backup did.
     let restart = restart_instances(cluster, &stopped).await;
     combine_with_restart(result, restart)
 }
 
-/// The part of a backup run that happens while containers are down. Every
-/// instance it takes down is pushed onto `stopped` *before* the stop is
-/// requested, so a failure anywhere in here - including halfway through
-/// stopping - still leaves the caller a complete list to restart.
+/// The part of a backup run that happens while containers are down. Each instance
+/// is pushed onto `stopped` *before* its stop is requested, so a failure anywhere
+/// still leaves a complete list to restart.
 #[allow(clippy::too_many_arguments)]
 async fn stop_and_back_up(
     cluster: &Arc<ClusterNode>,
@@ -459,42 +407,27 @@ async fn stop_and_back_up(
     stopped: &mut Vec<InstanceId>,
 ) -> Result<BackupRunOutcome> {
     let running = currently_running(state, to_stop);
-    // Stopped one at a time - each instance's own deadline elapses
-    // before the next is even asked to stop - rather than firing every
-    // `SetDesiredState` at once and waiting on the slowest, so a single
-    // node doesn't have to shut down every affected container in the
-    // same instant.
+    // One at a time rather than all `SetDesiredState` at once, so a node does not
+    // shut down every affected container in the same instant.
     for instance in &running {
         let one = std::slice::from_ref(instance);
         stopped.push(instance.clone());
         set_desired(cluster, one, DesiredState::Stopped).await?;
         let deadline = max_stop_grace(state, one) + STOP_POLL_MARGIN;
-        // A backup of a database that is still running is a crash-consistent
-        // copy at best, which is exactly what stopping first is meant to
-        // avoid - so a container that cannot be confirmed down aborts the
-        // run (the caller restarts everything) instead of backing up anyway.
+        // A backup of a running database is crash-consistent at best, so an
+        // unconfirmed stop aborts the run (the caller restarts everything).
         wait_for_stopped(cluster, node_name, one, docker, deadline).await?;
     }
 
-    // A `NodeLocal`-elsewhere destination doesn't implement the drive at
-    // all - see the module doc comment - so it has no `registry.root` to
-    // read; restic runs against the staging copy `push_drive_once`'s peer
-    // landed instead, in a hidden directory next to the destination's own
-    // path rather than under this node's data dir (see
-    // `DriveRegistry::staging_root_for`) - the staged copy can be the
-    // whole drive, and the destination's own volume is the one an operator
-    // actually sized for that. `ensure_staging_root` (rather than just
-    // `staging_root_for`) matters here: a run whose grace period has
-    // elapsed with no push having landed yet (source unreachable, say)
-    // still needs a real, existing directory for restic to point at.
+    // A `NodeLocal`-elsewhere destination does not implement the drive, so restic
+    // runs against the staging copy in a hidden directory next to the destination's
+    // own path (`DriveRegistry::staging_root_for`), not this node's data dir: the
+    // staged copy can be the whole drive. `ensure_staging_root` guarantees an
+    // existing directory even if no push has landed yet.
     let source_path = if registry.implements(&run.drive) {
-        // A local copy of a replicated drive can lag its primary (a fresh
-        // replica, or one that fell behind) - back it up straight off disk
-        // without checking and restic would capture stale data with no
-        // warning. Give it a bounded chance to catch up first; a copy still
-        // behind once the deadline passes is backed up as-is, same trade-off
-        // `SYNC_GRACE_SECS` accepts for the `NodeLocal`-elsewhere case - the
-        // next scheduled run corrects it.
+        // A local replica can lag its primary and restic would capture stale data
+        // silently. Give it a bounded chance to catch up; one still behind at the
+        // deadline is backed up as-is (same trade-off as `SYNC_GRACE_SECS`).
         wait_for_drive_synced(
             cluster,
             registry,
@@ -527,7 +460,6 @@ async fn stop_and_back_up(
     .await
 }
 
-/// The subset of `instances` whose assignment currently wants them running.
 pub fn currently_running(state: &ClusterState, instances: &[InstanceId]) -> Vec<InstanceId> {
     instances
         .iter()
@@ -541,9 +473,8 @@ pub fn currently_running(state: &ClusterState, instances: &[InstanceId]) -> Vec<
         .collect()
 }
 
-/// Sets every instance in `stopped` back to `Running`, attempting all of
-/// them even if one submit fails (a single stuck one must not leave the rest
-/// down), and reporting every failure.
+/// Sets every instance in `stopped` back to `Running`, attempting all of them
+/// even if one submit fails, and reporting every failure.
 async fn restart_instances(
     cluster: &Arc<ClusterNode>,
     stopped: &[InstanceId],
@@ -568,10 +499,9 @@ async fn restart_instances(
     }
 }
 
-/// Folds the result of restarting into the backup's own: the backup's error
-/// always wins (restart trouble is appended), and a restart failure after a
-/// good snapshot downgrades to a warning on the success rather than hiding
-/// that the snapshot exists.
+/// Folds the restart result into the backup's: the backup's error wins (restart
+/// trouble is appended), and a restart failure after a good snapshot becomes a
+/// warning on the success.
 fn combine_with_restart(
     result: Result<BackupRunOutcome>,
     restart: std::result::Result<(), String>,
@@ -604,9 +534,8 @@ fn combine_with_restart(
     }
 }
 
-/// Instances whose stack mounts a volume on `drive` - `folder_import`'s
-/// `instances_using` generalized from one volume to every volume on a drive,
-/// since a backup run covers the whole drive in one restic call.
+/// Instances whose stack mounts a volume on `drive` (a backup covers the whole
+/// drive in one restic call).
 pub fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceId> {
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
@@ -631,12 +560,9 @@ pub fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceI
     found
 }
 
-/// The target's own override wins outright; otherwise, most-conservative
-/// wins across every affected service's resolved `x-clouduler` override
-/// (`effective_backup_stop_before`): any explicit `true` stops, and only a
-/// unanimous explicit `false` skips stopping. No explicit answer from
-/// anyone defaults to `true` - stopping before touching live data is the
-/// safe default.
+/// The target's own override wins; otherwise any explicit `true` across the
+/// affected services' `x-clouduler` overrides stops, and only a unanimous
+/// explicit `false` skips. Default is `true`, the safe choice.
 fn resolve_stop_containers(
     target: &DriveBackupTarget,
     state: &ClusterState,
@@ -688,18 +614,11 @@ async fn set_desired(
     Ok(())
 }
 
-/// Polls local docker for instances assigned to `node_name`; for anything
-/// assigned elsewhere, polls that node's self-reported `container_status`
-/// (see `cl_sched::run::Scheduler::report_container_status`) instead of
-/// blindly sleeping out `deadline` - so this returns the moment the remote
-/// node actually confirms its container is down, rather than always waiting
-/// the worst case. An instance with no report yet (an older peer, or one
-/// that hasn't swept since this run started) is treated as still running,
-/// falling back to waiting for exactly that instance.
-///
-/// Returns an error naming the instances still not confirmed stopped once
-/// `deadline` passes - an unconfirmed stop must never read as a stop. A
-/// container docker cannot be asked about counts as unconfirmed too.
+/// Polls local docker for instances assigned to `node_name` and the remote
+/// node's self-reported `container_status` for the rest, returning as soon as
+/// each is confirmed down. An instance with no report yet is treated as still
+/// running. Errors naming the instances still unconfirmed at `deadline`; a
+/// container docker cannot be asked about counts as unconfirmed.
 async fn wait_for_stopped(
     cluster: &Arc<ClusterNode>,
     node_name: &str,
@@ -756,9 +675,8 @@ async fn wait_for_stopped(
     }
 }
 
-/// Whether every volume on `drive` is caught up to its primary's generation
-/// on `node`. Served drives have no replica lag to check - only the active
-/// server ever holds a copy, so it's trivially synced.
+/// Whether every volume on `drive` is caught up to its primary's generation on
+/// `node`. Served drives have no replica lag.
 fn drive_synced(registry: &DriveRegistry, state: &ClusterState, drive: &str, node: &str) -> bool {
     if registry.is_served(drive) {
         return true;
@@ -770,10 +688,8 @@ fn drive_synced(registry: &DriveRegistry, state: &ClusterState, drive: &str, nod
         .all(|(_, v)| v.in_sync().contains(node))
 }
 
-/// Poll until `drive` is fully synced on `node`, or `deadline` elapses. A
-/// primary's own replica entry is bumped the instant it writes (see
-/// `TouchVolume`), so this returns immediately for the common case and only
-/// actually waits for a replica that is genuinely behind.
+/// Poll until `drive` is fully synced on `node`, or `deadline` elapses. A primary's
+/// own entry is bumped on write, so the common case returns immediately.
 async fn wait_for_drive_synced(
     cluster: &Arc<ClusterNode>,
     registry: &DriveRegistry,
@@ -792,12 +708,9 @@ async fn wait_for_drive_synced(
     }
 }
 
-/// Whether this node currently holds the authoritative copy of `drive`: for
-/// a served drive, whether it's the active server; for a replicated drive,
-/// whether it is primary for every volume on record (a drive whose volumes
-/// disagree on primary has no single source and is skipped - see the module
-/// doc comment on the `NodeLocal`-elsewhere handoff for why a single source
-/// is needed at all).
+/// Whether this node holds the authoritative copy of `drive`: the active server
+/// of a served drive, or primary for every volume of a replicated one (a drive
+/// whose volumes disagree on primary has no single source and is skipped).
 fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) -> bool {
     if !registry.implements(drive) {
         return false;
@@ -845,12 +758,10 @@ fn pushes_volumes(registry: &DriveRegistry, state: &ClusterState, drive: &str) -
         .any(|(id, v)| id.drive == drive && pushes_volume(registry, state, id, v))
 }
 
-/// Pushes every volume of `drive` this node leads to `target_node`'s own copy of the same
-/// drive, once. Never followed by `SetVolumeReplica`: `target_node` is a
-/// backup destination's staging area, not a standing replica, so the
-/// cluster's replication bookkeeping must never learn about this write - see
-/// `folder_import::push_now` for the pattern this mirrors and
-/// `cl_drive::migration::sync_all_inner` for the call shape.
+/// Pushes every volume of `drive` this node leads to `target_node`'s copy of the
+/// drive, once. Never followed by `SetVolumeReplica`: the target is a staging
+/// area, not a replica, so replication bookkeeping must not learn of it (see
+/// `folder_import::push_now`, `cl_drive::migration::sync_all_inner`).
 async fn push_drive_once(
     state: &ClusterState,
     registry: &DriveRegistry,
@@ -887,11 +798,8 @@ async fn push_drive_once(
     Ok(())
 }
 
-/// How often live progress is written back to raft while a backup runs -
-/// throttled here (rather than on every restic status line, which can be
-/// several a second) so a long backup doesn't turn into a flood of raft
-/// proposals; `run_restic_backup`'s `on_progress` closure only forwards a
-/// value once this much time has passed since the last one it sent.
+/// How often live progress is written back to raft; throttled so restic's
+/// several-per-second status lines do not flood raft proposals.
 const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(3);
 
 #[allow(clippy::too_many_arguments)]
@@ -907,8 +815,6 @@ async fn run_restic_backup(
 ) -> Result<BackupRunOutcome> {
     backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret)
         .await?;
-    // Re-read: `ensure_password_secret` may just have written the entry
-    // `build_repo` needs to open.
     let state = cluster.state().await;
     let cred_dir = data_dir.join("restic").join("creds").join(&destination.id);
     let (repo, _guards) = backup_secrets::build_repo(&state, key, &cred_dir, destination)?;
@@ -917,11 +823,8 @@ async fn run_restic_backup(
     let forget = forget_args(target);
     let source_path = source_path.to_path_buf();
 
-    // Percent updates flow off the blocking thread through this watch
-    // channel; the task below forwards each one to raft (via the same run
-    // id, so it's an in-place update, not a new run - see the state
-    // machine's `RecordBackupRun` handling) and stops once the channel
-    // closes, which happens the instant the blocking closure returns.
+    // Percent updates flow off the blocking thread via this watch channel; the
+    // task forwards each to raft as an in-place update of the same run id.
     let (progress_tx, mut progress_rx) = tokio::sync::watch::channel::<Option<f64>>(None);
     let run_for_progress = run.clone();
     let cluster_for_progress = Arc::clone(cluster);
@@ -936,8 +839,7 @@ async fn run_restic_backup(
         }
     });
 
-    // restic is a blocking `std::process::Command` - never call it straight
-    // off an async fn's stack, see `clouduler-drive-sync-blocks-runtime`.
+    // restic blocks: never call it on an async stack (`clouduler-drive-sync-blocks-runtime`).
     let result = tokio::task::spawn_blocking(move || -> Result<BackupRunOutcome> {
         repo.ensure_initialized()
             .map_err(|e| anyhow!("restic repository: {e}"))?;
@@ -953,10 +855,8 @@ async fn run_restic_backup(
                 }
             })
             .map_err(|e| anyhow!("restic backup: {e}"))?;
-        // A prune/forget error (e.g. transient lock or network issue) shouldn't
-        // invalidate a successful snapshot of large data - but it must not
-        // vanish into a log line either: until it succeeds the repository
-        // grows without bound, so it is recorded on the run itself.
+        // A prune/forget error must not invalidate a good snapshot, but is recorded
+        // on the run rather than only logged: until it succeeds the repo grows unbounded.
         let warning = match repo.forget(&forget) {
             Ok(()) => None,
             Err(e) => {

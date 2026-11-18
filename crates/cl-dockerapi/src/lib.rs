@@ -1,8 +1,6 @@
-//! A read-only, docker-engine-compatible unix socket for image scanners.
-//!
-//! Grype and syft talk to "docker" only to inspect and save images. This
-//! serves exactly those endpoints, from a pluggable `ImageBackend`, and
-//! refuses the rest of the engine API.
+//! A read-only, docker-engine-compatible unix socket for image scanners (grype,
+//! syft), serving only the inspect and save endpoints from a pluggable
+//! `ImageBackend` and refusing the rest of the engine API.
 
 mod backend;
 mod route;

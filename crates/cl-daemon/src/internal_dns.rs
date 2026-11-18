@@ -60,7 +60,6 @@ pub fn start(
         }
     };
 
-    // Opens a stack's wan `allowed` entries as it looks the names up.
     dns.set_observer(wan);
 
     info!(zone = %origin, "internal dns ready");
@@ -72,7 +71,6 @@ pub fn start(
     }))
 }
 
-/// Every node's address on the internal network, by name.
 fn nodes_of(cfg: &ClusterConfig) -> Vec<(String, Ipv4Addr)> {
     cfg.nodes
         .iter()
@@ -98,8 +96,6 @@ async fn run(
     loop {
         ticker.tick().await;
         let state = cluster.state().await;
-        // Recomputed every pass, not just once at boot, so a node added after
-        // this one started gets an internal-dns answer without a restart.
         let live = crate::daemon::live_config(&state, &boot_cfg);
         let nodes = nodes_of(&live);
 
@@ -133,33 +129,20 @@ async fn run(
                     tokio::time::sleep(BIND_RETRY).await;
                 }
             });
-            // Logged as an attempt, not a success: the bind is what decides,
-            // and it happens inside the task above.
             info!(%addr, "binding the internal resolver");
         }
     }
 }
 
-/// The zone as it should be right now: every running container by service
-/// name, every node by its own name, plus every proxy hostname routed on
-/// this same network (e.g. `mail` for stalwart's `mail.home.liteapp.fr`
-/// route) so a container can reach another service the same way an outside
-/// client does, not just by its internal `<service>.<stack>` name. Proxy
-/// hosts routed on a *different* network are left out: their domain isn't
-/// this zone's origin, so they belong to whatever resolves that zone
-/// upstream, not to us.
+/// The zone as it should be right now: every running container by service name,
+/// every node by its own name, plus every proxy hostname routed on this same
+/// network (so a container reaches another service by its public name too).
+/// Hosts routed on a different network are left to the upstream resolver.
 ///
-/// The dashboard's own hostname (`web.address`/`web.network`) is included
-/// too, resolved to the current leader alone - same rule `desired_records`
-/// in `cl_daemon::proxy` already applies for the *external* DNS reconcile,
-/// and for the same reason: writes only land on the leader
-/// (`redirect_non_leader` in `cl_api::server`), so every other node's
-/// address is a dead end for anything but a read. Without this, a
-/// container has no way to resolve the dashboard's hostname at all: it
-/// isn't a stack route, so `desired_dns_hosts` never sees it, and the
-/// internal zone is authoritative for its own domain - a query for a name
-/// under it that isn't in the zone comes back NXDOMAIN rather than falling
-/// through to the upstream forwarder.
+/// The dashboard hostname (`web.address`/`web.network`) is included, resolved to
+/// the current leader alone, since writes only land there. It is not a stack
+/// route, and the zone is authoritative for its domain, so without it the name
+/// would come back NXDOMAIN instead of reaching the upstream forwarder.
 fn zone_for(
     state: &ClusterState,
     cfg: &ClusterConfig,
@@ -216,19 +199,11 @@ fn zone_for(
 /// Hostnames of routes published on a public network, pointed at this node's
 /// own proxy over its internal address.
 ///
-/// Resolved the normal way, such a name gives the node's public address, which
-/// is usually the router's: a container on the node that asks for a hostname
-/// the cluster itself serves then connects out to the router and back in, and
-/// that never works from the same node (and only by luck from another). The
-/// proxy on this node serves every route and relays to wherever the backend
-/// runs, so answering with it is the same service the outside world gets.
-///
-/// Public networks only: they carry no network gate, so any container is
-/// allowed. A route on a subnetted network is only served to peers inside
-/// that subnet, which the resolver cannot tell per caller, so those names are
-/// left to the upstream. Only done for the standard 80/443 proxy ports, since
-/// a client given a bare hostname will use those. No AAAA is served for them
-/// (the overlay has no IPv6 path to the proxy).
+/// Resolved normally such a name gives the router's public address, and a
+/// container connecting out to it and back in never works from the same node.
+/// Public networks only (no network gate); subnetted routes are left to the
+/// upstream since the resolver cannot tell callers apart. Only for the standard
+/// 80/443 proxy ports, and no AAAA (the overlay has no IPv6 path to the proxy).
 fn proxy_overrides(state: &ClusterState, cfg: &ClusterConfig, node_name: &str) -> Vec<ZoneRecord> {
     if !cfg.proxy.enabled || cfg.proxy.http_port != 80 || cfg.proxy.https_port != 443 {
         return Vec::new();
@@ -255,8 +230,6 @@ fn proxy_overrides(state: &ClusterState, cfg: &ClusterConfig, node_name: &str) -
             continue;
         }
         let fqdn = qualify(&host, net.domain.as_deref());
-        // The apex of the internal zone and anything under it is answered by
-        // the zone itself.
         if !internal_domain.is_empty()
             && (fqdn == internal_domain || fqdn.ends_with(&format!(".{internal_domain}")))
         {
@@ -299,10 +272,8 @@ fn nat_clients(state: &ClusterState, cfg: &ClusterConfig) -> BTreeSet<IpAddr> {
         .collect()
 }
 
-/// Gateway address of every overlay network that has a subnet. Bound
-/// everywhere rather than only on networks with a container here, because a
-/// container can be started on this node between two passes and its resolver
-/// has to answer immediately.
+/// Gateway address of every overlay network that has a subnet. Bound everywhere,
+/// since a container can start on this node between two passes.
 fn gateways(state: &ClusterState) -> Vec<Ipv4Addr> {
     Allocations::decode(state.overlay.as_deref())
         .map(|a| a.gateways().map(|(_, ip)| ip).collect())
@@ -315,13 +286,8 @@ mod tests {
     use crate::placement::fixtures::{cluster_config, state_with, SPEC};
     use cl_net::dns::answer;
 
-    /// A proxy `host:` alias routed on the same network as the internal zone
-    /// (SPEC's `blog` route is on `wan`, a different network, so it must stay
-    /// absent) is not what a container asking for it by its public name
-    /// should get: without this, only `<service>.<stack>` names resolve
-    /// inside a container, and a health check hitting another service by the
-    /// hostname it's actually published under (same as an outside client
-    /// would use) gets NXDOMAIN.
+    /// A proxy host routed on the same network as the internal zone must resolve
+    /// by its public name inside a container (SPEC's `blog` is on `wan`, so it stays absent).
     #[test]
     fn a_proxy_host_on_the_internal_network_resolves() {
         let spec = "\
@@ -347,9 +313,7 @@ services:
         );
     }
 
-    /// SPEC's own route is on `wan`, not the internal `default` network, so
-    /// it must not leak into this zone: `wan` has its own domain, resolved
-    /// by whatever answers for it, not by us.
+    /// SPEC's route is on `wan`, not the internal network, so it must not leak into this zone.
     #[test]
     fn a_proxy_host_on_a_different_network_is_absent() {
         let state = state_with(SPEC, 1);
@@ -381,9 +345,7 @@ services:
         );
     }
 
-    /// `nodes_of` is recomputed every reload pass from whatever config is
-    /// currently live (see `run`), so a node added after this one started is
-    /// picked up without a restart.
+    /// `nodes_of` follows the live config, so a node added later is picked up.
     #[test]
     fn nodes_of_reflects_a_newly_added_node() {
         let cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
@@ -497,8 +459,6 @@ web: { address: cloud, network: default }
         let state = state_with(SPEC, 1);
         let gateways = gateways(&state);
         assert_eq!(gateways.len(), 1);
-        // First host address of the allocated subnet, which is what the
-        // bridge holds and what containers are handed as their resolver.
         assert!(gateways[0].to_string().ends_with(".1"));
     }
 
@@ -507,10 +467,7 @@ web: { address: cloud, network: default }
         assert!(gateways(&ClusterState::default()).is_empty());
     }
 
-    /// The dashboard hostname (`web.address`) isn't a stack route, so
-    /// nothing else in `zone_for` would ever produce a record for it - a
-    /// container asking for it before this existed got NXDOMAIN even though
-    /// the cluster answers for the exact same domain externally.
+    /// The dashboard hostname is not a stack route, so `zone_for` must add it explicitly.
     #[test]
     fn the_dashboard_hostname_resolves_to_the_leader() {
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];

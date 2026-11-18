@@ -37,7 +37,6 @@ use tracing::{debug, info, warn};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
-/// What one node wants for one container network.
 #[derive(Debug, Clone)]
 pub struct Desired {
     pub network: String,
@@ -54,9 +53,7 @@ pub struct Desired {
     /// The client DNS server's port, when it answers this network's router side.
     pub dns_port: Option<u16>,
     pub allowed: Vec<Ipv4Net>,
-    /// Every node's address on the segment.
     pub node_ips: Vec<Ipv4Addr>,
-    /// The segment's own subnet.
     pub segment: Ipv4Net,
 }
 
@@ -107,8 +104,6 @@ pub fn desired(
     let node_ctn = allocations.node_ip(&segment, node)?;
     let router = router_status(state, cfg, allocations, network)?;
 
-    // Stacks on an allowed network that have an instance here get their
-    // traffic towards the routed subnet sent through the router.
     let mut stack_sources: BTreeSet<Ipv4Net> = BTreeSet::new();
     let mut router_bridge = None;
     for (stack, stack_state) in &state.stacks {
@@ -311,7 +306,6 @@ pub fn start(
     })
 }
 
-/// A plan that owns the network's tables but wants nothing in them.
 fn empty_plan(network: &str) -> RoutingPlan {
     let (reply, dst) = cl_net::container_net::container_tables(network);
     RoutingPlan {
@@ -508,7 +502,7 @@ mod tests {
                 .parse::<Ipv4Net>()
                 .unwrap()
                 .contains(&n.addr())));
-        let mut no_proxy = c.clone();
+        let mut no_proxy = c;
         no_proxy
             .networks
             .get_mut("tailnet")

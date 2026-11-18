@@ -10,7 +10,6 @@ use crate::api::Record;
 
 const TAG_PREFIX: &str = "_clouduler";
 
-/// Name of the companion TXT record that tags ownership of `fqdn`.
 pub fn tag_name(fqdn: &str) -> String {
     format!("{TAG_PREFIX}.{fqdn}")
 }
@@ -22,7 +21,6 @@ pub fn tag_content(cluster: &str, key: &str) -> String {
     format!("cluster={cluster};key={key}")
 }
 
-/// A parsed ownership tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tag {
     pub cluster: String,
@@ -64,8 +62,6 @@ pub fn record_key(record: &Record) -> String {
     format!("{:?}:{}", record.kind, record.name)
 }
 
-/// Whether `tag_record` (a `_clouduler.<fqdn>` TXT record) marks `record` as
-/// owned by `cluster`.
 pub fn is_owned_by(record: &Record, tag_record: &Record, cluster: &str) -> bool {
     match parse_tag(&tag_record.content) {
         Some(tag) => tag.cluster == cluster && tag.key == record_key(record),

@@ -1,36 +1,27 @@
 //! Wiring the drive subsystem into the daemon.
 //!
-//! Three separate jobs, and which of them run depends entirely on what this
-//! node's config says it implements:
+//! Which of these jobs run depends on what this node's config says it implements:
 //!
 //! - a bulk transfer listener, so peers can pull manifests and deltas for the
-//!   replicated volumes this node holds, and so a served drive's other
-//!   `served_by` candidates can pull the backup copy `SyncScheduler` pushes
-//!   them;
-//! - a sync scheduler, walking those volumes and pushing changes out on each
-//!   drive's interval;
-//! - for served drives, the drive's root is exported over NFSv4
-//!   (`cl_drive::ensure_export`) on every `served_by` candidate (only the
-//!   active one is actually pointed at by mounting clients), and an NFS
-//!   mount of whichever candidate is currently active runs on every other
-//!   node implementing the drive. A background watcher remounts those mounts
-//!   when the active candidate changes: unlike a FUSE client, a kernel NFS mount bakes its server address in at mount time, so
-//!   failover means unmount-then-remount rather than a live retarget.
+//!   replicated volumes this node holds, and a served drive's other `served_by`
+//!   candidates can pull the backup copy `SyncScheduler` pushes them;
+//! - a sync scheduler, pushing changes out on each drive's interval;
+//! - for served drives, an NFSv4 export of the drive root
+//!   (`cl_drive::ensure_export`) on every `served_by` candidate (only the active
+//!   one is pointed at by clients), and an NFS mount of the active candidate on
+//!   every other node implementing the drive. A watcher remounts when the active
+//!   candidate changes: a kernel NFS mount bakes its server address in, so failover
+//!   is unmount-then-remount.
 //!
-//! A node implementing nothing starts none of it and that is a normal setup,
-//! not a degraded one.
+//! A node implementing nothing starts none of it; that is a normal setup.
 //!
-//! The whole subsystem is supervised: `start` spawns a task that rebuilds it
-//! (tearing down every task, unmounting, and un-exporting, then running the
-//! same build this module always has) whenever this node's drive topology —
-//! which drives it implements, and any served drive's `served_by` list —
-//! actually changes in the live config. A drive's `sync_interval` does not
-//! trigger a rebuild; it is read live by `DriveIntervals` on every sync pass
-//! instead, since that is a far more common edit than adding or removing a
-//! whole drive and does not need anything torn down. Adding a drive, or
-//! changing who serves one, both now take effect without a restart; removing
-//! a drive never deletes the directory it backed, only stops
-//! mounting/exporting/transporting it.
+//! The whole subsystem is supervised: `start` spawns a task that tears everything
+//! down (tasks, mounts, exports) and rebuilds it whenever this node's drive
+//! topology (which drives it implements, any served drive's `served_by`) changes
+//! in the live config. A drive's `sync_interval` does not trigger a rebuild; it
+//! is read live by `DriveIntervals` on every sync pass. Removing a drive never
+//! deletes the directory it backed, only stops mounting/exporting/transporting
+//! it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -97,9 +88,8 @@ fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
     }
 }
 
-/// How often the supervisor checks the live config for a topology change, on
-/// top of reacting to `config_rx` directly. Matches the order of magnitude of
-/// the rest of this daemon's reconcile loops.
+/// How often the supervisor checks the live config for a topology change, besides
+/// reacting to `config_rx`.
 const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long a drive transport or served-drive listener waits before binding
@@ -119,9 +109,8 @@ pub struct Drives {
 }
 
 impl Drives {
-    /// A live handle to the current registry, shared with `migration::start`
-    /// so a drive added after boot is usable as a migration source or target
-    /// without a restart.
+    /// A live handle to the current registry, shared with `migration::start` so a
+    /// drive added after boot is usable as a migration source or target.
     pub fn registry(&self) -> Arc<RwLock<Option<Arc<DriveRegistry>>>> {
         self.registry.clone()
     }
@@ -135,8 +124,6 @@ impl Drives {
     }
 }
 
-/// Everything one build produced, kept only for as long as this build is
-/// current — the next topology change tears it all down and replaces it.
 #[derive(Default)]
 struct Running {
     tasks: Vec<JoinHandle<()>>,
@@ -147,13 +134,10 @@ struct Running {
 }
 
 impl Running {
-    /// Stop every task, unmount every served drive volume this build
-    /// mounted, and remove every NFS export it added. A mount or an export
-    /// both outlive the process that made them: leaving a mount behind means
-    /// the next pass (or the next daemon start) finds a mountpoint whose
-    /// server is gone and every read on it hangs; leaving an export behind
-    /// means a node that stopped being a `served_by` candidate keeps handing
-    /// out a copy nothing is syncing anymore.
+    /// Stop every task, unmount every served drive volume this build mounted, and
+    /// remove its NFS exports. Both outlive the process: a leftover mount hangs
+    /// every read once its server is gone, and a leftover export keeps handing
+    /// out a copy nothing syncs anymore.
     fn teardown(self) {
         for task in self.tasks {
             task.abort();
@@ -171,11 +155,9 @@ impl Running {
     }
 }
 
-/// Never fails synchronously: a node whose drive subsystem cannot start
-/// (missing internal address, bad registry) still votes and serves the ui,
-/// it just runs an empty `Running` until the config that would fix that
-/// arrives, same as any other build failure the supervisor already has to
-/// tolerate on a rebuild.
+/// Never fails synchronously: a node whose drive subsystem cannot start (missing
+/// internal address, bad registry) still votes and serves the ui, running an
+/// empty `Running` until the config that fixes it arrives.
 pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -260,11 +242,10 @@ pub fn start(
 
 /// Keep the registry's staging allowlist equal to the `NodeLocal` backup
 /// destinations that point at this node. The transport only stages a peer's
-/// volume next to a path on this list, so a peer cannot pick an arbitrary
-/// directory to write into. Destinations live in raft state rather than in
-/// `cluster.yaml`, so this polls the state the way the other drive watchers
-/// do. A destination created a moment ago is rejected until the next tick,
-/// which only delays a backup push that its sender retries anyway.
+/// volume next to a listed path, so a peer cannot pick an arbitrary directory to
+/// write into. Destinations live in raft state, so this polls it. A destination
+/// created a moment ago is rejected until the next tick; the sender retries
+/// anyway.
 async fn keep_staging_destinations_current(
     cluster: Arc<ClusterNode>,
     registry: Arc<DriveRegistry>,
@@ -288,9 +269,6 @@ async fn keep_staging_destinations_current(
     }
 }
 
-/// Build every task and mount this node's current drive topology calls for,
-/// same as the daemon has always done at startup — now also reachable from
-/// the supervisor's rebuild path, not just from `start`.
 async fn build(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -342,11 +320,9 @@ async fn build(
             }
         }
 
-        // Every drive this node backs with a real local copy needs the bulk
-        // transfer listener and sync scheduler: a replicated drive's peers
-        // pull deltas from it, and a served drive's other `served_by`
-        // candidates do the same once this node is (or was) the active
-        // server.
+        // Every drive backed by a real local copy needs the bulk transfer
+        // listener and sync scheduler: peers pull deltas from it, and a served
+        // drive's other candidates do too once this node is (or was) active.
         let local_copy: Vec<&String> = node
             .drives
             .keys()
@@ -475,17 +451,14 @@ impl cl_drive::served::failback::ServedHost for DaemonServedHost {
     }
 }
 
-/// Export every served drive this node is a `served_by` candidate for over
-/// NFSv4 (every candidate exports, not just the active one) — the export
-/// always covers the whole drive root; which volume a mounting client
-/// actually sees is decided client side (`start_volume_mounts`), by mounting
-/// a subpath of it.
+/// Export every served drive this node is a `served_by` candidate for over NFSv4
+/// (every candidate exports, not just the active one). The export always covers
+/// the whole drive root; which volume a client sees is decided client side
+/// (`start_volume_mounts`) by mounting a subpath.
 ///
-/// Returns the roots this call exported, so the caller can un-export them on
-/// the next topology rebuild or on shutdown. A no-op (and an empty list) if
-/// this node serves nothing, or if this host can't serve NFS at all
-/// (`cl_drive::exports_available`) — logged as a warning, not fatal: the
-/// node just never becomes an active server for anything.
+/// Returns the roots exported, so the caller can un-export them on rebuild or
+/// shutdown. A no-op (empty list) if this node serves nothing or the host can't
+/// serve NFS (`cl_drive::exports_available`), which only logs a warning.
 fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(PathBuf, String)> {
     let mut exported = Vec::new();
 
@@ -528,18 +501,13 @@ fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(Pat
 }
 
 /// Create the on-disk directory for every volume this node knows about on a
-/// served drive it's a `served_by` candidate for.
+/// served drive it is a `served_by` candidate for.
 ///
-/// Nothing else does this for a served drive. A replicated drive gets it for
-/// free: its container always runs on the same node that holds the data, so
-/// Docker itself creates a missing bind-mount source directory on container
-/// start. A served drive's container usually runs somewhere else entirely,
-/// mounting `server:/<volume>` over NFS — and that mount can only succeed if
-/// `<volume>` already exists under the export root, which nothing but the
-/// serving node itself is in a position to create. Run on every candidate,
-/// not just the active server, so a directory a failover promotes into
-/// service is already there instead of surfacing as a mount error the
-/// moment it takes over.
+/// Nothing else does: a replicated drive's container runs where the data is, so
+/// Docker creates a missing bind source, but a served drive's container usually
+/// runs elsewhere over NFS, and the mount fails unless `<volume>` already exists
+/// under the export root. Run on every candidate so a failover promotion finds
+/// the directory already there.
 async fn ensure_served_volume_directories(
     cluster: Arc<ClusterNode>,
     registry: Arc<DriveRegistry>,
@@ -565,30 +533,24 @@ async fn ensure_served_volume_directories(
     }
 }
 
-/// One served drive's resolved `served_by` candidates, for deciding which
-/// node is the active server and where to reach it, without re-reading
-/// `cfg` on every convergence pass. Each candidate's real local directory
-/// (`root`) travels with its address: an NFSv4 mount source is the server's
-/// *real* filesystem path (see `cl_drive::MountSpec::remote_root`), which a
-/// candidate declares independently and so can differ node to node even for
-/// the same drive.
+/// One served drive's resolved `served_by` candidates, so the active server can
+/// be chosen without re-reading `cfg` each pass. Each candidate's real local
+/// directory (`root`) travels with its address: an NFSv4 mount source is the
+/// server's real filesystem path (see `cl_drive::MountSpec::remote_root`), which
+/// can differ node to node for the same drive.
 struct ServedDriveInfo {
     served_by: Vec<String>,
     candidates: BTreeMap<String, (SocketAddr, PathBuf)>,
 }
 
-/// Sets up dynamic, per-volume NFS mounting for every served drive in the
-/// cluster — not just ones this node declared in `cluster.yaml`, since a
-/// served drive's data is reachable from any node over the internal network.
-/// Resolves every candidate's address once, then hands off to a background
-/// task that mounts and unmounts individual volumes as this node's own
-/// running containers start and stop needing them (`watch_volume_mounts`),
-/// rather than mounting a served drive's whole directory up front the way a
-/// statically declared `Node.drives` entry does.
+/// Sets up per-volume NFS mounting for every served drive in the cluster, not
+/// just ones this node declared: served data is reachable from any node over the
+/// internal network. Resolves every candidate's address once, then hands off to a
+/// task that mounts/unmounts volumes as this node's containers need them
+/// (`watch_volume_mounts`).
 ///
-/// A no-op if this process cannot call `mount(2)` at all (`mount_permission`
-/// — in practice, not root), or if the cluster has no served drives whose
-/// candidates resolve.
+/// A no-op if this process cannot call `mount(2)` (`mount_permission`, in
+/// practice not root) or no served drive's candidates resolve.
 fn start_volume_mounts(
     cfg: &ClusterConfig,
     node: &Node,
@@ -637,18 +599,13 @@ fn start_volume_mounts(
         return Ok(());
     }
 
-    // A raw `mount(2)` call needs root (`CAP_SYS_ADMIN`), and for fstype
-    // "nfs4" the kernel's nfsv4 client module has to be loaded first —
-    // bypassing the `mount.nfs4` helper (see `served::mount`) means bypassing
-    // the autoload it would normally trigger too. Refusing to start the whole
-    // daemon over either would take out a node that is otherwise healthy and
-    // still votes, so this is only a warning. The watcher below starts anyway
-    // and `MountManager::mount_one` re-checks both on every attempt, so a
-    // `modprobe nfsv4` after boot takes effect without restarting the daemon.
-    // Until then the scheduler still places work needing a served drive here,
-    // since placement no longer requires this node to implement one, and
-    // those instances just never become ready (see
-    // `cl_sched::run::volumes_ready`).
+    // A raw `mount(2)` needs root (`CAP_SYS_ADMIN`), and for "nfs4" the kernel's
+    // nfsv4 module must be loaded; bypassing `mount.nfs4` (see `served::mount`)
+    // bypasses its autoload. Failing the daemon over either would take out an
+    // otherwise healthy node, so this only warns. The watcher starts anyway and
+    // `MountManager::mount_one` re-checks on every attempt, so a `modprobe nfsv4`
+    // takes effect without a restart. Until then instances needing a served drive
+    // here never become ready (see `cl_sched::run::volumes_ready`).
     if let Err(e) = cl_drive::mount_permission() {
         warn!(
             error = %e,
@@ -684,15 +641,11 @@ fn start_volume_mounts(
     Ok(())
 }
 
-/// Converges this node's NFS mounts against what its own running containers
-/// actually need, one served-drive volume at a time: mounts a volume the
-/// moment an instance here needs it and this node isn't the active server,
-/// fails it over (unmount, then remount against the new address) if the
-/// active server changes, and unmounts it once nothing here needs it any
-/// more. Driven off `ClusterState.assignments`
-/// (the leader's placement decisions), the same replicated state
-/// `Scheduler::reconcile` reads, so this and the container it mounts for
-/// converge from the same source of truth.
+/// Converges this node's NFS mounts against what its own running containers need,
+/// one served-drive volume at a time: mounts when an instance here needs it and
+/// this node isn't the active server, remounts against the new address on
+/// failover, unmounts when nothing needs it. Driven off
+/// `ClusterState.assignments`, the same state `Scheduler::reconcile` reads.
 async fn watch_volume_mounts(
     cluster: Arc<ClusterNode>,
     node_name: String,
@@ -732,13 +685,9 @@ async fn watch_volume_mounts(
                     &state.unreachable,
                     state.served.get(drive),
                 ) else {
-                    // No reachable server for this drive right now; nothing
-                    // useful to mount against.
                     continue;
                 };
                 if active == node_name.as_str() {
-                    // This node holds the real data; the container reads it
-                    // directly, no NFS mount involved.
                     continue;
                 }
                 let Some((server, remote_root)) = info.candidates.get(active) else {
@@ -791,8 +740,6 @@ async fn watch_volume_mounts(
     }
 }
 
-/// Runs a service's `volume_sync` `before`/`after` actions in the containers
-/// on this node that mount the volume being replicated.
 struct ActionHooks {
     cluster: Arc<ClusterNode>,
     node: String,
@@ -860,12 +807,9 @@ impl SyncHooks for ActionHooks {
 const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Sync intervals: a stack's `x-clouduler.volume_sync.VOL.interval` when one
-/// mounting the volume sets it (never shorter than
-/// `MIN_VOLUME_SYNC_INTERVAL`), else the drive's `sync_interval`. Read fresh
-/// from the live config and the replicated stacks on every call rather than a
-/// snapshot taken once: changing either takes effect on the sync scheduler's
-/// very next pass, without needing the drive subsystem (or the daemon) to
-/// restart.
+/// mounting the volume sets it (never shorter than `MIN_VOLUME_SYNC_INTERVAL`),
+/// else the drive's `sync_interval`. Read live from config and replicated stacks
+/// on every call, so edits apply on the next sync pass without a restart.
 struct DriveIntervals {
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     /// Parsed stacks by name, reparsed only when the stack's revision moves.

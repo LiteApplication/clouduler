@@ -15,8 +15,7 @@ use tracing::{info, warn};
 use crate::error::{ProxyError, Result};
 use crate::route::wildcard_matches;
 
-/// Makes sure a `CryptoProvider` is installed process wide. Safe to call more
-/// than once; only the first call has any effect.
+/// Idempotent: only the first call has any effect.
 pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
@@ -41,7 +40,6 @@ fn chain_for(chain_pem: &str) -> Result<Vec<CertificateDer<'static>>> {
     Ok(certs)
 }
 
-/// Turns a chain + key PEM pair into a rustls `CertifiedKey`.
 pub fn parse_certified_key(chain_pem: &str, key_pem: &str) -> Result<CertifiedKey> {
     let chain = chain_for(chain_pem)?;
     let key = signing_key_for(key_pem)?;
@@ -114,8 +112,6 @@ impl CertStore {
             .map(|(_, e)| e.certified.clone())
     }
 
-    /// Resolve a cert for `name`, generating and caching a self-signed
-    /// fallback when nothing has been issued yet.
     pub async fn resolve(&self, name: &str) -> Result<Arc<CertifiedKey>> {
         if let Some(c) = self.lookup_issued(name) {
             return Ok(c);

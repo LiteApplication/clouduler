@@ -90,17 +90,14 @@ fn overlays_on_network(cfg: &ClusterConfig, state: &ClusterState, network: &str)
 }
 
 /// Overlay subnets of every stack published on `network`, plus every nat
-/// network's own subnet, so a same-node client whose request never actually
-/// left the node still passes `gate_by_network` - see
-/// `RouteOptions::trusted_overlay_subnets`.
+/// network's own subnet, so a same-node client whose request never left the node
+/// still passes `gate_by_network` (see `RouteOptions::trusted_overlay_subnets`).
 ///
-/// A nat network's subnet is trusted for every gated route regardless of
-/// `network`, not just one matching by name: a nat-attached client's traffic
-/// is masqueraded out whatever the host's routing table picks for its
-/// destination, so it can hairpin back into any locally-hosted route, not
-/// only ones on its own network. When that happens the packet resolves to
-/// local delivery before it ever reaches `POSTROUTING`, so the proxy sees
-/// the container's raw nat-subnet address, unmasqueraded.
+/// A nat subnet is trusted for every gated route, not just one matching by name:
+/// a nat-attached client's traffic is masqueraded out whatever route the host
+/// picks, so it can hairpin back into any local route. That packet resolves to
+/// local delivery before `POSTROUTING`, so the proxy sees the container's raw
+/// nat-subnet address.
 fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Vec<IpNet> {
     let mut subnets: Vec<IpNet> = match Allocations::decode(state.overlay.as_deref()) {
         Some(allocations) => {
@@ -191,7 +188,6 @@ fn internal_peer_subnets(cfg: &ClusterConfig, state: &ClusterState) -> Vec<IpNet
     subnets
 }
 
-/// How often routes and certificates are rebuilt from state.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How often the leader looks for a name with no certificate, and for one
@@ -199,7 +195,6 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// often than this, and a newly deployed route waits at most one pass.
 const ISSUANCE_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Handles for everything the proxy runs, so shutdown can stop it.
 pub struct Proxy {
     supervisor: tokio::task::JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -212,8 +207,6 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// Signal the supervisor to tear every task down and wait for it to
-    /// finish.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         let _ = self.supervisor.await;
@@ -254,7 +247,6 @@ fn desired_of(cfg: &ClusterConfig, node: &str) -> Desired {
     }
 }
 
-/// Everything one build of one task group produced.
 struct Group {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -338,7 +330,6 @@ fn take_listener(port: u16, v6: bool) -> std::io::Result<tokio::net::TcpListener
     }
 }
 
-/// Everything [`start`] wires the proxy to, grouped so the call stays readable.
 pub struct StartProxyArgs<'a> {
     pub cfg: &'a ClusterConfig,
     pub node: &'a str,
@@ -500,11 +491,13 @@ fn build_listen(
     shared_routes.set(routes.clone());
     let peers = Arc::new(cl_proxy::PeerPolicies::new());
     let certs = Arc::new(CertStore::new());
-    let auth_gate = Arc::new(cl_proxy::AuthGate::new(
-        config_rx.clone(),
-        key_rx.clone(),
-        cluster.clone(),
-    ));
+    let auth_gate = match cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()) {
+        Ok(gate) => Arc::new(gate),
+        Err(e) => {
+            warn!(error = %e, "cannot build the auth gate http client; proxy not started");
+            return None;
+        }
+    };
     let server = Arc::new(
         cl_proxy::ProxyServer::full(
             routes.clone(),
@@ -618,7 +611,6 @@ fn build_dns(
     })
 }
 
-/// Rebuild the routing table and the certificate store from replicated state.
 async fn reconcile_loop(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     cluster: Arc<ClusterNode>,
@@ -755,17 +747,14 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
         .collect()
 }
 
-/// The dashboard, published like any other route.
+/// The dashboard, published like any other route so it picks up the Let's Encrypt
+/// certificate and Cloudflare record from the machinery that already runs for
+/// every service.
 ///
-/// Putting it in the same table is the whole point: it picks up the Let's
-/// Encrypt certificate and the Cloudflare record from the machinery that
-/// already runs for every service, instead of needing its own.
-///
-/// The backend is this node's own api over loopback. Each node's proxy serves
-/// its own api rather than load balancing across the cluster, for two reasons:
-/// the hop carries session cookies and the overlay is not encrypted, and a
-/// non-leader api already redirects to the leader, so spreading the load would
-/// only add a redirect.
+/// The backend is this node's own api over loopback. Each node's proxy serves its
+/// own api rather than load balancing, because the hop carries session cookies
+/// over an unencrypted overlay, and a non-leader api already redirects to the
+/// leader, so spreading load would only add a redirect.
 ///
 /// `preserve_host` is on because the api builds its OIDC redirect URL from the
 /// request, and `websockets` because `/api/events` and the log streams are
@@ -865,21 +854,18 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
     routes
 }
 
-/// Every hostname the proxy terminates TLS for, and so needs a certificate,
-/// mapped to whether it may fall back to ACME HTTP-01 when no Cloudflare
-/// zone covers it.
+/// Every hostname the proxy terminates TLS for, mapped to whether it may fall
+/// back to ACME HTTP-01 when no Cloudflare zone covers it.
 ///
-/// That fallback is opt-in per hostname: a stack (or static route) author
-/// writes the host with a trailing dot, e.g. `app.example.net.`, the DNS
-/// zone-file convention for "this is already an absolute name" - `qualify`
-/// strips the dot from the fqdn actually used, but the raw, undotted `host`
-/// checked here is what signals the author knows this name has no matching
-/// zone and wants HTTP-01 rather than the usual "no cloudflare zone covers
-/// this hostname" error.
+/// The fallback is opt-in per hostname: the author writes the host with a
+/// trailing dot (`app.example.net.`, the zone-file "absolute name" convention).
+/// `qualify` strips the dot from the fqdn used, but the raw `host` checked here
+/// signals the author knows no zone matches and wants HTTP-01 instead of the "no
+/// cloudflare zone covers this hostname" error.
 ///
-/// Static routes are folded in directly from the store rather than through
-/// `static_backend_routes`, so listing hostnames that need a certificate
-/// never depends on DNS resolving for their backend.
+/// Static routes are folded in directly from the store, not through
+/// `static_backend_routes`, so this never depends on DNS resolving their
+/// backends.
 fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<String, bool> {
     fn insert(hosts: &mut BTreeMap<String, bool>, cfg: &ClusterConfig, host: &str, network: &str) {
         let domain = cfg.networks.get(network).and_then(|n| n.domain.as_deref());
@@ -1160,7 +1146,6 @@ async fn set_dns_status(cluster: &ClusterNode, fqdn: &str, status: ReconcileStat
     }
 }
 
-/// Current unix time in seconds, for stamping a `ReconcileStatus::Error`.
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1202,12 +1187,11 @@ impl ZoneResolver for Zones {
 /// late is a much smaller problem than a route disappearing for a minute.
 const DNS_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Publishes A/AAAA/CNAME records for every hostname the reverse proxy
-/// answers (stack routes, static routes, redirects) plus the web ui, on
-/// every node — the proxy runs on all of them and forwards internally, so
-/// any node's address is a valid way in. Leader only, same reasoning as
-/// certificate issuance: several nodes reconciling at once would race each
-/// other's writes.
+/// Publishes A/AAAA/CNAME records for every hostname the proxy answers (stack
+/// routes, static routes, redirects) plus the web ui, on every node: the proxy
+/// runs everywhere and forwards internally, so any node's address is a way in.
+/// Leader only, since several nodes reconciling at once would race each other's
+/// writes.
 async fn run_dns_reconcile(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
@@ -1243,27 +1227,20 @@ async fn run_dns_reconcile(
     }
 }
 
-/// Every hostname a node's address needs to answer for, mapped to the node
-/// names its DNS record(s) should name.
+/// Every hostname a node's address needs to answer for, mapped to the node names
+/// its DNS record(s) should name.
 ///
-/// Under `DnsPublishMode::AllNodes` (the default, Swarm-style routing mesh)
-/// every route is answered identically regardless of which node a request
-/// lands on, so every node's address is published for every hostname, stack
-/// routes and static backends and redirects alike.
+/// `DnsPublishMode::AllNodes` (default, Swarm-style mesh): every node's address
+/// is published for every hostname, since any node answers any route.
 ///
-/// Under `DnsPublishMode::OwningNode`, DNS itself does the routing: a stack
-/// route's hostname only names the node(s) actually running that service's
-/// containers (from `placement::service_nodes`), so a client's request goes
-/// straight there instead of bouncing through another node's proxy. Static
-/// backends and redirects are not backed by a container at all, so they keep
-/// naming every node regardless of the mode.
+/// `DnsPublishMode::OwningNode`: a stack route's hostname only names the node(s)
+/// running that service's containers (`placement::service_nodes`), so clients go
+/// straight there. Static backends and redirects have no container and keep
+/// naming every node.
 ///
-/// The web ui hostname is deliberately not in here: unlike a proxied route,
-/// it is not just forwarded internally by every node - writes only work on
-/// the leader, see `redirect_non_leader` in `cl_api::server`. Publishing
-/// every node's address for it lets a client's write land on a follower,
-/// which can only 503 and point elsewhere. `desired_records` gives that
-/// hostname the leader's address alone.
+/// The web ui hostname is not here: writes only work on the leader
+/// (`redirect_non_leader` in `cl_api::server`), so a follower could only 503.
+/// `desired_records` gives it the leader's address alone.
 pub fn desired_dns_hosts(
     cfg: &ClusterConfig,
     state: &ClusterState,
@@ -1560,8 +1537,6 @@ async fn reconcile_dns(
     }
 
     for ((zone_id, zone_name), desired) in by_zone {
-        // Mark anything not live yet as pending before the round trip, so the
-        // ui has something to show while cloudflare is being talked to.
         for record in &desired {
             if !state.dns_records.contains_key(&dns_key(
                 &record.fqdn,

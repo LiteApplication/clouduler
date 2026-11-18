@@ -46,8 +46,6 @@ const SOURCE_INTERVAL: Duration = Duration::from_secs(1);
 /// a lookup renews the grant anyway.
 const MIN_GRANT: Duration = Duration::from_secs(300);
 
-/// The longest a lookup waits for the firewall to carry its grant before the
-/// answer goes back regardless.
 const APPLY_WAIT: Duration = Duration::from_secs(2);
 
 /// A stack with an `allowed` list on at least one wan network, and the overlay
@@ -56,12 +54,9 @@ const APPLY_WAIT: Duration = Duration::from_secs(2);
 pub struct WanStack {
     pub stack: String,
     pub subnet: Ipv4Net,
-    /// Wan network name to its list.
     pub networks: BTreeMap<String, Vec<AllowedTarget>>,
 }
 
-/// The wan lists of the restricted stacks, from their declared lists and the
-/// cluster's network kinds.
 pub fn wan_stacks(cfg: &ClusterConfig, stacks: &[RestrictedStack]) -> Vec<WanStack> {
     let wan = cfg.egress_networks();
     stacks
@@ -96,7 +91,6 @@ fn host_matches(host: &AllowedHost, name: &str) -> bool {
     }
 }
 
-/// The grants an IPv4 literal entry gives, which hold from the start.
 pub fn static_grants(entries: &[AllowedTarget]) -> Vec<WanGrant> {
     entries
         .iter()
@@ -137,9 +131,7 @@ type Key = (String, String);
 #[derive(Default)]
 struct Inner {
     stacks: Vec<WanStack>,
-    /// The addresses of each (stack, network)'s containers on the bridge.
     sources: BTreeMap<Key, Vec<Ipv4Addr>>,
-    /// Grants made by lookups, with the instant each lapses.
     dynamic: BTreeMap<Key, BTreeMap<WanGrant, Instant>>,
 }
 
@@ -170,7 +162,6 @@ impl WanFirewall {
         self.requested.send_modify(|v| *v += 1);
     }
 
-    /// Wakes when the rules need rewriting.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.requested.subscribe()
     }
@@ -181,7 +172,6 @@ impl WanFirewall {
         *self.requested.borrow()
     }
 
-    /// The rules for `version` are in place.
     pub fn mark_applied(&self, version: u64) {
         self.applied.send_if_modified(|v| {
             let newer = version > *v;
@@ -210,7 +200,6 @@ impl WanFirewall {
         self.bump();
     }
 
-    /// The (stack, network) pairs that need their containers' addresses.
     pub fn networks(&self) -> BTreeSet<Key> {
         self.inner()
             .stacks
@@ -229,7 +218,6 @@ impl WanFirewall {
         self.bump();
     }
 
-    /// Drop grants that have lapsed.
     pub fn prune(&self, now: Instant) {
         let mut changed = false;
         for grants in self.inner().dynamic.values_mut() {
@@ -323,7 +311,6 @@ impl AnswerObserver for WanFirewall {
     }
 }
 
-/// The docker network a wan network's bridge is.
 fn docker_network(cfg: &ClusterConfig, network: &str) -> String {
     match cfg.networks.get(network).map(|n| n.kind) {
         Some(NetworkKind::Nat) => nat_docker_name(network),
@@ -356,7 +343,6 @@ impl Signature {
     }
 }
 
-/// Keep `wan` in step with the stacks' lists and the containers on the bridges.
 pub fn start(
     wan: Arc<WanFirewall>,
     cluster: Arc<ClusterNode>,
@@ -398,7 +384,6 @@ pub fn start(
     })
 }
 
-/// The addresses on the bridge of every (stack, network) in `wanted`.
 async fn read_sources(
     docker: &Docker,
     cfg: &ClusterConfig,

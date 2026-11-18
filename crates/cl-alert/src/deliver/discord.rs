@@ -120,7 +120,6 @@ fn notify_level(opts: &DiscordOptions, body: &Body) -> DiscordNotify {
     }
 }
 
-/// One request to the webhook.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub payload: Value,
@@ -156,7 +155,9 @@ impl Envelope {
     }
 
     fn finish(&self, opts: &DiscordOptions, ui_url: Option<&str>, mut payload: Value) -> Message {
-        let o = payload.as_object_mut().expect("payload is an object");
+        let Some(o) = payload.as_object_mut() else {
+            return Message { payload };
+        };
         o.insert(
             "allowed_mentions".into(),
             match &self.mention {
@@ -403,7 +404,6 @@ fn digest_messages(
 
     match opts.style {
         DiscordStyle::Short => {
-            // Lines of plain text, split on the 2000 character limit.
             let mut chunks: Vec<String> = Vec::new();
             let mut cur = format!("{} **{heading}**", emoji_info());
             for a in alerts {
@@ -433,7 +433,6 @@ fn digest_messages(
         }
         DiscordStyle::Embed => {
             let footer = truncate(&format!("{} \u{b7} digest", n.cluster), FOOTER_MAX);
-            // One embed per run of lines that fits a description.
             let mut descriptions: Vec<String> = Vec::new();
             let mut cur = String::new();
             for a in alerts {
@@ -499,7 +498,6 @@ fn emoji_info() -> &'static str {
     "\u{1F4CB}"
 }
 
-/// All requests needed to deliver `n`, in order. Pure.
 pub fn messages(opts: &DiscordOptions, n: &Notification) -> Vec<Message> {
     match &n.body {
         Body::Test => test_messages(opts, n),
@@ -581,7 +579,6 @@ pub async fn send(
                     retry_after: wait,
                 });
             }
-            // 404: fall through to post below
         }
 
         let mut req = http.post(url).timeout(TIMEOUT).header(
@@ -644,6 +641,14 @@ mod tests {
         let mut ms = messages(opts, &notification(body));
         assert_eq!(ms.len(), 1);
         ms.remove(0).payload
+    }
+
+    #[test]
+    fn finish_leaves_a_non_object_payload_untouched() {
+        let o = DiscordOptions::default();
+        let env = Envelope { mention: None, flags: 0 };
+        let m = env.finish(&o, None, json!([1, 2]));
+        assert_eq!(m.payload, json!([1, 2]));
     }
 
     fn opts(style: DiscordStyle) -> DiscordOptions {

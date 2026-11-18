@@ -1,5 +1,3 @@
-//! Shared fixtures for the renderer tests.
-
 use crate::message::AlertMessage;
 pub use crate::message::{Body, Link, Notification, Phase};
 pub use crate::settings::Severity;

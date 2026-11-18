@@ -28,7 +28,6 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BIND_RETRY: Duration = Duration::from_secs(10);
 
 pub struct Relay {
-    /// What every host-side connection to a container goes through.
     pub dialer: Dialer,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -41,7 +40,6 @@ impl Relay {
     }
 }
 
-/// Where this node's relay listens: its internal address at the relay port.
 fn relay_addr(cfg: &ClusterConfig, node_name: &str) -> Option<SocketAddr> {
     let node = cfg.node(node_name)?;
     Some(SocketAddr::new(
@@ -50,7 +48,6 @@ fn relay_addr(cfg: &ClusterConfig, node_name: &str) -> Option<SocketAddr> {
     ))
 }
 
-/// Stops the task it holds when dropped.
 struct StopOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for StopOnDrop {
@@ -103,8 +100,6 @@ pub fn start(
     Relay { dialer, tasks }
 }
 
-/// Serve the relay on `addr` for as long as the process lives, binding again
-/// whenever the listener stops.
 async fn listen(addr: SocketAddr, keys: KeyWatch) {
     // Only container addresses are ever dialed for a peer: the relay is a
     // way to the containers this node runs, not into the host or onward.

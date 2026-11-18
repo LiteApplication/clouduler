@@ -1,5 +1,3 @@
-//! Errors the Cloudflare client and reconciler can raise.
-
 pub type Result<T> = std::result::Result<T, DnsError>;
 
 /// Cloudflare's own error code for "this record already exists". Not fatal:
@@ -18,16 +16,12 @@ pub enum DnsError {
         source: reqwest::Error,
     },
 
-    /// One error entry from a Cloudflare API response. Cloudflare returns an
-    /// array of these; we surface the first as the primary error.
     #[error("cloudflare api error {code}: {message}")]
     Api { code: u32, message: String },
 
     #[error("cloudflare auth failed: {0}")]
     Auth(String),
 
-    /// Desired state couldn't be computed from the config, e.g. a node with
-    /// no address on the requested network. Not a Cloudflare error.
     #[error("{0}")]
     Invalid(String),
 
@@ -74,8 +68,6 @@ pub enum DnsError {
 }
 
 impl DnsError {
-    /// The fqdns this error is actually about, so a caller can mark just
-    /// those hosts as errored instead of every hostname in a batch.
     pub fn affected_fqdns(&self) -> Vec<&str> {
         match self {
             DnsError::RecordApply { name, .. } => vec![name.as_str()],
@@ -86,8 +78,6 @@ impl DnsError {
 }
 
 impl DnsError {
-    /// True for the "already exists" family of Cloudflare error codes, which
-    /// the reconciler should swallow rather than fail on.
     pub fn is_benign_duplicate(&self) -> bool {
         match self {
             DnsError::Api { code, .. } => {

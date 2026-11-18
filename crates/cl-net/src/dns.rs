@@ -28,10 +28,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{NetError, Result};
 
-/// TTL used on every record we serve. Short enough that a service move (which
-/// hot-swaps the zone rather than waiting for a TTL) is what actually matters
-/// for freshness; this just bounds how long a resolver caches a stale answer
-/// if it doesn't respect the swap.
+/// TTL on every record. Short so a resolver never caches a stale answer long if it ignores the zone hot-swap.
 pub const RECORD_TTL: u32 = 5;
 
 /// Zone served when the internal network declares no domain. Nothing outside
@@ -39,9 +36,7 @@ pub const RECORD_TTL: u32 = 5;
 /// containers agree on.
 pub const DEFAULT_ZONE: &str = "cluster.local";
 
-/// The domain the internal zone is served under. The internal network's own
-/// domain when it has one, so `web.blog.int.example.com` is the same name
-/// inside a container and outside it.
+/// The internal zone domain: the internal network's own domain when it has one, so `web.blog.int.example.com` is the same name inside and outside a container.
 pub fn zone_origin(cfg: &cl_config::ClusterConfig) -> String {
     cfg.internal_network()
         .1
@@ -50,13 +45,10 @@ pub fn zone_origin(cfg: &cl_config::ClusterConfig) -> String {
         .unwrap_or_else(|| DEFAULT_ZONE.to_string())
 }
 
-/// One resolvable name inside the internal zone and the addresses it answers
-/// with. Deliberately independent of any DNS wire format: this is what the
-/// rest of clouduler reasons about, and what the tests below check directly.
+/// One resolvable name in the internal zone, independent of any DNS wire format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneRecord {
-    /// Label relative to the zone origin, e.g. `web.gitlab`, `tasks.web.gitlab`
-    /// or a bare node name.
+/// Label relative to the zone origin, e.g. `web.gitlab`, `tasks.web.gitlab` or a bare node name.
     pub name: String,
     /// Every address this name should answer with. More than one means the
     /// resolver round robins, same as Swarm's `tasks.<service>` names.
@@ -66,12 +58,9 @@ pub struct ZoneRecord {
 /// Build the internal zone from the current placement.
 ///
 /// `<service>.<stack>` and `tasks.<service>.<stack>` both resolve to every
-/// running instance of that service: an ordinary DNS client doing round
-/// robin over multiple A records gets a live replica either way, and
-/// `tasks.` is kept because that's the name people already know from Swarm.
-/// Node names resolve to each node's address on the internal network, so a
-/// container can reach a node directly (e.g. to talk to a drive's rsync
-/// endpoint) without knowing the topology.
+/// running instance (`tasks.` is the familiar Swarm name). Node names resolve
+/// to the node's internal address so a container can reach a node directly
+/// (e.g. a drive's rsync endpoint).
 pub fn build_records<'a>(
     instances: impl IntoIterator<Item = (&'a InstanceId, Ipv4Addr)>,
     nodes: impl IntoIterator<Item = (&'a str, Ipv4Addr)>,
@@ -109,9 +98,7 @@ pub fn build_records<'a>(
     records
 }
 
-/// Look up a name in a record set the way the resolver would: exact label
-/// match against the zone-relative name. Used directly by tests so the
-/// answering logic is checked without going through DNS wire encoding.
+/// Look up a name the way the resolver would, without DNS wire encoding (for tests).
 pub fn answer<'a>(records: &'a [ZoneRecord], name: &str) -> Option<&'a [Ipv4Addr]> {
     records
         .iter()
@@ -119,9 +106,7 @@ pub fn answer<'a>(records: &'a [ZoneRecord], name: &str) -> Option<&'a [Ipv4Addr
         .map(|r| r.addresses.as_slice())
 }
 
-/// Turn the pure record list into a hickory `InMemoryZoneHandler` rooted at
-/// `origin`, ready to serve. `origin` must be a fully qualified name (e.g.
-/// `int.example.com.`).
+/// Build a hickory `InMemoryZoneHandler` rooted at `origin` (fully qualified, e.g. `int.example.com.`).
 fn build_authority(origin: &Name, records: &[ZoneRecord]) -> Result<InMemoryZoneHandler> {
     let mut handler =
         InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
@@ -146,10 +131,8 @@ fn build_authority(origin: &Name, records: &[ZoneRecord]) -> Result<InMemoryZone
     Ok(handler)
 }
 
-/// A zone handler whose backing data can be replaced while the server is
-/// running. `ZoneHandler` methods borrow the current snapshot for the
-/// duration of the call, so an in-flight query always sees a consistent
-/// zone, either the old one or the new one, never a mix.
+/// A zone handler whose data can be replaced while serving. An in-flight query
+/// sees either the old zone or the new one, never a mix.
 struct SwappableZone {
     origin: LowerName,
     current: RwLock<Arc<InMemoryZoneHandler>>,
@@ -212,10 +195,9 @@ impl ZoneHandler for SwappableZone {
     }
 }
 
-/// Answers for names that live outside the internal zone, ahead of the
-/// upstream forwarder, and steps aside (`Skip`) for everything else so the
-/// forwarder still resolves it. Used to point a hostname the cluster itself
-/// serves at this node's own proxy, see `InternalDns::reload_overrides`.
+/// Answers for names outside the internal zone, ahead of the upstream
+/// forwarder, and `Skip`s everything else. Points a hostname the cluster
+/// serves at this node's own proxy (`InternalDns::reload_overrides`).
 struct OverrideZone {
     origin: LowerName,
     current: RwLock<Arc<Overrides>>,
@@ -224,8 +206,7 @@ struct OverrideZone {
 struct Overrides {
     handler: InMemoryZoneHandler,
     names: BTreeSet<LowerName>,
-    /// Clients that get no override at all and have their query go upstream
-    /// like any other outside name.
+/// Clients that get no override and go upstream like any outside name.
     skip_clients: BTreeSet<IpAddr>,
 }
 
@@ -238,8 +219,7 @@ impl OverrideZone {
     }
 }
 
-/// Like `build_authority`, rooted at `.` and with every record name taken as
-/// absolute.
+/// Like `build_authority`, rooted at `.` with absolute record names.
 fn build_overrides(records: &[ZoneRecord]) -> Result<Overrides> {
     let root = Name::root();
     let handler = build_authority(&root, records)?;
@@ -320,14 +300,12 @@ impl ZoneHandler for OverrideZone {
 /// the grant in place by the time the container learns the address.
 #[async_trait::async_trait]
 pub trait AnswerObserver: Send + Sync {
-    /// `name` is the queried name, lowercase with no trailing dot. `answers`
-    /// are the IPv4 addresses of the answer, with their TTL in seconds.
+/// `name` is lowercase without trailing dot; `answers` are IPv4 addresses with TTL seconds.
     async fn observe(&self, client: IpAddr, name: &str, answers: &[(Ipv4Addr, u32)]);
 }
 
 type ObserverSlot = Arc<StdRwLock<Option<Arc<dyn AnswerObserver>>>>;
 
-/// The upstream forwarder with the [`AnswerObserver`] hooked onto its answers.
 struct ObservedForwarder {
     inner: ForwardZoneHandler<TokioRuntimeProvider>,
     observer: ObserverSlot,
@@ -467,7 +445,6 @@ pub(crate) fn build_split_dns_forwarder(
     forwarder_to(name_servers, Some(options))
 }
 
-/// A forwarder with exactly these upstream servers.
 pub(crate) fn forwarder_to(
     name_servers: Vec<hickory_server::resolver::config::NameServerConfig>,
     options: Option<hickory_server::resolver::config::ResolverOpts>,
@@ -484,8 +461,7 @@ pub(crate) fn forwarder_to(
     .map_err(NetError::Dns)
 }
 
-/// The internal DNS resolver: serves the clouduler zone on the bridge
-/// address and forwards everything else to the host's configured resolvers.
+/// The internal resolver: serves the zone on the bridge address, forwards the rest.
 pub struct InternalDns {
     origin: Name,
     zone: Arc<SwappableZone>,
@@ -494,9 +470,7 @@ pub struct InternalDns {
 }
 
 impl InternalDns {
-    /// Build the resolver. `origin` is the internal zone's domain (e.g. the
-    /// cluster's declared internal network domain, or a synthetic default
-    /// such as `cluster.local.` when none is configured).
+/// `origin` is the internal zone domain (or a default such as `cluster.local.`).
     pub fn new(origin: Name, records: &[ZoneRecord]) -> Result<Self> {
         let handler = build_authority(&origin, records)?;
         Ok(Self {
@@ -507,15 +481,12 @@ impl InternalDns {
         })
     }
 
-    /// Have `observer` told of every upstream answer from now on. Applies to
-    /// servers already running too.
+/// Have `observer` told of every upstream answer from now on, running servers included.
     pub fn set_observer(&self, observer: Arc<dyn AnswerObserver>) {
         *self.observer.write() = Some(observer);
     }
 
-    /// Replace the zone content in place. Called whenever placement changes,
-    /// so a moved or scaled service is reflected without restarting the
-    /// server or dropping in-flight queries.
+/// Replace the zone content in place when placement changes, without dropping queries.
     pub async fn reload(&self, records: &[ZoneRecord]) -> Result<()> {
         let handler = build_authority(&self.origin, records)?;
         self.zone.swap(handler).await;
@@ -539,9 +510,7 @@ impl InternalDns {
         Ok(())
     }
 
-    /// Serve on `bind_addr` until the process exits or the server errors out.
-    /// Queries outside the internal zone are forwarded using the host's
-    /// system resolver configuration (`/etc/resolv.conf`).
+/// Serve on `bind_addr`; names outside the zone go to the host resolvers (`/etc/resolv.conf`).
     pub async fn serve(&self, bind_addr: SocketAddr) -> Result<()> {
         let forwarder: Arc<dyn ZoneHandler> = Arc::new(ObservedForwarder {
             inner: build_forwarder()?,
@@ -782,8 +751,6 @@ mod tests {
 
         let ip2: Ipv4Addr = "10.244.0.9".parse().unwrap();
         dns.reload(&build_records([(&a, ip2)], [])).await.unwrap();
-        // No direct getter on the live zone by design (queries go through
-        // the DNS wire protocol); reaching here without error is the swap
-        // succeeding, exercised end to end via `answer` above.
+// No getter on the live zone by design; no error here means the swap worked (see `answer` above).
     }
 }

@@ -16,10 +16,9 @@ fn challenge_name(domain: &str) -> String {
     format!("_acme-challenge.{domain}")
 }
 
-/// Creates the `_acme-challenge.<domain>` TXT record with the given key
-/// authorization digest. Cloudflare allows multiple TXT records at the same
-/// name, so this doesn't need to check for an existing one first; callers
-/// doing renewal should `clear_challenge` the old one when done.
+/// Creates the `_acme-challenge.<domain>` TXT record. Cloudflare allows several
+/// TXT records at one name, so no existing-record check is needed; renewals
+/// should `clear_challenge` the old one when done.
 pub async fn set_challenge(
     cf: &Cloudflare,
     zone_id: &str,
@@ -37,7 +36,6 @@ pub async fn set_challenge(
     cf.create_record(zone_id, &input).await
 }
 
-/// Removes a challenge record once issuance has completed.
 pub async fn clear_challenge(cf: &Cloudflare, zone_id: &str, record: &Record) -> Result<()> {
     let id = record
         .id
@@ -46,17 +44,14 @@ pub async fn clear_challenge(cf: &Cloudflare, zone_id: &str, record: &Record) ->
     cf.delete_record(zone_id, id).await
 }
 
-/// Confirms `_acme-challenge.<domain>` is actually resolvable with
-/// `expected_value` before letting the caller tell the CA to validate it.
+/// Confirms `_acme-challenge.<domain>` resolves to `expected_value` before the
+/// CA is told to validate it.
 ///
-/// Checking Cloudflare's API (as this used to do exclusively) only proves the
-/// record exists in their control plane; the CA queries DNS, and control
-/// plane writes lag visibility on Cloudflare's authoritative edge network by
-/// anywhere from nothing to tens of seconds. Asking Cloudflare first is still
-/// worthwhile — it fails fast when the record was never created at all — but
-/// only a real DNS answer from the zone's own authoritative nameservers, not
-/// a recursive resolver that might be holding an earlier negative answer in
-/// cache, tells us what the CA is actually going to see.
+/// The Cloudflare API only proves the record exists in their control plane,
+/// which can lag the authoritative edge by tens of seconds. Asking it first
+/// still fails fast when the record was never created, but only an answer from
+/// the zone's own authoritative nameservers (not a recursive resolver holding a
+/// cached negative) tells what the CA will see.
 pub async fn await_propagation(
     cf: &Cloudflare,
     zone_id: &str,
@@ -85,8 +80,6 @@ pub async fn await_propagation(
     await_authoritative(&zone, &name_servers, &name, expected_value, deadline).await
 }
 
-/// Polls the zone's own authoritative nameservers directly for `name` until
-/// a TXT record matching `expected_value` shows up, or `deadline` passes.
 async fn await_authoritative(
     zone: &str,
     name_servers: &[String],
@@ -140,7 +133,6 @@ const PUBLIC_RESOLVERS: [IpAddr; 3] = [
 trait NameserverSource {
     /// NS hostnames for `zone` according to DNS; empty when none are returned.
     async fn ns_hostnames(&self, zone: &str) -> Result<Vec<String>>;
-    /// Addresses of one nameserver hostname.
     async fn addresses(&self, host: &str) -> Vec<IpAddr>;
 }
 

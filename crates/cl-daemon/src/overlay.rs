@@ -143,20 +143,12 @@ fn container_node_names(cfg: &ClusterConfig) -> BTreeMap<String, BTreeSet<String
         .collect()
 }
 
-/// Whether a stack network can only ever have its containers scheduled on one
-/// node cluster-wide, so its overlay never has to carry traffic between
-/// nodes.
-///
-/// This is only ever true for a public network's fallback overlay (see
-/// `overlay_network_name`): a public network's per-node address is optional
-/// (`Node::network` may simply omit an entry for it), so a node not carrying
-/// one is never a placement candidate for it (`NodeState::implements_network`
-/// via `node.networks`, sourced from that same map in `daemon::to_state`).
-/// When at most one node in the whole cluster declares the network at all,
-/// the scheduler can never place a second replica anywhere else, so there is
-/// nothing for a cross-node VXLAN tunnel to ever carry - building one just
-/// forces every implementing node to also have a working address on the
-/// cluster's `internal` network for no reason a single-node network needs.
+/// Whether a stack network can only ever have containers on one node, so it needs
+/// no cross-node VXLAN. True only for a public network's fallback overlay (see
+/// `overlay_network_name`): a node without a per-node address for it is never a
+/// placement candidate (`NodeState::implements_network`), so when at most one node
+/// declares it nothing else can carry traffic, and a tunnel would force every
+/// implementing node to need an internal-network address for no reason.
 fn is_single_node_network(cfg: &ClusterConfig, network: &str) -> bool {
     let Some(net) = cfg.networks.get(network) else {
         return false;
@@ -333,13 +325,9 @@ impl Context_ {
         Ok(())
     }
 
-    /// Tear down any network this daemon still has that no longer belongs to
-    /// a live stack, on both docker's side and ours (bridge + VXLAN device).
-    ///
-    /// Left behind, an orphan keeps its subnet in docker's own IPAM forever;
-    /// nothing else in the cluster remembers it, so the allocator can and
-    /// eventually will hand that same subnet to a new stack network, which
-    /// then fails to come up with a docker pool-overlap error.
+    /// Tear down networks no live stack owns (docker network, bridge, VXLAN device).
+    /// A leftover keeps its subnet in docker's IPAM forever; the allocator would
+    /// eventually reuse it and fail with a pool-overlap error.
     async fn sweep_orphans(
         &self,
         netlink: Option<&Overlay>,
@@ -373,13 +361,9 @@ impl Context_ {
         Ok(())
     }
 
-    /// Give every known stack network a subnet and every instance on it an
-    /// address, and publish the result.
-    ///
-    /// Addresses are decided here rather than left to docker because the rest
-    /// of the cluster reads them out of this book: internal DNS answers,
-    /// proxy backends and published ports all need to name a container that
-    /// runs on some other node.
+    /// Allocate subnets and addresses and publish them. Done here, not left to docker,
+    /// because internal DNS, proxy backends and published ports must name containers
+    /// on other nodes.
     async fn allocate_missing(
         &self,
         allocations: &mut Allocations,
@@ -499,11 +483,8 @@ impl Context_ {
         Ok(())
     }
 
-    /// Bring one network up on this node: bridge, (if `needs_vxlan`) vxlan and
-    /// fdb, then the docker network. A single-node network (see
-    /// `is_single_node_network`) skips the vxlan device and FDB entirely, and
-    /// needs no address on the internal network to build its bridge, since a
-    /// container on it will never have to be reached from another node.
+    /// Bring one network up: bridge, (if `needs_vxlan`) vxlan + fdb, then the docker
+    /// network. A single-node network skips vxlan/FDB and needs no internal address.
     async fn ensure_network(
         &self,
         netlink: Option<&Overlay>,

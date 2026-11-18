@@ -6,18 +6,14 @@ use futures::StreamExt;
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
 
-/// One local image as `GET /images/json` reports it, reduced to what image
-/// cleanup decides on.
+/// One local image as `GET /images/json` reports it, reduced to what cleanup needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalImage {
-    /// The local image ID (`sha256:...`). This is what a container's
-    /// `image_digest` holds, and is neither a tag nor a registry digest.
+    /// The local image ID (`sha256:...`), which is what a container's
+    /// `image_digest` holds; neither a tag nor a registry digest.
     pub id: String,
-    /// `repo:tag` names pointing at this image.
     pub repo_tags: Vec<String>,
-    /// `repo@sha256:...` registry digests of this image.
     pub repo_digests: Vec<String>,
-    /// Unix seconds the image was built.
     pub created: i64,
     pub size: u64,
 }
@@ -32,8 +28,8 @@ pub struct ImageRef {
 }
 
 impl ImageRef {
-    /// Parse a docker image reference like `nginx`, `nginx:1.25`, or
-    /// `nginx@sha256:abcd...`. Does not validate the repository name itself.
+    /// Parse a docker image reference like `nginx`, `nginx:1.25` or
+    /// `nginx@sha256:abcd...`. Does not validate the repository name.
     pub fn parse(image: &str) -> Self {
         if let Some((repo, digest)) = image.split_once('@') {
             return ImageRef {
@@ -58,19 +54,16 @@ impl ImageRef {
         }
     }
 
-    /// True when this reference floats: no tag, or an explicit `:latest`.
     pub fn is_latest(&self) -> bool {
         self.digest.is_none() && matches!(self.tag.as_deref(), None | Some("latest"))
     }
 
-    /// The registry host this reference resolves to, in the form docker's own
-    /// credential store keys on: `docker.io` for anything unqualified.
+    /// The registry host this reference resolves to, as docker's credential store
+    /// keys it: `docker.io` for anything unqualified.
     ///
-    /// The first path segment is a registry only if it looks like a host —
-    /// it contains a dot or a colon, or it is exactly `localhost`. Without
-    /// that test `myteam/app` would be read as the registry `myteam`, and
-    /// every unqualified Docker Hub image would go looking for credentials
-    /// under a host that does not exist.
+    /// The first path segment is a registry only if it has a dot or colon or is
+    /// `localhost`; otherwise `myteam/app` would be read as registry `myteam` and
+    /// Docker Hub images would look for credentials under a nonexistent host.
     pub fn registry(&self) -> String {
         match self.repository.split_once('/') {
             Some((head, _)) if head.contains('.') || head.contains(':') || head == "localhost" => {
@@ -81,26 +74,23 @@ impl ImageRef {
     }
 }
 
-/// How Docker Hub is spelled in a credential store, as opposed to
-/// `registry-1.docker.io` where its api actually lives.
+/// How Docker Hub is spelled in a credential store (its api lives at
+/// `registry-1.docker.io`).
 pub const DOCKER_HUB: &str = "docker.io";
 
-/// Attempts a rate-limited registry lookup gets, including the first.
 const RATE_LIMIT_RETRIES: u32 = 4;
 
-/// First backoff after a 429, doubling each time. Deliberately short: the
-/// `retry-after` these registries return is well under a millisecond, so this
-/// is already generous, and the whole point is to stay inside the reverse
-/// proxy's response timeout rather than to be polite over minutes.
+/// First backoff after a 429, doubling each time. Deliberately short: registries'
+/// `retry-after` is well under a millisecond, and the goal is to stay inside the
+/// reverse proxy's response timeout.
 const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// A registry login. Mirrors the subset of bollard's `DockerCredentials` that
-/// clouduler stores, so nothing outside this crate has to depend on bollard.
+/// A registry login: the subset of bollard's `DockerCredentials` we store, so
+/// nothing outside this crate depends on bollard.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RegistryCredentials {
     pub username: String,
     pub password: String,
-    /// Registry host, as `ImageRef::registry` spells it.
     pub server: String,
 }
 
@@ -135,14 +125,11 @@ fn extract_digest(info: &bollard::models::ImageInspect) -> Option<String> {
 
 /// The digest `repository` published this image under.
 ///
-/// One local image can carry several repo digests — the same bits pulled from
-/// two registries, or retagged — and `extract_digest` takes whichever comes
-/// first. That is fine when the caller only wants *a* digest, and wrong when
-/// it is about to compare against what one particular repository currently
-/// serves: the answer would be a digest from some other repository, which
-/// never matches, and the image reads as perpetually out of date. Falls back
-/// to the first digest when nothing matches, since an image with exactly one
-/// repo digest is the overwhelmingly common case.
+/// One local image can carry several repo digests (pulled from two registries,
+/// or retagged). Taking whichever comes first is wrong when comparing against
+/// one repository's current digest: it would never match and the image would
+/// read as perpetually out of date. Falls back to the first digest when nothing
+/// matches (the common single-digest case).
 fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str) -> Option<String> {
     let digests = info.repo_digests.as_ref()?;
     digests
@@ -156,10 +143,8 @@ fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str)
         .map(|(_, digest)| digest.to_string())
 }
 
-/// Docker's `/images/create` endpoint pulls every tag in the repository when
-/// `fromImage` carries neither a tag nor a digest, rather than defaulting to
-/// `latest` the way the `docker` CLI does client-side before ever calling the
-/// API.
+/// `/images/create` pulls every tag when `fromImage` has neither tag nor digest,
+/// instead of defaulting to `latest` like the `docker` CLI does client-side.
 fn pull_reference(image: &str) -> String {
     let parsed = ImageRef::parse(image);
     if parsed.tag.is_none() && parsed.digest.is_none() {
@@ -170,20 +155,17 @@ fn pull_reference(image: &str) -> String {
 }
 
 impl Docker {
-    /// `GET /images/{name}/json` as docker returned it, for a caller that
-    /// relays the answer rather than reading fields out of it.
+    /// `GET /images/{name}/json` as docker returned it, for relaying.
     pub async fn inspect_image_json(&self, image: &str) -> Result<serde_json::Value> {
         let info = self.inner.inspect_image(image).await.map_err(classify)?;
         serde_json::to_value(info).map_err(|e| DockerError::Other(e.to_string()))
     }
 
-    /// `GET /images/{name}/history` as docker returned it.
     pub async fn image_history_json(&self, image: &str) -> Result<serde_json::Value> {
         let history = self.inner.image_history(image).await.map_err(classify)?;
         serde_json::to_value(history).map_err(|e| DockerError::Other(e.to_string()))
     }
 
-    /// `GET /images/json`: every local image.
     pub async fn list_images_json(&self) -> Result<serde_json::Value> {
         let images = self
             .inner
@@ -193,7 +175,6 @@ impl Docker {
         serde_json::to_value(images).map_err(|e| DockerError::Other(e.to_string()))
     }
 
-    /// Every local image (not intermediate layers), as `LocalImage`.
     pub async fn list_local_images(&self) -> Result<Vec<LocalImage>> {
         let images = self
             .inner
@@ -212,8 +193,7 @@ impl Docker {
             .collect())
     }
 
-    /// The image ID of every container on the node, running or stopped,
-    /// whether clouduler created it or not.
+    /// The image ID of every container on the node, whoever created it.
     pub async fn all_container_image_ids(&self) -> Result<Vec<String>> {
         let options = bollard::query_parameters::ListContainersOptionsBuilder::new()
             .all(true)
@@ -226,9 +206,8 @@ impl Docker {
         Ok(summaries.into_iter().filter_map(|c| c.image_id).collect())
     }
 
-    /// `DELETE /images/{name}` without force, so docker itself refuses an
-    /// image a container still uses. `name` is an image ID, or a `repo:tag`
-    /// to untag just that name.
+    /// `DELETE /images/{name}` without force, so docker refuses an image a
+    /// container uses. `name` is an image ID, or a `repo:tag` to untag that name.
     pub async fn remove_image(&self, name: &str) -> Result<()> {
         let options = bollard::query_parameters::RemoveImageOptionsBuilder::new()
             .force(false)
@@ -241,8 +220,7 @@ impl Docker {
         Ok(())
     }
 
-    /// `GET /images/{name}/get`: the image as a `docker save` tar. Streamed,
-    /// since an image is routinely larger than anything worth holding in memory.
+    /// `GET /images/{name}/get`: a `docker save` tar, streamed because images are large.
     pub fn save_image(
         &self,
         image: &str,
@@ -252,18 +230,16 @@ impl Docker {
             .map(|chunk| chunk.map_err(classify))
     }
 
-    /// Pull `image`, streaming progress to completion, then return the digest
-    /// docker resolved it to locally.
+    /// Pull `image` to completion and return the digest docker resolved it to.
     pub async fn pull(&self, image: &str) -> Result<String> {
         self.pull_as(image, None).await
     }
 
-    /// `pull`, authenticating to the registry as `credentials`.
+    /// `pull`, authenticating as `credentials`.
     ///
-    /// Separate from `pull` rather than replacing it because most pulls are
-    /// anonymous, and passing credentials for a registry the image does not
-    /// come from is worse than passing none: docker forwards them to whatever
-    /// host the reference names.
+    /// Separate because most pulls are anonymous, and docker forwards credentials
+    /// to whatever host the reference names, so sending them for another
+    /// registry is worse than none.
     pub async fn pull_as(
         &self,
         image: &str,
@@ -283,9 +259,8 @@ impl Docker {
         })
     }
 
-    /// Whether `image` is present locally, digest or not. Unlike
-    /// `resolve_digest`, an image with no repo digest (built or loaded locally,
-    /// or pulled through a store that records none) still counts as present.
+    /// Whether `image` is present locally. Unlike `resolve_digest`, an image with
+    /// no repo digest (built or loaded locally) still counts.
     pub async fn image_exists(&self, image: &str) -> Result<bool> {
         match self.inner.inspect_image(image).await {
             Ok(_) => Ok(true),
@@ -296,9 +271,8 @@ impl Docker {
         }
     }
 
-    /// Inspect a local image and return its content digest, if any. `Ok(None)`
-    /// covers both "image not present locally" and "image has no repo digest"
-    /// (e.g. it was built locally rather than pulled).
+    /// Inspect a local image and return its content digest. `Ok(None)` covers
+    /// both "not present" and "no repo digest" (e.g. built locally).
     pub async fn resolve_digest(&self, image: &str) -> Result<Option<String>> {
         match self.inner.inspect_image(image).await {
             Ok(info) => Ok(extract_digest(&info)),
@@ -309,14 +283,12 @@ impl Docker {
         }
     }
 
-    /// The digest a local image carries for `repository`, looked up by image
-    /// id rather than by tag.
+    /// The digest a local image carries for `repository`, looked up by image id.
     ///
-    /// The Updates view needs the digest of the bits a container is *actually*
-    /// running, which is not the same question as what the tag resolves to
-    /// now: the tag has usually moved on, which is the whole point of asking.
-    /// A container's `image_digest` is a local image id, so this is the only
-    /// way back to a registry content digest for it.
+    /// The Updates view needs the digest of the bits a container actually runs,
+    /// not what the (usually moved) tag resolves to now. A container's
+    /// `image_digest` is a local image id, so this is the way back to a registry
+    /// content digest.
     pub async fn digest_of_image(
         &self,
         image_id: &str,
@@ -333,22 +305,18 @@ impl Docker {
 
     /// What the registry currently serves for `image`, without pulling it.
     ///
-    /// `Ok(None)` when the registry answered but published no digest at all.
-    /// A registry that cannot be reached, or that refuses the credentials, is
-    /// an `Err`: "we could not find out" and "there is nothing newer" are
-    /// different answers, and collapsing them would report every image behind
-    /// an expired login as up to date.
+    /// `Ok(None)` when the registry published no digest. An unreachable registry
+    /// or refused credentials is an `Err`: "could not find out" must not collapse
+    /// into "nothing newer", or images behind an expired login read as up to date.
     pub async fn registry_digest(
         &self,
         image: &str,
         credentials: Option<&RegistryCredentials>,
     ) -> Result<Option<String>> {
-        // Retried, because checking a cluster's worth of images means asking
-        // several registries a few dozen times in quick succession, and they
-        // throttle bursts well under their published per-minute allowance. A
-        // 429 is "too fast", not "no": giving up on it reports a perfectly
-        // current image as unknown, and does so unpredictably, so the same
-        // image flips between known and unknown run to run.
+        // Retried: a cluster's worth of checks hits registries in quick succession
+        // and they throttle bursts well under their published allowance. A 429 is
+        // "too fast", not "no"; giving up would flip a current image between known
+        // and unknown run to run.
         let mut delay = RATE_LIMIT_BACKOFF;
         for attempt in 0..RATE_LIMIT_RETRIES {
             match self
@@ -368,8 +336,8 @@ impl Docker {
         unreachable!("the loop returns on the last attempt")
     }
 
-    /// Compare the local image digest against what the registry currently has,
-    /// without pulling. Used by the `:latest` update check in the web UI.
+    /// Compare the local image digest against the registry's without pulling
+    /// (the `:latest` update check in the web UI).
     pub async fn has_newer(&self, image: &str) -> Result<bool> {
         let local = self.resolve_digest(image).await?;
         match (local, self.registry_digest(image, None).await?) {
@@ -419,11 +387,9 @@ mod tests {
 
     #[test]
     fn pull_reference_makes_a_bare_image_explicit() {
-        // Docker's own `/images/create` pulls every tag in the repository
-        // when `fromImage` has none, rather than defaulting to `latest`. For
-        // `alpine` that walks into a years-old tag still served in the
-        // deprecated schema1 manifest format, which current containerd
-        // rejects, so the pull never succeeds.
+        // `/images/create` without a tag pulls every tag. For `alpine` that hits a
+        // years-old tag in the deprecated schema1 manifest format, which current
+        // containerd rejects, so the pull never succeeds.
         assert_eq!(pull_reference("alpine"), "alpine:latest");
     }
 

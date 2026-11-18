@@ -9,6 +9,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
+use hyper::header::{HeaderValue, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::json;
@@ -20,22 +21,28 @@ use crate::route::{route, Refusal, Route};
 
 type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
-/// The engine API version this socket claims. Clients negotiate down from it.
 const API_VERSION: &str = "1.45";
 
-fn full(status: StatusCode, content_type: &str, body: impl Into<Bytes>) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header("Content-Type", content_type)
-        .header("Api-Version", API_VERSION)
-        .header("OSType", "linux")
-        .header("Server", "clouduler")
-        .body(
-            Full::new(body.into())
-                .map_err(|never| match never {})
-                .boxed_unsync(),
-        )
-        .expect("static response parts are valid")
+/// A response with the engine-API headers; `headers_mut` on a fresh `Response`
+/// avoids the fallible builder.
+fn response(status: StatusCode, content_type: &'static str, body: Body) -> Response<Body> {
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    let headers = resp.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert("api-version", HeaderValue::from_static(API_VERSION));
+    resp
+}
+
+fn full(status: StatusCode, content_type: &'static str, body: impl Into<Bytes>) -> Response<Body> {
+    let body = Full::new(body.into())
+        .map_err(|never| match never {})
+        .boxed_unsync();
+    let mut resp = response(status, content_type, body);
+    let headers = resp.headers_mut();
+    headers.insert("ostype", HeaderValue::from_static("linux"));
+    headers.insert("server", HeaderValue::from_static("clouduler"));
+    resp
 }
 
 fn message(status: StatusCode, msg: &str) -> Response<Body> {
@@ -131,12 +138,11 @@ async fn dispatch(backend: &dyn ImageBackend, route: Route) -> Response<Body> {
                         std::io::Error::other(e.to_string())
                     })
                 }));
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header("Content-Type", "application/x-tar")
-                    .header("Api-Version", API_VERSION)
-                    .body(BodyExt::boxed_unsync(body))
-                    .expect("static response parts are valid")
+                response(
+                    StatusCode::OK,
+                    "application/x-tar",
+                    BodyExt::boxed_unsync(body),
+                )
             }
             Err(e) => backend_error(e),
         },
@@ -192,4 +198,20 @@ pub async fn serve(
     }
     let _ = std::fs::remove_file(path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_sets_engine_headers() {
+        let resp = full(StatusCode::OK, "text/plain; charset=utf-8", "OK");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h["content-type"], "text/plain; charset=utf-8");
+        assert_eq!(h["api-version"], API_VERSION);
+        assert_eq!(h["ostype"], "linux");
+        assert_eq!(h["server"], "clouduler");
+    }
 }

@@ -1,12 +1,8 @@
 //! Pointing dockerd's `data-root` at a node-chosen directory.
 //!
-//! `data-root` is dockerd's own setting, not something clouduler's daemon
-//! reads at runtime, so the only place to act on it is here: write it into
-//! `/etc/docker/daemon.json` (preserving whatever else is already there) and
-//! tell the operator to restart docker. Any data already sitting under the
-//! previous root is left alone — moving it is destructive and dockerd handles
-//! neither the move nor a merge of two roots, so doing that automatically
-//! would risk containers or images the operator still wants.
+//! Written into `/etc/docker/daemon.json` (preserving other keys); the operator
+//! restarts docker. Data under the previous root is left alone: moving or
+//! merging roots is destructive and dockerd does neither.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +11,6 @@ use serde_json::{Map, Value};
 
 pub const DAEMON_JSON_PATH: &str = "/etc/docker/daemon.json";
 
-/// Set (or leave alone) `data-root` in the docker daemon config at `path`.
 /// Returns `true` if the file was created or changed.
 pub fn set_data_root(path: &Path, data_root: &Path) -> Result<bool> {
     let mut doc = read(path)?;

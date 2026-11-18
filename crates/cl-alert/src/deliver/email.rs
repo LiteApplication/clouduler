@@ -21,20 +21,17 @@ use crate::settings::{Severity, SmtpSecurity, SmtpSettings};
 #[folder = "templates/email"]
 struct Templates;
 
-/// One template file by name. They are compiled in; a missing one is a bug
-/// that the tests catch.
+/// One template file by name; compiled in, so a missing one is a bug the tests catch.
 fn tpl(name: &str) -> String {
     Templates::get(name)
         .map(|f| String::from_utf8_lossy(&f.data).into_owned())
         .unwrap_or_default()
 }
 
-/// Fill the template file `name`.
 fn render_tpl(name: &str, values: &[(&str, &str)]) -> String {
     fill(&tpl(name), values)
 }
 
-/// A rendered message, before it is wrapped in MIME.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
     pub subject: String,
@@ -437,7 +434,6 @@ fn mailbox(raw: &str, what: &str) -> Result<Mailbox, DeliveryError> {
     })
 }
 
-/// The MIME message. Pure, so tests can inspect the headers.
 pub fn build(
     smtp: &SmtpSettings,
     to: &[String],

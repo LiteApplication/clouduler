@@ -294,7 +294,6 @@ async fn summarize_local(
         state
             .migration_sync
             .read()
-            .unwrap()
             .get(&assignment.instance)
             .copied()
     });
@@ -1508,7 +1507,7 @@ async fn serve_logs(
     let container_name = instance.container_name();
     let docker = state.docker().await?;
     let log_stream = async_stream::stream! {
-        let stream = docker.logs(&container_name, opts);
+        let stream = docker.logs(&container_name, &opts);
         futures::pin_mut!(stream);
         while let Some(item) = futures::StreamExt::next(&mut stream).await {
             yield item;
@@ -2081,7 +2080,7 @@ async fn run_standalone(
 
     let mut out = CappedBuf::new(cap);
     let mut err = CappedBuf::new(cap);
-    let mut logs = Box::pin(docker.logs(name, LogOptions::default()));
+    let mut logs = Box::pin(docker.logs(name, &LogOptions::default()));
     while let Some(line) = logs.next().await {
         let line = line.map_err(docker_error)?;
         let (buf, text) = match line.stream {
@@ -2538,7 +2537,7 @@ pub(crate) async fn fetch_logs(
         since,
     };
     let name = instance.container_name();
-    let stream = docker.logs(&name, opts);
+    let stream = docker.logs(&name, &opts);
     futures::pin_mut!(stream);
     let mut lines = Vec::new();
     while let Some(item) = stream.next().await {

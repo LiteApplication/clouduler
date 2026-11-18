@@ -95,22 +95,18 @@ pub fn container_docker_name(network: &str) -> String {
     format!("CTN_{network}")
 }
 
-/// Bridge of the segment (the existing overlay helper, keyed on the docker name).
 pub fn container_bridge_name(network: &str) -> String {
     crate::vxlan::bridge_name(&container_docker_name(network))
 }
 
-/// VXLAN device of the segment.
 pub fn container_vxlan_name(network: &str) -> String {
     crate::vxlan::vxlan_name(&container_docker_name(network))
 }
 
-/// The host-side veth carrying this node's `X_ctn` address.
 pub fn host_veth_name(network: &str) -> String {
     short_name(VETH_PREFIX, network, IFNAMSIZ_USABLE)
 }
 
-/// The veth's bridge-side peer.
 pub fn host_peer_name(network: &str) -> String {
     short_name(PEER_PREFIX, network, IFNAMSIZ_USABLE)
 }
@@ -152,7 +148,6 @@ pub fn l2_chain(bridge: &str) -> String {
     short_name("CLDR-CTNL2-", bridge, CHAIN_USABLE)
 }
 
-/// Every iptables chain `(table, name)` a wanted network owns.
 pub fn all_chains(network: &str) -> Vec<(&'static str, String)> {
     vec![
         ("filter", input_chain(network)),
@@ -174,7 +169,6 @@ pub fn container_mark(network: &str) -> u32 {
     cl_config::container_mark(network)
 }
 
-/// The `(reply, dst)` routing tables of a network.
 pub fn container_tables(network: &str) -> (u32, u32) {
     cl_config::container_table_ids(network)
 }
@@ -188,13 +182,8 @@ pub fn host_port_mac(network: &str, node: &str) -> [u8; 6] {
     [0x0a, hash[1], hash[2], hash[3], hash[4], hash[5]]
 }
 
-// ---------------------------------------------------------------------------
-// Policy routing as data
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RuleSelector {
-    /// `from all`
     All,
     From(Ipv4Net),
     Iif(String),
@@ -207,13 +196,10 @@ pub enum RuleSelector {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RuleAction {
     Lookup(u32),
-    /// `lookup main`
     LookupMain,
-    /// `lookup main suppress_prefixlength N`
     LookupMainSuppress(u8),
 }
 
-/// One `ip rule`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IpRule {
     pub priority: u32,
@@ -222,7 +208,6 @@ pub struct IpRule {
 }
 
 impl IpRule {
-    /// Args after `ip rule <add|del>` that name exactly this rule.
     pub fn spec_args(&self) -> Vec<String> {
         let mut a = vec!["priority".to_string(), self.priority.to_string()];
         match &self.selector {
@@ -283,7 +268,6 @@ impl IpRule {
     }
 }
 
-/// One route in a numbered table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TableRoute {
     pub table: u32,
@@ -299,7 +283,6 @@ impl TableRoute {
         dest_arg(self.dest)
     }
 
-    /// Args for `ip route replace`.
     pub fn replace_args(&self) -> Vec<String> {
         let mut a = vec![
             "route".to_string(),
@@ -322,7 +305,6 @@ impl TableRoute {
         a
     }
 
-    /// Args for `ip route del`.
     pub fn del_args(&self) -> Vec<String> {
         vec![
             "route".into(),
@@ -353,7 +335,6 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
-    /// Merge another network's plan into this one.
     pub fn extend(&mut self, other: RoutingPlan) {
         for rule in other.rules {
             if !self.rules.contains(&rule) {
@@ -369,32 +350,25 @@ impl RoutingPlan {
     }
 }
 
-/// Everything [`node_routing_plan`] needs for one container network.
 #[derive(Debug, Clone)]
 pub struct RoutingInput {
     pub network: String,
-    /// The routed address space (the network's `subnet`).
     pub subnet: Ipv4Net,
     /// The router's address on the segment; `None` while it has none, which
     /// yields an empty plan (so every rule and route is removed).
     pub router_ip: Option<Ipv4Addr>,
     /// Bridge of the router stack's own overlay network (exempt from our rules).
     pub router_bridge: Option<String>,
-    /// This node's `X_ctn`.
     pub node_ctn: Ipv4Addr,
     /// Position among the container networks ([`routing_ranks`]); picks the
     /// suppress/lookup priority pair.
     pub rank: u32,
     /// Overlay subnets of stacks that sit on an allowed network.
     pub stack_sources: Vec<Ipv4Net>,
-    /// This node is in `hosts`.
     pub host_listed: bool,
-    /// The router container is running (fail-open for hosts otherwise).
     pub router_running: bool,
 }
 
-/// The fwmark rule, tables and per-source / host rules of one network on
-/// this node. Pure.
 pub fn node_routing_plan(input: &RoutingInput) -> RoutingPlan {
     let (reply, dst) = container_tables(&input.network);
     let mut plan = RoutingPlan {
@@ -474,7 +448,6 @@ pub fn node_routing_plan(input: &RoutingInput) -> RoutingPlan {
     plan
 }
 
-/// What `ip rule show` and `ip route show table N` currently say.
 #[derive(Debug, Clone, Default)]
 pub struct HostRouting {
     pub rules: Vec<IpRule>,
@@ -608,7 +581,6 @@ pub fn diff_routing(plan: &RoutingPlan, host: &HostRouting) -> Vec<Vec<String>> 
     commands
 }
 
-/// Read the rules and the routes of `tables` from the host.
 pub fn scan_routing(tables: &BTreeSet<u32>) -> Result<HostRouting> {
     let rules = run_ip_output(&["rule", "show"])?;
     let mut host = HostRouting {
@@ -624,8 +596,7 @@ pub fn scan_routing(tables: &BTreeSet<u32>) -> Result<HostRouting> {
     Ok(host)
 }
 
-/// Bring the host's rules and tables in line with `plan`. Safe every tick.
-/// Every command is tried; the failures come back as one error.
+/// Every command is tried; failures come back as one error.
 pub fn apply_routing(plan: &RoutingPlan) -> Result<()> {
     let host = scan_routing(&plan.tables)?;
     let mut failures = Vec::new();
@@ -693,10 +664,6 @@ fn run_ip_output(args: &[&str]) -> Result<String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// iptables
-// ---------------------------------------------------------------------------
-
 /// How a rule recognizes the router's traffic: on the bridge only packets
 /// sourced from the router (clients share that bridge and must not be caught),
 /// on the host port everything.
@@ -720,14 +687,12 @@ fn push_with(chain: &mut ChainSpec, prefix: &[String], rest: &[&str]) {
     chain.push(&parts);
 }
 
-/// Everything [`filter_iptables_plan`] needs for one container network.
 #[derive(Debug, Clone)]
 pub struct FilterInput<'a> {
     pub network: &'a str,
     pub bridge: &'a str,
     pub veth: &'a str,
     pub router_ip: Option<Ipv4Addr>,
-    /// This node's `X_ctn`.
     pub node_ctn: Ipv4Addr,
     /// `(port, protocol, target_port)`.
     pub open_ports: &'a [(u16, Protocol, u16)],
@@ -739,7 +704,6 @@ pub struct FilterInput<'a> {
     /// Port of the client DNS server, answering on `node_ctn`; accepted for
     /// UDP and TCP to that address only, and only as input to the node.
     pub dns_port: Option<u16>,
-    /// Destinations the router may forward to.
     pub allowed: &'a [Ipv4Net],
 }
 
@@ -1094,10 +1058,6 @@ pub fn l2_isolation_plan(
         )],
     }
 }
-
-// ---------------------------------------------------------------------------
-// netns routes
-// ---------------------------------------------------------------------------
 
 /// `ip route` args (without the leading `ip`) for a client container's
 /// namespace: `replace <subnet>|default via <router>`, or `replace prohibit

@@ -21,19 +21,14 @@ use futures::StreamExt;
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
 
-/// Label carrying the stack a container belongs to.
 pub const LABEL_STACK: &str = "clouduler.stack";
-/// Label carrying the service name within the stack.
 pub const LABEL_SERVICE: &str = "clouduler.service";
-/// Label carrying the instance identifier, for scaled services.
 pub const LABEL_INSTANCE: &str = "clouduler.instance";
-/// Label marking a container as owned by clouduler. Always set to `MANAGED_VALUE`.
 pub const LABEL_MANAGED: &str = "clouduler.managed";
 /// The value clouduler writes for `LABEL_MANAGED`. Presence and value both matter:
 /// this is how clouduler tells its own containers apart from the user's.
 pub const MANAGED_VALUE: &str = "true";
 
-/// A bind mount from the host into the container.
 #[derive(Debug, Clone)]
 pub struct BindMount {
     pub host_path: String,
@@ -41,7 +36,6 @@ pub struct BindMount {
     pub read_only: bool,
 }
 
-/// An in-memory volume with no backing drive.
 #[derive(Debug, Clone)]
 pub struct TmpfsMount {
     pub container_path: String,
@@ -51,7 +45,6 @@ pub struct TmpfsMount {
     pub read_only: bool,
 }
 
-/// TCP or UDP, for published ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortProtocol {
     Tcp,
@@ -76,7 +69,6 @@ pub struct PortMapping {
     pub host_ip: Option<String>,
 }
 
-/// Restart policy for a container. Mirrors docker's own options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RestartPolicy {
     #[default]
@@ -88,14 +80,12 @@ pub enum RestartPolicy {
     },
 }
 
-/// CPU and memory limits. `None` means unlimited (docker's default).
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     pub memory_bytes: Option<i64>,
     pub nano_cpus: Option<i64>,
 }
 
-/// A host device passed through to the container (`--device`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceMount {
     pub host_path: String,
@@ -104,7 +94,6 @@ pub struct DeviceMount {
     pub permissions: String,
 }
 
-/// A device request (`--gpus`): docker asks the named driver for devices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuRequest {
     pub driver: String,
@@ -115,7 +104,6 @@ pub struct GpuRequest {
     pub capabilities: Vec<Vec<String>>,
 }
 
-/// A container healthcheck, equivalent to docker's `HEALTHCHECK`.
 #[derive(Debug, Clone)]
 pub struct Healthcheck {
     pub test: Vec<String>,
@@ -126,8 +114,7 @@ pub struct Healthcheck {
 }
 
 /// Everything needed to create a clouduler-managed container. The
-/// stack/service/instance fields are used both as ownership labels and to
-/// build the container name.
+/// stack/service/instance fields are ownership labels and build the name.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerSpec {
     pub name: String,
@@ -159,75 +146,59 @@ pub struct ContainerSpec {
     pub read_only: bool,
     pub ports: Vec<PortMapping>,
     pub network: Option<String>,
-    /// Fixed address on `network`. Allocated cluster wide and replicated, so
-    /// every node can name this container's address without asking the node
-    /// running it.
+    /// Fixed address on `network`. Allocated cluster wide and replicated, so every
+    /// node can name it without asking the node running the container.
     pub ip: Option<Ipv4Addr>,
-    /// Resolvers written into the container's `/etc/resolv.conf`. The internal
-    /// resolver goes first so `service.stack` resolves; it forwards anything
-    /// outside the cluster zone upstream.
+    /// Resolvers for `/etc/resolv.conf`. The internal resolver goes first so
+    /// `service.stack` resolves; it forwards the rest upstream.
     pub dns: Vec<IpAddr>,
-    /// Search domains, so a bare `service.stack` is tried under the cluster's
-    /// internal zone before being sent upstream as written.
+    /// Search domains, so a bare `service.stack` resolves under the internal zone.
     pub dns_search: Vec<String>,
-    /// Resolver options, written into the container's `/etc/resolv.conf`.
     pub dns_options: Vec<String>,
     /// Extra `/etc/hosts` entries as `name:address`, e.g.
     /// `host.docker.internal:10.244.3.1`.
     pub extra_hosts: Vec<String>,
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
-    /// Host devices (`devices:`), e.g. `/dev/dri`.
     pub devices: Vec<DeviceMount>,
-    /// Device requests (`deploy.resources.reservations.devices`).
     pub gpu_requests: Vec<GpuRequest>,
     pub healthcheck: Option<Healthcheck>,
     /// Signal sent on a graceful stop. `None` leaves the image's own
     /// `STOPSIGNAL` (usually `SIGTERM`) in effect.
     pub stop_signal: Option<String>,
-    /// Docker network for a second attachment alongside `network`, backing an
-    /// egress-kind cluster network (a VPN interface, usually). Attached after
-    /// creation with `Docker::connect_network`, since docker only takes one
-    /// network at create time.
+    /// Docker network for a second attachment backing an egress-kind cluster
+    /// network (usually a VPN interface), attached after creation because docker
+    /// takes one network at create time.
     pub egress_network: Option<String>,
-    /// Addresses that must stay reachable over `network` even though the
-    /// default route points at `egress_network`: the nodes' addresses on the
-    /// internal network, where the reverse proxy answers for every route
-    /// published on a network this service is a member of. Empty when there
-    /// is no egress network. See `Docker::pin_routes`.
+    /// Addresses that must stay reachable over `network` though the default route
+    /// points at `egress_network`: the nodes' internal addresses, where the proxy
+    /// answers. Empty without an egress network. See `Docker::pin_routes`.
     pub pinned_routes: Vec<Ipv4Addr>,
-    /// Next hop for `pinned_routes`: the overlay gateway of `network`.
     pub pinned_gateway: Option<Ipv4Addr>,
-    /// Attachments to `container`-kind cluster networks, connected after
-    /// creation like `egress_network`. See [`ContainerAttachment`].
+    /// Attachments to `container`-kind cluster networks, connected after creation.
     pub container_networks: Vec<ContainerAttachment>,
 }
 
-/// One attachment to a container-kind cluster network (a cluster-wide L2
-/// segment with a router container on it).
+/// One attachment to a container-kind cluster network (an L2 segment with a router container).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerAttachment {
-    /// Docker network backing the segment.
     pub docker_network: String,
-    /// Pinned address of this container on the segment.
     pub ip: Ipv4Addr,
-    /// `ip route` argument lists (without the leading `ip route`'s `ip`, e.g.
-    /// `["route", "replace", "100.64.0.0/10", "via", "10.0.0.5"]`) applied in
-    /// the container's namespace. Not part of the container's identity: they
-    /// are re-applied every tick.
+    /// `ip route` argument lists (e.g. `["route", "replace", "100.64.0.0/10",
+    /// "via", "10.0.0.5"]`) applied in the container's namespace. Not part of its
+    /// identity; re-applied every tick.
     pub routes: Vec<Vec<String>>,
-    /// Interface name docker should give the endpoint
-    /// (`com.docker.network.endpoint.ifname`), so a router image can name it.
+    /// Interface name for the endpoint (`com.docker.network.endpoint.ifname`).
     pub ifname: Option<String>,
-    /// The routed subnet is `0.0.0.0/0`: this attachment carries the default
-    /// route, so the proxy addresses must stay pinned to the overlay.
+    /// The routed subnet is `0.0.0.0/0`: this attachment carries the default route,
+    /// so the proxy addresses must stay pinned to the overlay.
     pub default_route: bool,
 }
 
 impl ContainerSpec {
-    /// The container was created directly on one of its container-kind
-    /// segments (a client that lists no other network). That attachment is
-    /// already made, and the segment's own default route has to go.
+    /// The container was created directly on one of its container-kind segments
+    /// (a client listing no other network): already attached, but the segment's
+    /// own default route has to go.
     pub fn container_on_primary(&self) -> bool {
         self.network.as_ref().is_some_and(|n| {
             self.container_networks
@@ -236,8 +207,7 @@ impl ContainerSpec {
         })
     }
 
-    /// The full label set this container will carry: the caller's labels plus
-    /// the clouduler ownership labels, which always win on conflict.
+    /// The full label set: the caller's plus clouduler ownership labels, which win on conflict.
     fn all_labels(&self) -> HashMap<String, String> {
         let mut labels = self.labels.clone();
         labels.insert(LABEL_STACK.to_string(), self.stack.clone());
@@ -364,10 +334,8 @@ impl ContainerSpec {
         }
     }
 
-    /// Endpoint configuration, only needed to pin the container's address.
-    /// `network_mode` in the host config is what attaches it to the network;
-    /// this adds the fixed address on top, and is left out entirely when none
-    /// was allocated so docker picks one from the subnet as usual.
+    /// Endpoint configuration, only needed to pin the address; left out when none
+    /// was allocated so docker picks one from the subnet.
     fn networking_config(&self) -> Option<NetworkingConfig> {
         let (network, ip) = (self.network.as_ref()?, self.ip?);
         let endpoint = EndpointSettings {
@@ -382,7 +350,6 @@ impl ContainerSpec {
         })
     }
 
-    /// Convert to the body bollard expects for `POST /containers/create`.
     pub(crate) fn to_create_body(&self) -> ContainerCreateBody {
         let exposed_ports = (!self.ports.is_empty()).then(|| {
             self.ports
@@ -411,7 +378,6 @@ impl ContainerSpec {
     }
 }
 
-/// Health status of a container, as reported by its healthcheck (if any).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthState {
     None,
@@ -431,9 +397,8 @@ impl From<HealthStatusEnum> for HealthState {
     }
 }
 
-/// Docker's own lifecycle status for a container, as reported by inspect/list.
-/// Kept alongside the coarser `running` bool because "restarting" and "exited"
-/// are both `running: false` but mean very different things to an operator.
+/// Docker's own lifecycle status, kept alongside the coarser `running` bool
+/// because "restarting" and "exited" are both `running: false` but differ for operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunState {
     #[default]
@@ -482,8 +447,7 @@ impl From<bollard::models::ContainerSummaryStateEnum> for RunState {
     }
 }
 
-/// A snapshot of a container's state, owned so callers don't have to hold onto
-/// bollard's types.
+/// A snapshot of a container's state, owned so callers need not hold bollard types.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerState {
     pub id: String,
@@ -499,11 +463,9 @@ pub struct ContainerState {
     pub exit_code: Option<i64>,
     pub labels: HashMap<String, String>,
     pub started_at: Option<String>,
-    /// Docker network names this container is currently attached to. Used to
-    /// notice a running container that should have an egress network
-    /// attached (per its spec) but doesn't yet — e.g. one created before
-    /// that network existed — without needing a separate inspect call just
-    /// to find out.
+    /// Docker network names currently attached. Lets us notice a running container
+    /// missing its egress network (e.g. created before the network existed)
+    /// without a separate inspect.
     pub networks: BTreeSet<String>,
     /// The kernel OOM-killed the container's main process. Only known from
     /// `inspect`, false otherwise.
@@ -600,10 +562,8 @@ impl From<ContainerSummary> for ContainerState {
 
 /// Un-tar the first entry of a docker `download_from_container` archive.
 ///
-/// Docker always wraps a single-file download in a tar with one entry, so
-/// this takes whichever entry comes first rather than matching on name: the
-/// entry's path is the container path made relative, and reconstructing that
-/// exactly is more brittle than just trusting there is only one.
+/// A single-file download is a tar with one entry; taking the first avoids
+/// reconstructing its (made-relative) path.
 fn untar_single_file(archive: &[u8], container_path: &str) -> Result<Vec<u8>> {
     let mut tar = tar::Archive::new(archive);
     let mut entries = tar
@@ -620,8 +580,7 @@ fn untar_single_file(archive: &[u8], container_path: &str) -> Result<Vec<u8>> {
     Ok(contents)
 }
 
-/// What a path inside a container turned out to be, and as much of it as was
-/// asked for. See `Docker::read_path`.
+/// What a path inside a container turned out to be. See `Docker::read_path`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathRead {
     pub kind: PathKind,
@@ -646,20 +605,19 @@ pub enum PathKind {
     Other,
 }
 
-/// How much of a directory's recursive archive is read before giving up on
-/// listing the rest. Docker archives a directory's whole subtree and there is
-/// no api for "just the top level", so a huge tree has to be cut off.
+/// How much of a directory's recursive archive is read before cutting off:
+/// docker has no "top level only" api and archives the whole subtree.
 const DIR_ARCHIVE_CAP: usize = 8 * 1024 * 1024;
 
-/// Slack above `max_bytes` kept when reading a file's archive, for the tar
-/// header(s) in front of the content (a long path adds a PAX or GNU header).
+/// Slack above `max_bytes` for the tar header(s) in front of the content (a long
+/// path adds a PAX or GNU header).
 const TAR_HEADER_SLACK: usize = 64 * 1024;
 
 /// Interpret the (possibly cut-off) tar archive docker returns for a path.
 ///
-/// `archive` may end mid-entry because the caller stopped reading the download
-/// early to bound memory; that is expected and reported through `truncated`
-/// rather than as an error. Only a missing first entry is an error.
+/// `archive` may end mid-entry because the download was stopped early to bound
+/// memory; that is reported via `truncated`, not an error. Only a missing first
+/// entry is an error.
 fn parse_path_archive(
     archive: &[u8],
     container_path: &str,
@@ -739,13 +697,12 @@ fn parse_path_archive(
 }
 
 impl Docker {
-    /// Read a file's first `max_bytes`, or list a directory's immediate
-    /// children (at most `max_entries`), without a shell in the container.
+    /// Read a file's first `max_bytes`, or list a directory's immediate children
+    /// (at most `max_entries`), without a shell in the container.
     ///
-    /// Uses docker's archive endpoint rather than `exec cat`/`ls`, so it works
-    /// in distroless and scratch images. The download is abandoned once enough
-    /// bytes have arrived, so a multi-gigabyte file costs about `max_bytes` of
-    /// memory, not its size.
+    /// Uses docker's archive endpoint rather than `exec cat`/`ls`, so it works in
+    /// distroless and scratch images. The download is abandoned once enough has
+    /// arrived, so a huge file costs about `max_bytes` of memory.
     pub async fn read_path(
         &self,
         name: &str,
@@ -781,7 +738,6 @@ impl Docker {
 }
 
 impl Docker {
-    /// Create a container from `spec`. Does not start it.
     pub async fn create(&self, spec: &ContainerSpec) -> Result<String> {
         let body = spec.to_create_body();
         let options = CreateContainerOptionsBuilder::new()
@@ -795,7 +751,6 @@ impl Docker {
         Ok(resp.id)
     }
 
-    /// Start a previously created container.
     pub async fn start(&self, name: &str) -> Result<()> {
         self.inner
             .start_container(name, None)
@@ -803,8 +758,7 @@ impl Docker {
             .map_err(classify)
     }
 
-    /// Stop a running container, giving it up to `timeout` to exit gracefully
-    /// before docker sends SIGKILL.
+    /// Stop a running container; docker sends SIGKILL after `timeout`.
     pub async fn stop(&self, name: &str, timeout: Duration) -> Result<()> {
         let options = StopContainerOptionsBuilder::new()
             .t(timeout.as_secs() as i32)
@@ -815,7 +769,6 @@ impl Docker {
             .map_err(classify)
     }
 
-    /// Remove a container. `force` kills it first if it's still running.
     pub async fn remove(&self, name: &str, force: bool) -> Result<()> {
         let options = RemoveContainerOptionsBuilder::new().force(force).build();
         self.inner
@@ -824,7 +777,6 @@ impl Docker {
             .map_err(classify)
     }
 
-    /// Restart a container, giving it up to `timeout` to stop gracefully first.
     pub async fn restart(&self, name: &str, timeout: Duration) -> Result<()> {
         let options = RestartContainerOptionsBuilder::new()
             .t(timeout.as_secs() as i32)
@@ -835,8 +787,8 @@ impl Docker {
             .map_err(classify)
     }
 
-    /// Inspect a container by name or id. `Ok(None)` means it doesn't exist,
-    /// which is a normal condition for the reconcile loop, not an error.
+    /// Inspect by name or id. `Ok(None)` means it does not exist, a normal
+    /// condition for the reconcile loop.
     pub async fn inspect(&self, name: &str) -> Result<Option<ContainerState>> {
         match self.inner.inspect_container(name, None).await {
             Ok(resp) => Ok(Some(resp.into())),
@@ -847,18 +799,15 @@ impl Docker {
         }
     }
 
-    /// Wait for a container to exit, returning its exit code.
-    ///
-    /// Used by the self-update build: the build container has to finish
-    /// before the binary it produced can be pulled out of it.
+    /// Wait for a container to exit, returning its exit code (used by the
+    /// self-update build).
     pub async fn wait(&self, name: &str) -> Result<i64> {
         let options = WaitContainerOptionsBuilder::default().build();
         let mut stream = Box::pin(self.inner.wait_container(name, Some(options)));
         match stream.next().await {
             Some(Ok(resp)) => Ok(resp.status_code),
-            // A non-zero exit surfaces as an error variant carrying the code,
-            // not a value in the stream: bollard's `wait_container` maps it
-            // that way, so report the code rather than failing the caller.
+            // bollard maps a non-zero exit to an error variant carrying the code;
+            // report the code rather than failing the caller.
             Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
             Some(Err(e)) => Err(classify(e)),
             None => Err(DockerError::Api(bollard::errors::Error::IOError {
@@ -867,10 +816,8 @@ impl Docker {
         }
     }
 
-    /// Pull a single file out of a stopped or running container, un-tarring
-    /// the single-entry archive docker wraps it in.
-    ///
-    /// Used to fetch the freshly built binary out of the build container.
+    /// Pull a single file out of a container, un-tarring docker's single-entry
+    /// archive (used to fetch the self-update build's binary).
     pub async fn download_file(&self, name: &str, container_path: &str) -> Result<Vec<u8>> {
         let options = DownloadFromContainerOptionsBuilder::default()
             .path(container_path)
@@ -883,7 +830,6 @@ impl Docker {
         untar_single_file(&archive, container_path)
     }
 
-    /// List every container carrying the clouduler ownership label, running or not.
     pub async fn list_managed(&self) -> Result<Vec<ContainerState>> {
         let mut filters: HashMap<String, Vec<String>> = HashMap::new();
         filters.insert(
@@ -918,9 +864,8 @@ mod tests {
         }
     }
 
-    /// The address is decided cluster wide, so the create call has to carry
-    /// it: letting docker pick would give every node a different answer for
-    /// where a container is.
+    /// The address is decided cluster wide, so the create call must carry it;
+    /// letting docker pick would give every node a different answer.
     #[test]
     fn an_allocated_address_is_pinned_on_the_network() {
         let mut spec = base_spec();
@@ -937,10 +882,9 @@ mod tests {
         assert_eq!(ipam.ipv4_address.as_deref(), Some("10.244.0.5"));
     }
 
-    /// An egress network is always a second, post-create attachment: the
-    /// overlay network stays primary at create time (see
-    /// `Docker::set_default_route` for how the egress network still wins the
-    /// default route despite that).
+    /// An egress network is always a post-create attachment; the overlay stays
+    /// primary at create time (see `Docker::set_default_route` for how egress
+    /// still wins the default route).
     #[test]
     fn an_egress_network_does_not_change_the_primary_attachment() {
         let mut spec = base_spec();

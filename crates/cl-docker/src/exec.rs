@@ -11,22 +11,18 @@ use tokio::io::AsyncWrite;
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
 
-/// What to run and how.
 #[derive(Debug, Clone)]
 pub struct ExecSpec {
     pub cmd: Vec<String>,
-    /// Allocates a pseudo-tty and asks docker to combine stdout/stderr into
-    /// one stream, the way an interactive shell expects. Without it the two
-    /// stay separate frames in `ExecSession::output`.
+    /// Allocates a pseudo-tty and combines stdout/stderr into one stream, as an
+    /// interactive shell expects; otherwise they are separate frames.
     pub tty: bool,
-    /// `user`, `user:group`, `uid` or `uid:gid`. Defaults to the image's own
-    /// user when unset.
+    /// `user`, `user:group`, `uid` or `uid:gid`; the image's user when unset.
     pub user: Option<String>,
 }
 
-/// One byte, tagged with which of the container's streams it came from.
-/// Meaningless once `ExecSpec::tty` is set, since docker itself no longer
-/// distinguishes them.
+/// One byte, tagged with its source stream. Meaningless when `ExecSpec::tty` is
+/// set, since docker no longer distinguishes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecStream {
     Stdout,

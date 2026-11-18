@@ -8,15 +8,13 @@ pub type Result<T> = std::result::Result<T, DriveError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {
-    /// The node was asked to act on a drive it has no local directory for.
     #[error("node {node} does not implement drive {drive}")]
     NotImplemented { drive: String, node: String },
 
     #[error("volume {volume} not found")]
     VolumeNotFound { volume: VolumeId },
 
-    /// A volume or file path resolved outside the drive root, e.g. via `..`
-    /// or an absolute path smuggled in through a name.
+    /// Resolved outside the drive root, e.g. via `..` or an absolute path in a name.
     #[error("path {path} escapes the drive root")]
     PathEscape { path: String },
 
@@ -27,21 +25,17 @@ pub enum DriveError {
         source: std::io::Error,
     },
 
-    /// Something went wrong moving bytes over the wire: connect failure,
-    /// protocol mismatch, or the peer closing early.
+    /// Connect failure, protocol mismatch, or the peer closing early.
     #[error("transfer failed: {message}")]
     Transfer { message: String },
 
-    /// The sync would have wiped (most of) a replica's data from a source
-    /// that has little or nothing. Nothing was sent.
+    /// The source has little or nothing where the replica has data. Nothing was sent.
     #[error("refusing to sync {volume}: {reason}")]
     DestructiveSync { volume: VolumeId, reason: String },
 
-    /// Post-transfer manifests did not match.
     #[error("verification failed: {message}")]
     Verify { message: String },
 
-    /// Cluster config did not describe what the caller assumed it would.
     #[error("config error: {0}")]
     Config(String),
 }

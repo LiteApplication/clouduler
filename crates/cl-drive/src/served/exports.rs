@@ -1,12 +1,7 @@
-//! Server side of a served drive under NFSv4: managing kernel `nfsd`
-//! exports for the drive's real directory via `exportfs`, instead of
-//! answering a bespoke protocol ourselves.
-//!
-//! `nfsd`/`rpc.mountd` are treated the way `dockerd` is treated elsewhere in
-//! this daemon: an external system service this process depends on and
-//! checks for, not one it spawns or supervises itself. What this module
-//! owns is only the export table — which directories are visible over NFS
-//! right now — kept in step with this node's `served_by` membership.
+//! Server side of a served drive under NFSv4: managing kernel `nfsd` exports
+//! via `exportfs`. `nfsd`/`rpc.mountd` are external system services (like
+//! `dockerd`); this module owns only the export table, kept in step with this
+//! node's `served_by` membership.
 
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -14,29 +9,19 @@ use std::process::Command;
 
 use crate::error::{DriveError, Result};
 
-/// The port `nfsd` is expected to listen on. Fixed rather than derived per
-/// drive: a kernel `nfsd` is one process per host serving every export,
-/// distinguished by export path rather than by listening port, so unlike the
-/// old bespoke protocol there is exactly one NFS port to agree on cluster
-/// wide.
+/// Fixed: kernel `nfsd` is one process per host, distinguished by export path.
 pub const NFS_PORT: u16 = 2049;
 
-/// A stable numeric fsid for a drive's export, derived from its name so it
-/// survives daemon restarts. A freshly random fsid on every restart would
-/// invalidate every client's cached filehandles the moment this process
-/// restarted; this only needs to be stable and unique per drive on this
-/// host, not globally unique.
+/// Stable fsid derived from the drive name. A random one per restart would
+/// invalidate clients' cached filehandles; it only needs to be unique per host.
 fn fsid_of(drive: &str) -> u32 {
     let mut hasher = cl_config::stable_hasher();
     drive.hash(&mut hasher);
     (hasher.finish() % 1_000_000) as u32 + 1
 }
 
-/// Ensure `root` is exported over NFSv4 for `drive`, restricted to
-/// `client_subnet` (normally the cluster's internal-network subnet, the
-/// same trust boundary the old served-drive protocol used: trusted,
-/// unencrypted, internal-network-only). Idempotent — re-running with the
-/// same arguments is a no-op as far as `exportfs` is concerned.
+/// Export `root` over NFSv4 to `client_subnet` (the internal-network subnet:
+/// trusted, unencrypted). Idempotent.
 pub fn ensure_export(drive: &str, root: &Path, client_subnet: &str) -> Result<()> {
     let fsid = fsid_of(drive);
     let spec = format!("{client_subnet}:{}", root.display());
@@ -44,9 +29,7 @@ pub fn ensure_export(drive: &str, root: &Path, client_subnet: &str) -> Result<()
     run_exportfs(&["-o", &options, &spec])
 }
 
-/// Remove the export for `root`, e.g. because this node stopped being a
-/// `served_by` candidate for `drive`, or the drive itself was removed. Not
-/// finding it exported in the first place is fine, not an error.
+/// Remove the export for `root`; already-not-exported is fine.
 pub fn remove_export(root: &Path, client_subnet: &str) -> Result<()> {
     let spec = format!("{client_subnet}:{}", root.display());
     match run_exportfs(&["-u", &spec]) {
@@ -79,16 +62,10 @@ fn run_exportfs(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Whether this host looks ready to serve an NFSv4 export: kernel NFS
-/// server support and `exportfs` are present, `exportfs -v` (list current
-/// exports) succeeds, and — the part `exportfs` alone can't tell you —
-/// `nfsd`'s server threads are actually running and listening. Loading the
-/// `nfsd` module only makes serving *possible*; `exportfs` happily accepts
-/// an export with no server threads started at all, so without this last
-/// check a broken node looks fine right up until the first client tries to
-/// mount and gets connection refused. Checked at daemon startup and by
-/// `clouduler init`, non-fatal either way — a node that can't serve simply
-/// never becomes an active server for anything.
+/// Whether this host can serve NFSv4: nfsd support and `exportfs` present, and
+/// nfsd server threads actually running. `exportfs` accepts exports with no
+/// threads, so without the last check a broken node looks fine until the first
+/// mount gets connection refused. Non-fatal at startup and `clouduler init`.
 pub fn check_available() -> Result<()> {
     if !Path::new("/proc/fs/nfsd").exists() && !kernel_module_present("nfsd") {
         return Err(DriveError::Config(
@@ -113,10 +90,8 @@ fn kernel_module_present(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `/proc/fs/nfsd/pool_threads` holds one thread count per nfsd thread
-/// pool, space separated, `0` (or unreadable — usually because this process
-/// isn't root, or the `nfsd` pseudo-filesystem isn't mounted) meaning no
-/// server threads are running at all.
+/// `pool_threads` holds one count per pool; all `0` or unreadable (non-root, or
+/// nfsd fs not mounted) means no server threads.
 fn server_running_from(pool_threads_path: &str) -> bool {
     std::fs::read_to_string(pool_threads_path)
         .map(|s| {

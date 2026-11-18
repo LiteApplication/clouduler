@@ -16,7 +16,6 @@ use cl_raft::ids::InstanceId;
 use cl_raft::state::{ClusterState, DesiredState};
 use cl_sched::run::{overlay_name, overlay_network_name};
 
-/// One service's declared publishing and the addresses currently backing it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServicePlacement {
     pub stack: String,
@@ -27,7 +26,6 @@ pub struct ServicePlacement {
     pub addresses: Vec<Ipv4Addr>,
 }
 
-/// Every instance that has an overlay address, in instance order.
 pub fn instance_addresses(
     state: &ClusterState,
     cfg: &ClusterConfig,
@@ -50,7 +48,6 @@ pub fn instance_addresses(
     out.into_iter().collect()
 }
 
-/// Every service that publishes something, with its current backends.
 pub fn service_placements(state: &ClusterState, cfg: &ClusterConfig) -> Vec<ServicePlacement> {
     let addresses: BTreeMap<InstanceId, Ipv4Addr> =
         instance_addresses(state, cfg).into_iter().collect();
@@ -154,7 +151,6 @@ pub mod fixtures {
 
     pub const STACK: &str = "blog";
 
-    /// A stack with `replicas` instances of `web`, all placed and addressed.
     pub fn state_with(spec: &str, replicas: u32) -> ClusterState {
         let mut state = ClusterState {
             stacks: BTreeMap::from([(
@@ -204,9 +200,7 @@ pub mod fixtures {
         state
     }
 
-    /// A `ClusterConfig` whose "default" network is `internal` kind, matching
-    /// `SPEC`'s network so `overlay_network_name` picks it the same way the
-    /// scheduler and overlay builder do.
+    /// A `ClusterConfig` whose "default" network is `internal` kind, matching `SPEC`.
     pub fn cluster_config() -> ClusterConfig {
         ClusterConfig::parse(
             "\

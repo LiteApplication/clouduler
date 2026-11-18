@@ -32,8 +32,9 @@
 //! The cookie is host-only, so each protected hostname has its own session,
 //! bound to that host in the stored record and to the portal session it came
 //! from (`ProxySessionRecord::parent`): signing out at the portal removes the
-//! portal session and with it every app session handed out from it. The proxy strips its own cookies
-//! from requests before forwarding, so a backend never sees a session.
+//! portal session and with it every app session handed out from it. The proxy
+//! strips its own cookies from requests before forwarding, so a backend never
+//! sees a session.
 //!
 //! This uses its own identity provider client (`proxy.auth`, secret
 //! `_clouduler_proxy_oidc_client_secret`) and its own groups, separate from
@@ -77,11 +78,8 @@ pub const COOKIE_PATH: &str = "/.well-known/clouduler-cookie";
 pub const LOGOUT_PATH: &str = "/.well-known/clouduler-logout";
 /// Prefix of every path the gate answers itself on a protected hostname.
 const RESERVED_PREFIX: &str = "/.well-known/clouduler-";
-/// Cookie carrying a protected hostname's session id.
 pub const COOKIE_NAME: &str = "cl_proxy_auth";
-/// Cookie carrying the portal's own session id.
 pub const PORTAL_COOKIE_NAME: &str = "cl_proxy_portal";
-/// Cookie carrying the sealed in-flight OIDC state on the portal.
 pub const LOGIN_COOKIE_NAME: &str = "cl_proxy_login";
 const LOGIN_COOKIE_PATH: &str = "/callback";
 const LOGIN_SEAL_CONTEXT: &str = "proxy-login";
@@ -92,13 +90,11 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TOKEN_TTL: Duration = Duration::from_secs(60);
 const ID_LEN: usize = 32;
 
-/// In-flight login state, sealed into the `cl_proxy_login` cookie.
 #[derive(Serialize, Deserialize)]
 struct PendingLogin {
     state: String,
     nonce: String,
     pkce_verifier: String,
-    /// The protected url the user was after; empty for a direct portal visit.
     callback: String,
     started_at_unix: u64,
     /// The client address the visitor agreed to save, confirmed on the
@@ -107,13 +103,11 @@ struct PendingLogin {
     remember_ip: Option<String>,
 }
 
-/// What the login page offers when the visitor's address may be saved.
 struct RememberOffer {
     ip: IpAddr,
     network: String,
     /// "30 days", for the checkbox and the confirmation page.
     lasts: String,
-    /// The protected url the visitor was after, if any.
     callback: Option<String>,
 }
 
@@ -145,26 +139,20 @@ fn human_duration(d: Duration) -> String {
     }
 }
 
-/// Who the identity provider says logged in.
 struct Identity {
     subject: String,
     username: String,
     groups: Vec<String>,
 }
 
-/// One network's login portal.
 struct Portal {
     auth: ProxyAuthConfig,
     network: String,
-    /// Portal hostname on that network.
     fqdn: String,
 }
 
-/// What a request should get in response to the `authenticated` middleware.
 pub enum GateOutcome {
-    /// The session is valid; proceed to the backend.
     Allow,
-    /// Answer directly: a redirect to log in, a cookie hand-out, or a refusal.
     Respond(Response<ProxyBody>),
 }
 
@@ -200,21 +188,19 @@ impl AuthGate {
         config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
         key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
         cluster: Arc<ClusterNode>,
-    ) -> Self {
+    ) -> Result<Self, openidconnect::reqwest::Error> {
         let http = openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client with no proxy or tls quirks always builds");
-        Self {
+            .build()?;
+        Ok(Self {
             config_rx,
             key_rx,
             cluster,
             http,
             metadata: RwLock::new(None),
-        }
+        })
     }
 
-    /// The portal serving `network`, if `proxy.auth` lists it.
     fn portal_for_network(&self, network: &str) -> Option<Portal> {
         let cfg = self.config_rx.borrow();
         let auth = cfg.proxy.auth.as_ref().filter(|a| a.covers(network))?;
@@ -225,7 +211,6 @@ impl AuthGate {
         })
     }
 
-    /// The portal whose hostname is `host`.
     fn portal_for_host(&self, host: &str) -> Option<Portal> {
         let host = normalize_host(host);
         let cfg = self.config_rx.borrow();
@@ -294,7 +279,6 @@ impl AuthGate {
             .await
     }
 
-    /// Whether `host` (a `Host` header value) is the login portal.
     pub fn is_portal_host(&self, host: &str) -> bool {
         self.portal_for_host(host).is_some()
     }
@@ -341,8 +325,6 @@ impl AuthGate {
 
     // ---- sessions and tokens (raft) ----
 
-    /// The live session for the cookie `name` on this request, if it was
-    /// issued for `host`.
     async fn session(
         &self,
         headers: &HeaderMap,
@@ -364,7 +346,6 @@ impl AuthGate {
             .await
     }
 
-    /// Stores a session and returns the cookie value naming it.
     async fn create_session(&self, record: ProxySessionRecord) -> Result<String, String> {
         let id = random_id();
         let request = RaftRequest::PutProxySession {
@@ -535,7 +516,6 @@ impl AuthGate {
 
     // ---- the portal ----
 
-    /// Answers a request for the portal hostname itself.
     pub async fn handle_portal(
         &self,
         req: &Request<Incoming>,
@@ -1018,14 +998,11 @@ impl AuthGate {
     }
 }
 
-/// A validated destination the portal may send a browser back to.
 #[derive(Debug, PartialEq, Eq)]
 struct Callback {
     scheme: String,
-    /// Authority as written (host and optional port).
     host: String,
     path_and_query: String,
-    /// The whole thing, normalized.
     url: String,
 }
 
@@ -1067,7 +1044,6 @@ fn parse_callback(raw: &str, routes: &RouteTable, network: &str) -> Option<Callb
         })
 }
 
-/// Does a session with `groups` satisfy the policy?
 fn permitted(policy: &Authenticated, groups: &[String]) -> bool {
     policy.groups.is_empty() || policy.groups.iter().any(|g| groups.contains(g))
 }
@@ -1084,7 +1060,6 @@ fn wants_redirect(req: &Request<Incoming>) -> bool {
     }
 }
 
-/// The path and query the user actually asked for.
 fn return_target(uri: &Uri) -> String {
     uri.path_and_query()
         .map(|p| p.as_str())
@@ -1241,7 +1216,6 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-/// Length-aware constant-time byte comparison, for the csrf state.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1325,7 +1299,6 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// The colours a page is drawn with.
 struct Colors {
     bg: &'static str,
     surface: &'static str,
@@ -1375,7 +1348,6 @@ fn valid_hex(value: &str) -> Option<&str> {
     (matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(value)
 }
 
-/// Dark or light text, whichever reads on `hex`.
 fn on_color(hex: &str) -> &'static str {
     let digits = hex.trim_start_matches('#');
     let expand = |i: usize| -> f32 {
@@ -1483,7 +1455,6 @@ fn callback_input(callback: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// The confirmation step for "remember this IP address".
 fn confirm_remember_page(settings: &ProxyAuthConfig, offer: &RememberOffer) -> Response<ProxyBody> {
     let skip = match &offer.callback {
         Some(cb) => format!("/start?callback={}", urlencode(cb)),

@@ -31,8 +31,6 @@ use tracing::{info, warn};
 /// looking more often than the scheduler sweeps.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Watch for migrations this node owns and run them.
-///
 /// Always spawned now, even for a node that implements no drives at boot:
 /// one added to `node.drives` later becomes a usable migration source or
 /// target as soon as the drive subsystem's live registry picks it up,
@@ -164,7 +162,6 @@ pub fn start(
     })
 }
 
-/// One migration this node has to drive.
 struct Claim {
     instance: InstanceId,
     source_node: String,
@@ -172,7 +169,6 @@ struct Claim {
     volumes: Vec<VolumeId>,
 }
 
-/// The migrations on record that `node` owns and that are not over.
 fn claimable(state: &ClusterState, node: &str) -> Vec<Claim> {
     let mut claims = Vec::new();
     for assignment in state.assignments.values() {
@@ -192,8 +188,6 @@ fn claimable(state: &ClusterState, node: &str) -> Vec<Claim> {
     claims
 }
 
-/// Volumes an instance mounts, which all move together.
-///
 /// Read back out of the stack spec rather than the assignment, which records
 /// where an instance runs but not what it holds.
 fn volumes_of(state: &ClusterState, instance: &InstanceId) -> Vec<VolumeId> {
@@ -213,7 +207,6 @@ fn volumes_of(state: &ClusterState, instance: &InstanceId) -> Vec<VolumeId> {
         .collect()
 }
 
-/// Where the target answers drive transport requests.
 fn target_addr(cfg: &ClusterConfig, target: &str) -> Option<SocketAddr> {
     let node = cfg.node(target)?;
     Some(SocketAddr::new(
@@ -222,7 +215,6 @@ fn target_addr(cfg: &ClusterConfig, target: &str) -> Option<SocketAddr> {
     ))
 }
 
-/// `InstanceControl` over the local docker daemon.
 struct DockerControl {
     node: String,
     docker: Docker,
@@ -276,13 +268,9 @@ impl InstanceControl for DockerControl {
                         message: format!("starting {instance}: {e}"),
                     });
             }
-            // The normal case: the migration is driven by the source, and the
-            // container has never existed on the target, so there is nothing
-            // here to start. `Switching` has already pointed the assignment at
-            // the target, and the target's own reconcile loop creates and
-            // starts it on its next sweep, the same way it would for any other
-            // instance it has been given. There is no rpc for starting a
-            // container on another node, and adding one would duplicate that.
+            // The migration is driven by the source and the container never existed on
+            // the target: `Switching` already pointed the assignment there, so the target's
+            // own reconcile loop creates it. There is no rpc to start a remote container.
             info!(
                 instance = %instance,
                 node = %node,

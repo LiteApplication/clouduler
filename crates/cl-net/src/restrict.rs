@@ -32,13 +32,10 @@ use ipnet::Ipv4Net;
 
 use crate::iptables::{ChainSpec, IptablesPlan, Jump};
 
-/// The `filter` chain [`forward_plan`] fills.
 pub const FORWARD_CHAIN: &str = "CLDR-ALLOW";
 
-/// The `nat` chain [`redirect_plan`] fills.
 pub const REDIRECT_CHAIN: &str = "CLDR-ALLOW-NAT";
 
-/// One destination a restricted stack may reach by address and port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PortGrant {
     pub protocol: Protocol,
@@ -60,10 +57,8 @@ impl PortGrant {
     }
 }
 
-/// A stack whose traffic is restricted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Restriction {
-    /// The overlay subnet its containers sit on.
     pub subnet: Ipv4Net,
     /// Every overlay subnet of the same stack. Traffic inside the stack is
     /// always allowed, on any port.
@@ -92,8 +87,6 @@ pub struct WanGrant {
     pub ports: Option<(Protocol, PortRange)>,
 }
 
-/// A stack with an `allowed` list on an egress, wireguard or nat network.
-///
 /// The bridge of such a network is shared by every stack on it, so the stack
 /// is told apart by the addresses its own containers hold on that bridge
 /// (`sources`) rather than by a subnet.

@@ -17,15 +17,12 @@ use arc_swap::ArcSwap;
 use cl_config::{Middleware, RedirectRegex};
 use ipnet::IpNet;
 
-/// Per-route proxy behaviour that is not about matching or backend choice.
-///
-/// Split out from `Route` so adding a knob does not mean touching every
-/// `Route::new` call site, and so the defaults live in exactly one place.
+/// Per-route proxy behaviour that is not about matching or backend choice,
+/// split out of `Route` so the defaults live in one place.
 #[derive(Debug, Clone, Default)]
 pub struct RouteOptions {
     /// Reject a request body larger than this with 413. `None` is unlimited.
     pub max_body_size: Option<u64>,
-    /// Allow `Upgrade` requests (websockets) through.
     pub websockets: bool,
     /// Forward the client's `Host` rather than rewriting it to the backend.
     pub preserve_host: bool,
@@ -148,10 +145,8 @@ impl Route {
         }
     }
 
-    /// The route's `redirect_regex` middleware, compiled and cached on first
-    /// call. `None` when the route carries no such middleware or its pattern
-    /// fails to compile (already validated at parse time in `cl-config`, so
-    /// that should never actually happen here).
+    /// The `redirect_regex` middleware, compiled and cached on first call. `None`
+    /// when absent or the pattern fails to compile (validated in `cl-config`).
     pub fn redirect_regex(&self) -> Option<(&regex::Regex, &RedirectRegex)> {
         self.redirect_regex
             .get_or_init(|| {
@@ -191,7 +186,6 @@ impl Route {
         &self.backends
     }
 
-    /// Round robin pick, ignoring stickiness.
     fn next_backend(&self) -> Option<SocketAddr> {
         if self.backends.is_empty() {
             return None;
@@ -233,7 +227,6 @@ pub struct Picked {
     pub set_cookie: Option<String>,
 }
 
-/// The name of the cookie used to pin a client to a backend.
 pub const STICKY_COOKIE: &str = "cl_sticky";
 
 /// The immutable snapshot readers see. Rebuilt wholesale on reload.
@@ -260,7 +253,6 @@ impl SharedRoutes {
         self.0.store(None);
     }
 
-    /// The current table, `None` while the proxy is off.
     pub fn get(&self) -> Option<Arc<RouteTable>> {
         self.0.load_full()
     }
@@ -279,14 +271,11 @@ impl RouteTable {
         }
     }
 
-    /// Atomically replace the whole table.
     pub fn reload(&self, routes: Vec<Route>) {
         self.snapshot.store(Arc::new(build(routes)));
     }
 
-    /// Every route currently published, exact and wildcard alike. Used by the
-    /// health prober, which has to walk the whole table rather than look up
-    /// one request's route.
+    /// Every route currently published, exact and wildcard alike, for the health prober.
     pub fn all(&self) -> Vec<Arc<Route>> {
         let snap = self.snapshot.load();
         snap.exact
@@ -307,7 +296,6 @@ impl RouteTable {
         routes
     }
 
-    /// Find the best matching route for a host and path.
     pub fn lookup(&self, host: &str, path: &str) -> Option<Arc<Route>> {
         let snap = self.snapshot.load();
         let host = host.split(':').next().unwrap_or(host);

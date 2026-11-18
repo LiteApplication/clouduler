@@ -9,11 +9,9 @@ use crate::settings::Severity;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    /// First message for a stateful alert.
     Opened,
     /// Already open, got worse. `previous` is what was sent before.
     Escalated { previous: Severity },
-    /// No longer happening.
     Resolved,
     /// A one-shot event with no recovery (`stack.deployed`, `log.match`).
     Event,
@@ -22,7 +20,6 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Link {
     pub label: String,
-    /// Absolute URL.
     pub url: String,
 }
 
@@ -50,7 +47,6 @@ pub struct AlertMessage {
     pub node: Option<String>,
     /// Unix seconds the alert first opened (or the event happened).
     pub opened_at: i64,
-    /// Unix seconds of this transition.
     pub at: i64,
     /// How many times a repeating event fired while this alert was open.
     pub count: u32,
@@ -71,13 +67,11 @@ pub enum Body {
     Digest {
         alerts: Vec<AlertMessage>,
     },
-    /// From the "Send test" button.
     Test,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Notification {
-    /// `cluster.name`, shown as the sender.
     pub cluster: String,
     /// Base URL of the UI, no trailing slash, for the footer and the test.
     pub ui_url: Option<String>,

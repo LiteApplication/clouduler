@@ -28,7 +28,6 @@ use cl_raft::node::ClusterNode;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// How often the views are rebuilt and the listeners reconciled.
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long to wait before retrying a bind that failed, e.g. an address this
@@ -69,7 +68,6 @@ async fn run(
     // live config, so enabling, disabling or retargeting the server needs no
     // restart.
     let mut listeners: HashMap<SocketAddr, JoinHandle<()>> = HashMap::new();
-    // The upstream the running listeners forward to; a change restarts them.
     let mut upstream: Vec<IpAddr> = Vec::new();
     let mut ticker = tokio::time::interval(RELOAD_INTERVAL);
 
@@ -153,7 +151,6 @@ async fn run(
     }
 }
 
-/// The segment subnet of every container network the server answers for.
 fn segments_of(cfg: &ClusterConfig, allocations: &Allocations) -> Vec<(String, ipnet::Ipv4Net)> {
     cfg.container_dns_networks()
         .filter_map(|(name, _)| {
@@ -164,7 +161,6 @@ fn segments_of(cfg: &ClusterConfig, allocations: &Allocations) -> Vec<(String, i
         .collect()
 }
 
-/// This node's address on every network the server listens on.
 fn listen_addrs(
     cfg: &ClusterConfig,
     allocations: &Allocations,

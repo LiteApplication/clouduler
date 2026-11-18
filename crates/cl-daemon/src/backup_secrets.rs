@@ -10,20 +10,14 @@ use cl_raft::state::{ClusterState, Request};
 use cl_secret::{ClusterKey, Sealed};
 use uuid::Uuid;
 
-/// A fresh, high-entropy repo password: two random UUIDs concatenated, since
-/// this workspace has no other dependency on a password-generation crate and
-/// a UUIDv4's 122 random bits (x2) is far more entropy than restic's own
-/// repository encryption needs.
+/// A fresh high-entropy repo password: two random UUIDs concatenated.
 fn generate_password() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-/// Ensures `name` exists as a sealed secret, generating and submitting a
-/// fresh password under it if it doesn't. Idempotent: a second caller racing
-/// this (two nodes both about to run against the same destination) just seals
-/// a password that never gets used, since `PutSecret` doesn't reject an
-/// overwrite - see the doc comment on `open_password` about why the *reader*
-/// treats "we sealed one nobody else picked" as harmless.
+/// Ensures `name` exists as a sealed secret, generating one if not. A second
+/// caller racing this just seals a password that never gets used (`PutSecret`
+/// does not reject overwrites); see `open_password` for why that is harmless.
 pub async fn ensure_password_secret(
     node: &ClusterNode,
     key: &ClusterKey,

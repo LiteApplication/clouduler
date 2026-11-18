@@ -3,11 +3,8 @@
 //! side (`exports`), and a hand-built `mount(2)` client on every other
 //! implementing node (`mount`). No FUSE, no bespoke wire protocol.
 //!
-//! `exports` manages this node's `exportfs` entries when it is a
-//! `served_by` candidate. `mount` owns the lifecycle of the NFS mounts
-//! every other implementing node makes: mounting on demand per volume,
-//! unmounting when no longer needed, failing a mount over when the active
-//! server changes, and detecting and repairing an unhealthy mount.
+//! `exports` manages this node's `exportfs` entries when it is a `served_by`
+//! candidate; `mount` owns the client mounts (on demand, failover, repair).
 
 pub mod exports;
 pub mod failback;

@@ -19,7 +19,6 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use ipnet::Ipv4Net;
 
-/// The hosts one network's `allowed` list names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostAllow {
     exact: HashSet<String>,
@@ -48,7 +47,6 @@ impl HostAllow {
         allow
     }
 
-    /// Is `host` (a `Host` header value, port allowed) on the list?
     pub fn permits(&self, host: &str) -> bool {
         let host = strip_port(host).trim_end_matches('.');
         if host.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -141,7 +139,6 @@ impl PeerPolicies {
         self.internal.store(Arc::new(subnets));
     }
 
-    /// Is the TCP peer a container or node of this cluster?
     pub fn is_internal(&self, peer: IpAddr) -> bool {
         let peer = peer.to_canonical();
         self.internal.load().iter().any(|n| n.contains(&peer))

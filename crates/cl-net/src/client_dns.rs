@@ -27,7 +27,6 @@ use tokio::sync::RwLock;
 use crate::dns::{build_split_dns_forwarder, RECORD_TTL};
 use crate::error::{NetError, Result};
 
-/// One piece of an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewAnswer {
     A(Ipv4Addr),
@@ -36,7 +35,6 @@ pub enum ViewAnswer {
     Cname(String),
 }
 
-/// A hostname and what a view answers for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewRecord {
     /// Absolute hostname, trailing dot optional.
@@ -44,7 +42,6 @@ pub struct ViewRecord {
     pub answers: Vec<ViewAnswer>,
 }
 
-/// What clients of one network see.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
     pub records: Vec<ViewRecord>,
@@ -135,7 +132,6 @@ impl ZoneHandler for ViewZone {
         _request_info: Option<&RequestInfo<'_>>,
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        // Every query arrives through `search`, which has the client address.
         LookupControlFlow::Skip
     }
 
@@ -177,7 +173,6 @@ impl ZoneHandler for ViewZone {
     }
 }
 
-/// The client-facing resolver. Views can be replaced under a running server.
 pub struct ClientDns {
     zone: Arc<ViewZone>,
 }
@@ -196,8 +191,7 @@ impl ClientDns {
         })
     }
 
-    /// Replace every view and the client classifier in one step, so a query
-    /// never sees a new classifier with old views.
+/// Replace views and classifier together so no query sees a mix.
     pub async fn reload(&self, views: &BTreeMap<String, View>, classify: Classifier) -> Result<()> {
         let views = views
             .iter()

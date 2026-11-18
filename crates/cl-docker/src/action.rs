@@ -18,17 +18,16 @@ use crate::error::{classify, DockerError, Result};
 /// see it as a second copy of the instance.
 pub const LABEL_ACTION_HOLD: &str = "clouduler.action-hold";
 
-/// How long after creation a hold still counts. A crashed daemon can leave
-/// a container that was created but never started or removed, and that must
-/// not keep its service down forever.
+/// How long after creation a hold still counts: a crashed daemon can leave a
+/// created-but-never-started container that must not keep its service down.
 const HOLD_MAX_AGE_SECS: i64 = 15 * 60;
 
 impl Docker {
-    /// Create (not start) a container named `name` that runs `cmd` as a copy
-    /// of `main`: same image, environment, mounts, devices, limits, network
-    /// and fixed address, but no published ports, no restart policy, no
-    /// healthcheck and the image's entrypoint cleared so `cmd` is the whole
-    /// command line. Only the primary network is carried over.
+    /// Create (not start) a container named `name` that runs `cmd` as a copy of
+    /// `main`: same image, environment, mounts, devices, limits, network and
+    /// fixed address, but no published ports, restart policy or healthcheck, and
+    /// the entrypoint cleared so `cmd` is the whole command. Only the primary
+    /// network is carried over.
     pub async fn create_action_container(
         &self,
         main: &str,

@@ -7,7 +7,6 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde_json::Value;
 
-/// Why a backend could not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
     #[error("{0}")]
@@ -19,11 +18,8 @@ pub enum BackendError {
 pub type BackendResult<T> = Result<T, BackendError>;
 
 pub trait ImageBackend: Send + Sync + 'static {
-    /// `GET /images/{name}/json`.
     fn inspect<'a>(&'a self, name: &'a str) -> BoxFuture<'a, BackendResult<Value>>;
-    /// `GET /images/{name}/history`.
     fn history<'a>(&'a self, name: &'a str) -> BoxFuture<'a, BackendResult<Value>>;
-    /// `GET /images/json`.
     fn list(&self) -> BoxFuture<'_, BackendResult<Value>>;
     /// `GET /images/{name}/get`: a `docker save` tar, streamed. Resolved
     /// before the first byte so a missing image is a 404, not a cut stream.
@@ -35,7 +31,6 @@ pub trait ImageBackend: Send + Sync + 'static {
     fn pull<'a>(&'a self, reference: &'a str) -> BoxFuture<'a, BackendResult<()>>;
 }
 
-/// The node's own docker daemon.
 pub struct LocalBackend {
     docker: cl_docker::Docker,
 }
@@ -74,8 +69,8 @@ impl ImageBackend for LocalBackend {
     ) -> BoxFuture<'a, BackendResult<BoxStream<'static, BackendResult<Bytes>>>> {
         use futures::StreamExt;
         Box::pin(async move {
-            // The engine answers 200 and then fails mid-stream for an unknown
-            // image, so check it exists first to give a clean 404.
+            // The engine answers 200 then fails mid-stream for an unknown image;
+            // check first for a clean 404.
             self.docker.inspect_image_json(name).await?;
             Ok(self
                 .docker

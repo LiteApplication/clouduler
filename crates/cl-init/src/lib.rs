@@ -1,17 +1,15 @@
 //! `clouduler init`: set this machine up as a node.
 //!
-//! Two shapes of the same walk. Run bare it asks about each step, every one of
-//! which can be skipped by pressing enter. Given `--yes` and enough arguments
-//! it asks nothing, which is what a provisioning script wants:
+//! Run bare it asks about each step (enter skips). With `--yes` and enough
+//! arguments it asks nothing, for provisioning scripts:
 //!
 //! ```text
 //! clouduler init --yes --join 10.10.0.1 --token-file /run/cl.token --role worker
 //! ```
 //!
-//! What init writes is the config file and, optionally, the systemd unit.
-//! Everything in that file is also editable from the web ui afterwards, and an
-//! edit there comes back down to this file through raft, so init is a starting
-//! point rather than the only way to change any of it.
+//! init writes the config file and optionally the systemd unit. Later edits
+//! from the web ui come back to this file through raft, so init is only a
+//! starting point.
 
 pub mod detect;
 pub mod docker;
@@ -160,13 +158,10 @@ pub enum DriveModeArg {
     Served,
 }
 
-/// Where the service runs the daemon from. init copies itself here rather than
-/// leaving the unit pointing at wherever the binary happened to be downloaded.
+/// Where the service runs the daemon from; init copies itself here.
 const DEFAULT_BINARY_PATH: &str = "/usr/bin/clouduler";
 
-/// Offered as the answer to the data directory question. It matches
-/// `cl_config`'s own default, so taking it writes the same path the daemon
-/// would have picked anyway, only now visibly and created up front.
+/// Default for the data directory question, matching `cl_config`'s own default.
 const DEFAULT_DATA_DIR: &str = "/var/lib/clouduler";
 
 pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
@@ -236,7 +231,6 @@ fn choose_mode<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -> Result<Mode> 
     }
 }
 
-/// Build the config for a cluster that starts here.
 fn create_cluster<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     args: &InitArgs,
@@ -279,7 +273,7 @@ fn create_cluster<R: BufRead, W: Write>(
             "cloud.example.com"
         }),
     )?;
-    let web_port = ask_parsed(prompt, args.web_port, "port the web ui listens on", 8443)?;
+    let web_port = ask_parsed(prompt, args.web_port, "port the web ui listens on", &8443)?;
 
     prompt.heading("this node")?;
     let ip = ask_ip(prompt, args.ip, subnet)?;
@@ -288,18 +282,18 @@ fn create_cluster<R: BufRead, W: Write>(
         prompt,
         args.rpc_port,
         "node to node rpc port",
-        DEFAULT_RPC_PORT,
+        &DEFAULT_RPC_PORT,
     )?;
     node.data_dir = ask_optional_or(
         prompt,
-        args.node_data_dir.clone().map(path_string),
+        args.node_data_dir.as_deref().map(path_string),
         "directory for this node's database and working files",
         Some(DEFAULT_DATA_DIR),
     )?
     .map(PathBuf::from);
     node.docker_data_dir = ask_optional_or(
         prompt,
-        args.docker_data_dir.clone().map(path_string),
+        args.docker_data_dir.as_deref().map(path_string),
         "directory for docker's own data (images, containers), blank to leave docker's default",
         None,
     )?
@@ -327,7 +321,6 @@ fn create_cluster<R: BufRead, W: Write>(
     })
 }
 
-/// Fetch the cluster's config, add this node to it, and push it back.
 async fn join_cluster<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     args: &InitArgs,
@@ -380,18 +373,18 @@ async fn join_cluster<R: BufRead, W: Write>(
         prompt,
         args.rpc_port,
         "node to node rpc port",
-        DEFAULT_RPC_PORT,
+        &DEFAULT_RPC_PORT,
     )?;
     node.data_dir = ask_optional_or(
         prompt,
-        args.node_data_dir.clone().map(path_string),
+        args.node_data_dir.as_deref().map(path_string),
         "directory for this node's database and working files, blank to use the cluster's",
         None,
     )?
     .map(PathBuf::from);
     node.docker_data_dir = ask_optional_or(
         prompt,
-        args.docker_data_dir.clone().map(path_string),
+        args.docker_data_dir.as_deref().map(path_string),
         "directory for docker's own data (images, containers), blank to leave docker's default",
         None,
     )?
@@ -431,9 +424,8 @@ fn read_token<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>, args: &InitArgs) 
 
 /// Ask which drives this node implements and where they live locally.
 ///
-/// `known` lists the drives the cluster already has; when it is non empty a
-/// joining node may only pick from it, because a drive is a cluster wide
-/// namespace and is created from the ui, not from a node.
+/// A non-empty `known` restricts a joining node to it: drives are a cluster
+/// wide namespace created from the ui.
 fn ask_drives<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     known: &[&str],
@@ -480,11 +472,8 @@ fn drives_from_args(args: &[String]) -> Result<BTreeMap<String, PathBuf>> {
         .collect::<Result<BTreeMap<_, _>>>()
 }
 
-/// Create the directory the daemon keeps its database and working files in.
-///
-/// The daemon would create it on first launch anyway, but by then it is running
-/// under systemd where a permission error is a restart loop in the journal
-/// rather than a line on the terminal of the person doing the install.
+/// Create the directory for the daemon's database and working files. Doing it
+/// here turns a permission error into a terminal line, not a systemd restart loop.
 fn setup_data_directory<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     config: &ClusterConfig,
@@ -511,8 +500,7 @@ fn setup_data_directory<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Create the directories the declared drives are mapped to, so the first
-/// container needing one does not fail on a missing path.
+/// Create the directories the declared drives map to.
 fn setup_drive_directories<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     config: &ClusterConfig,
@@ -536,13 +524,10 @@ fn setup_drive_directories<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Point dockerd's `data-root` at the directory configured for this node, if
-/// one was given.
+/// Point dockerd's `data-root` at the configured directory, if any.
 ///
-/// Only the config file is written and the target directory created; docker
-/// itself is not restarted here (it may not even be installed yet, and this
-/// runs unprivileged as often as not). An existing `/var/lib/docker` is not
-/// moved: on a node docker has already run on, that is the operator's call.
+/// Only the config file is written and the target created: docker may not be
+/// installed yet, and an existing `/var/lib/docker` is the operator's call.
 fn setup_docker_data_dir<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     config: &ClusterConfig,
@@ -585,13 +570,10 @@ fn setup_docker_data_dir<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Advisory only, like the rest of init: a served drive's data is reachable
-/// from any node over the internal network (see `clouduler::drives`), so any
-/// node in a cluster with at least one served drive might end up serving or
-/// mounting one, whether or not this node declares one itself. Not blocking
-/// init over it would take out a node that is otherwise fine for everything
-/// except served drives, which is a normal thing for a node to be (e.g. a
-/// worker with no local storage at all).
+/// Advisory only: any node in a cluster with a served drive might end up
+/// serving or mounting one (see `clouduler::drives`), declared here or not.
+/// Blocking would take out nodes that are fine otherwise, e.g. a worker with
+/// no local storage.
 fn check_nfs_availability<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     config: &ClusterConfig,
@@ -606,9 +588,8 @@ fn check_nfs_availability<R: BufRead, W: Write>(
              Install and enable the kernel NFS server (nfs-kernel-server/nfs-utils) before it needs to serve or mount one"
         ))?;
     }
-    // Any node might end up mounting a served drive it never declared
-    // itself (see `clouduler::drives`), so the client-side check applies
-    // just as broadly as the server-side one above.
+    // Any node might mount a served drive it never declared (see
+    // `clouduler::drives`), so the client-side check applies as broadly.
     if let Err(e) = cl_drive::client_available() {
         prompt.say(&format!(
             "warning: this cluster has a served drive, but this node ({node_name}) cannot mount one yet: {e}"
@@ -617,11 +598,9 @@ fn check_nfs_availability<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Advisory, like `check_nfs_availability`: any node running a stack with
-/// its own network needs `ethtool` the moment a container lands on that
-/// network's overlay bridge (see `cl_net::vxlan::disable_tx_checksum_offload`),
-/// not just ones that happen to declare a drive — so this isn't gated on the
-/// cluster config the way the NFS check is.
+/// Advisory: any node running a stack with its own network needs `ethtool` once
+/// a container lands on its overlay bridge (see
+/// `cl_net::vxlan::disable_tx_checksum_offload`), so this is not gated on config.
 fn check_ethtool_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -> Result<()> {
     if !cl_net::ethtool_available() {
         prompt.say(
@@ -632,10 +611,8 @@ fn check_ethtool_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -
     Ok(())
 }
 
-/// Advisory, like `check_ethtool_availability`: whether any backup target
-/// ends up enabled isn't known yet at `init` time (it's set up later, from
-/// the web ui or cli), so this checks unconditionally rather than gating on
-/// existing cluster state the way `daemon::run` does once it can read one.
+/// Advisory: whether a backup target gets enabled is unknown at `init` time, so
+/// this checks unconditionally.
 fn check_restic_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -> Result<()> {
     if !cl_restic::dependency::restic_available() {
         prompt.say(
@@ -648,15 +625,12 @@ fn check_restic_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) ->
 
 /// Put the cluster key in place before the daemon first starts.
 ///
-/// Every node to node connection (raft, forwarded writes, the cli) proves it
-/// holds the cluster key, so a joining node without it is refused by every
-/// peer and could never be told the key through raft. The key therefore
-/// arrives here, over the admin-authenticated https api that already accepted
-/// this node's join: the cluster wraps it for this node's own keypair
-/// (`join::Peer::fetch_cluster_key`) and only that wrapped copy crosses the
-/// wire. A copy the operator already holds (`--key-file`, or the prompt) works
-/// too. The founding node of a new cluster has neither, the daemon generates
-/// the key there.
+/// Every node to node connection proves it holds the cluster key, so a joining
+/// node without it is refused by every peer and cannot be told it through raft.
+/// It arrives over the admin-authenticated https api that accepted the join,
+/// wrapped for this node's keypair (`join::Peer::fetch_cluster_key`). A copy the
+/// operator holds (`--key-file`, or the prompt) works too. A founding node has
+/// neither; the daemon generates the key there.
 async fn setup_secret_key<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     args: &InitArgs,
@@ -697,7 +671,7 @@ async fn setup_secret_key<R: BufRead, W: Write>(
     )?;
 
     let source = match (&args.key_file, peer) {
-        (Some(file), _) => Some(path_string(file.clone())),
+        (Some(file), _) => Some(path_string(file)),
         (None, Some(_)) => {
             let options = [
                 "fetch it from the cluster, wrapped so only this node can open it",
@@ -799,7 +773,7 @@ fn setup_systemd<R: BufRead, W: Write>(
             prompt.say(&format!(
                 "skipped. Later: sudo {} init --force",
                 std::env::current_exe()
-                    .map(path_string)
+                    .map(|exe| path_string(&exe))
                     .unwrap_or_else(|_| "clouduler".into())
             ))?;
             return Ok(());
@@ -812,7 +786,7 @@ fn setup_systemd<R: BufRead, W: Write>(
     let current = std::env::current_exe().context("finding this binary's path")?;
     let binary = PathBuf::from(prompt.ask(
         "path the service should run",
-        Some(&path_string(PathBuf::from(DEFAULT_BINARY_PATH))),
+        Some(&path_string(Path::new(DEFAULT_BINARY_PATH))),
     )?);
 
     // Put the binary where the unit expects it before the unit exists, so the
@@ -904,9 +878,8 @@ fn write_config(path: &Path, config: &ClusterConfig) -> Result<()> {
     std::fs::write(path, yaml).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Ask for this node's internal address, defaulting to the one the routing
-/// table says this machine would use to reach that subnet. That default is
-/// usually right and is the whole reason `--ip` is optional.
+/// Ask for this node's internal address, defaulting to the one the routing table
+/// would use to reach that subnet.
 fn ask_ip<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     given: Option<IpAddr>,
@@ -958,7 +931,7 @@ fn ask_parsed<T, R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     given: Option<T>,
     question: &str,
-    default: T,
+    default: &T,
 ) -> Result<T>
 where
     T: std::str::FromStr + std::fmt::Display,
@@ -973,7 +946,7 @@ where
         .map_err(|e| anyhow::anyhow!("{question}: {answer} does not parse: {e}"))
 }
 
-fn path_string(path: PathBuf) -> String {
+fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 

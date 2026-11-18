@@ -5,20 +5,18 @@ use std::path::Path;
 
 use cl_raft::state::{BackupDestination, BackupDestinationKind};
 
-/// A resolved restic repository target: the `-r`/`RESTIC_REPOSITORY` string,
-/// plus any extra environment restic needs beyond the password (every
-/// destination needs one regardless of kind - the runner supplies that
-/// separately from the sealed secret, see `restic::ResticRepo::new`).
+/// A resolved restic repository target: the `-r`/`RESTIC_REPOSITORY` string plus
+/// any extra environment beyond the password (supplied separately, see
+/// `restic::ResticRepo::new`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRepo {
     pub repository: String,
     pub extra_env: Vec<(String, String)>,
 }
 
-/// The repository string for data already local to this node - either
-/// genuinely a `NodeLocal` destination on the node holding the drive, or
-/// staged there by a one-off sync (see the crate doc comment). `local_path`
-/// is that on-disk directory.
+/// The repository string for data already local to this node: a `NodeLocal`
+/// destination on the holding node, or data staged by a one-off sync (see the
+/// crate doc comment).
 pub fn local_repo(local_path: &Path) -> ResolvedRepo {
     ResolvedRepo {
         repository: format!("local:{}", local_path.display()),
@@ -26,9 +24,9 @@ pub fn local_repo(local_path: &Path) -> ResolvedRepo {
     }
 }
 
-/// The repository string for a destination reached directly over the
-/// network: `Ssh` via restic's own `sftp:` backend, or `S3`. A `NodeLocal`
-/// destination that already IS this node falls back to `local_repo`.
+/// The repository string for a destination reached over the network (`Ssh` via
+/// restic's `sftp:` backend, or `S3`). A `NodeLocal` destination that is this
+/// node falls back to `local_repo`.
 pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
     match &destination.kind {
         BackupDestinationKind::NodeLocal { path, .. } => local_repo(Path::new(path)),
@@ -61,22 +59,19 @@ pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
     }
 }
 
-/// Extra `restic` arguments an `Ssh` destination needs when its port isn't
-/// the default 22 - restic's `sftp:` shorthand has no port syntax, so a
-/// non-default port has to be routed through `-o sftp.command`.
+/// Extra `restic` arguments an `Ssh` destination needs on a non-default port:
+/// the `sftp:` shorthand has no port syntax, so it goes through `-o sftp.command`.
 pub fn ssh_command_args(destination: &BackupDestination) -> Vec<String> {
     ssh_command_args_with_key(destination, None)
 }
 
-/// Like `ssh_command_args`, additionally pointing ssh at the private key
-/// `identity` (a `0600` file staged from the destination's sealed
-/// credentials) with `-i`. Without an identity and on the default port the
-/// shorthand needs nothing, so the result is empty.
+/// Like `ssh_command_args`, additionally passing the private key `identity` (a
+/// `0600` file staged from sealed credentials) with `-i`. Empty on the default
+/// port without an identity.
 ///
-/// `user` and `host` land in a command line restic splits on whitespace, so
-/// they must already have passed `cl_raft::backup_validate` (no leading dash,
-/// no whitespace) - `credentials::build_repo` enforces that before calling
-/// this.
+/// `user` and `host` land in a command line restic splits on whitespace, so they
+/// must already have passed `cl_raft::backup_validate`;
+/// `credentials::build_repo` enforces that.
 pub fn ssh_command_args_with_key(
     destination: &BackupDestination,
     identity: Option<&Path>,

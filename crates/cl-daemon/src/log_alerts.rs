@@ -76,7 +76,6 @@ impl Compiled {
         Some(Self { set, rules: kept })
     }
 
-    /// Indexes of the rules `line` matches on `stream`.
     pub fn hits(&self, stream: cl_docker::LogStream, line: &str) -> Vec<usize> {
         if !self.set.is_match(line) {
             return Vec::new();
@@ -96,7 +95,6 @@ impl Compiled {
     }
 }
 
-/// What a rule has done lately on one container.
 #[derive(Default)]
 struct RuleState {
     last_raised: Option<Instant>,
@@ -111,7 +109,6 @@ struct Pending {
     earlier: u32,
 }
 
-/// What `RuleState::on_match` decided.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Counted only (cooldown), or added to a pending excerpt.
@@ -172,7 +169,6 @@ fn cut(line: &str) -> &str {
     &line[..end]
 }
 
-/// At most `MAX_PER_MINUTE` passes per rolling minute.
 #[derive(Default)]
 struct Limiter {
     sent: VecDeque<Instant>,
@@ -213,7 +209,6 @@ fn ago(d: Duration) -> String {
     }
 }
 
-/// Everything a follower needs to build a signal.
 #[derive(Clone)]
 struct Target {
     stack: String,
@@ -253,7 +248,6 @@ fn build_signal(t: &Target, idx: usize, rule: &LogRule, p: Pending) -> AlertSign
     s
 }
 
-/// Follow one container until its stream ends or the task is aborted.
 async fn follow(
     docker: Docker,
     t: Target,
@@ -271,7 +265,7 @@ async fn follow(
         tail: Tail::Lines(0),
         since: None,
     };
-    let mut stream = Box::pin(docker.logs(&t.container, opts));
+    let mut stream = Box::pin(docker.logs(&t.container, &opts));
     loop {
         let wake = states
             .iter()
@@ -333,7 +327,6 @@ impl Drop for Follower {
     }
 }
 
-/// The rules to watch on a container, or none.
 pub fn watched_rules(stack: &StackFile, service: &str) -> Vec<LogRule> {
     let alerts: StackAlerts = stack.effective_alerts(service);
     if alerts.enabled {
@@ -347,7 +340,6 @@ fn fingerprint(rules: &[LogRule]) -> String {
     format!("{rules:?}")
 }
 
-/// Run until aborted. Call once per node.
 pub async fn run(cluster: Arc<ClusterNode>, docker: cl_docker::DockerHandle, node: String) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AlertSignal>(QUEUE);
     let sender = cluster.clone();

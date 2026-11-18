@@ -21,7 +21,6 @@ use std::process::{Command, Stdio};
 
 use crate::error::{NetError, Result};
 
-/// One chain's complete desired contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainSpec {
     /// `filter` or `nat`.
@@ -40,13 +39,11 @@ impl ChainSpec {
         }
     }
 
-    /// Append a rule given as separate arguments.
     pub fn push(&mut self, rule: &[&str]) {
         self.rules.push(rule.join(" "));
     }
 }
 
-/// Where a chain gets called from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Jump {
     pub table: &'static str,
@@ -76,14 +73,12 @@ impl Jump {
         }
     }
 
-    /// Require this jump to sit ahead of the jump to `chain` in its parent.
     pub fn before(mut self, chain: &str) -> Self {
         self.before = Some(chain.to_string());
         self
     }
 }
 
-/// Chains to fill and the jumps that reach them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IptablesPlan {
     pub chains: Vec<ChainSpec>,
@@ -226,8 +221,6 @@ fn table_args(table: &str, args: &[&str]) -> Vec<String> {
     out
 }
 
-/// Apply a plan: fill every chain atomically, then make sure each jump is in
-/// place. Safe to call every reconcile tick.
 pub fn apply_plan(plan: &IptablesPlan) -> Result<()> {
     if !plan.chains.is_empty() {
         iptables_restore(&restore_payload(&plan.chains))?;
@@ -247,12 +240,10 @@ fn apply_jump(jump: &Jump) -> Result<()> {
     Ok(())
 }
 
-/// Run `iptables -w <args>`.
 pub fn run_iptables(args: &[String]) -> Result<()> {
     iptables_output(args).map(|_| ())
 }
 
-/// Run `iptables -w <args>` and return its stdout.
 pub fn iptables_output(args: &[String]) -> Result<String> {
     let output = Command::new("iptables")
         .arg("-w")
@@ -316,7 +307,6 @@ fn iptables_restore(payload: &str) -> Result<()> {
     }
 }
 
-/// Names of the user chains in `-S` output (`-N NAME` lines).
 pub fn parse_chain_names(listing: &str) -> Vec<String> {
     listing
         .lines()
@@ -345,7 +335,6 @@ pub fn parse_jump_deletions(listing: &str, chain: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// User chains in `table`, from the live ruleset.
 pub fn list_chains(table: &str) -> Result<Vec<String>> {
     Ok(parse_chain_names(&iptables_output(&table_args(
         table,

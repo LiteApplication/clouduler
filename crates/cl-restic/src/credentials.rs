@@ -1,8 +1,7 @@
-//! Opening a destination's sealed password/credentials out of cluster state
-//! and staging them for one restic invocation. Shared by the daemon's backup
-//! runner, restore, and the api's snapshot listing - everything that has to
-//! talk to a repository builds its `ResticRepo` here, so S3 keys and ssh
-//! identities are always wired up the same way.
+//! Opening a destination's sealed password/credentials out of cluster state and
+//! staging them for one restic invocation. Everything that talks to a repository
+//! builds its `ResticRepo` here, so S3 keys and ssh identities are wired up the
+//! same way.
 
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -17,11 +16,9 @@ use crate::destination::{remote_repo, ssh_command_args_with_key};
 use crate::error::{ResticError, Result};
 use crate::restic::ResticRepo;
 
-/// Opens a sealed secret this destination owns. `None` if absent (a
-/// destination with no `credentials_secret`) or if it exists but this node's
-/// key cannot open it - callers should treat that the same as "no
-/// credentials available yet" rather than fail the whole run outright, since
-/// a key-propagation lag heals itself on the next run.
+/// Opens a sealed secret this destination owns. `None` if absent or if this
+/// node's key cannot open it; callers treat that as "no credentials yet" rather
+/// than failing the run, since key-propagation lag heals itself.
 pub fn open_secret(state: &ClusterState, key: &ClusterKey, name: &str) -> Option<String> {
     let entry = state.secrets.get(name)?;
     let sealed = Sealed::from_blob(entry.sealed.clone());
@@ -29,9 +26,8 @@ pub fn open_secret(state: &ClusterState, key: &ClusterKey, name: &str) -> Option
     String::from_utf8(plaintext).ok()
 }
 
-/// Deletes the file (or directory tree) it names when dropped. Every temp
-/// credential file written out of sealed cluster state is guarded by one, so
-/// it never outlives the restic invocation that needed it.
+/// Deletes the file (or directory tree) it names when dropped, so temp
+/// credential files never outlive the restic invocation.
 pub struct TempFileGuard(pub PathBuf);
 
 impl Drop for TempFileGuard {
@@ -42,8 +38,7 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Creates `dir` (and any missing parents) as `0700` and tightens `dir`
-/// itself if it already existed with looser permissions.
+/// Creates `dir` as `0700`, tightening it if it already existed looser.
 pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -53,11 +48,10 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Writes `contents` to `path` without ever exposing it: the bytes go into a
-/// fresh `0600` file created with `O_EXCL` (which also refuses a planted
-/// symlink) next to `path`, which is then renamed into place - rename
-/// replaces a symlink at `path` rather than following it. There is no moment
-/// at which the secret sits in a world-readable file, unlike
-/// `fs::write` followed by a `chmod`.
+/// fresh `0600` `O_EXCL` file (which also refuses a planted symlink) next to
+/// `path`, then are renamed into place (rename replaces a symlink rather than
+/// following it). Unlike `fs::write` plus `chmod`, the secret is never
+/// world-readable.
 pub fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -120,12 +114,10 @@ fn failed(message: impl Into<String>) -> ResticError {
 }
 
 /// Builds a ready-to-use `ResticRepo` for `destination`: opens its password
-/// (required - restic needs one regardless of backend) and credentials (if
-/// any) out of sealed cluster state and stages them as `0600` files in a
-/// fresh `0700` directory under `cred_dir` (unique per call, so two
-/// concurrent uses of one destination never delete each other's files). Keep
-/// the returned guards alive for as long as the repo is used - dropping them
-/// deletes the files.
+/// (required) and credentials (if any) from sealed state and stages them as
+/// `0600` files in a fresh `0700` directory under `cred_dir` (unique per call so
+/// concurrent uses never delete each other's files). Keep the returned guards
+/// alive while the repo is used; dropping them deletes the files.
 pub fn build_repo(
     state: &ClusterState,
     key: &ClusterKey,
@@ -256,7 +248,6 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // Only the final file is left behind, no temp files.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 

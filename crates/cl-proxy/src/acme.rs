@@ -22,11 +22,8 @@ use crate::http01::Http01Store;
 pub const LETS_ENCRYPT_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 const LETS_ENCRYPT_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
-/// How long before expiry a certificate is renewed.
 pub const RENEWAL_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// How long to wait for a DNS-01 TXT record to become visible to the CA
-/// before giving up on an authorization.
 pub const DEFAULT_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
@@ -48,8 +45,6 @@ fn acme_err(e: instant_acme::Error) -> ProxyError {
     ProxyError::Acme(e.to_string())
 }
 
-/// Loads a persisted account, or creates and persists a new one when none
-/// exists yet at `credentials_path`.
 pub async fn load_or_create_account(
     config: &AcmeConfig,
     credentials_path: &Path,
@@ -96,7 +91,6 @@ pub async fn load_or_create_account(
     Ok(account)
 }
 
-/// A freshly issued certificate.
 pub struct IssuedCertificate {
     pub chain_pem: String,
     pub key_pem: String,
@@ -104,10 +98,8 @@ pub struct IssuedCertificate {
     pub not_after: i64,
 }
 
-/// Orders a certificate covering `names` (which may include `*.domain`
-/// wildcard entries) via DNS-01, driven through `cl_dns`. Every challenge
-/// record created is cleared at the end regardless of whether issuance
-/// succeeded, so a failed order never leaves stray TXT records behind.
+/// Every challenge record created is cleared at the end, success or not, so a
+/// failed order never leaves stray TXT records behind.
 pub async fn issue_certificate(
     account: &Account,
     cf: &Cloudflare,
@@ -200,13 +192,9 @@ async fn complete_authorizations(
     Ok(())
 }
 
-/// Orders a certificate covering a single `name` via HTTP-01, answered by
-/// the plain-http listener out of `store`. Used only for a name the caller
-/// has decided is not covered by any DNS provider zone (an explicit
-/// trailing-dot stack hostname, in practice) - every other name goes through
-/// `issue_certificate`'s DNS-01 instead. As with DNS-01, every token this
-/// places in `store` is removed at the end regardless of outcome, so a
-/// failed order never leaves a stray challenge response behind.
+/// HTTP-01 variant for a name no DNS provider zone covers (an explicit
+/// trailing-dot stack hostname); the plain-http listener answers from `store`.
+/// Tokens placed in `store` are removed at the end, success or not.
 pub async fn issue_certificate_http01(
     account: &Account,
     store: &Http01Store,
@@ -283,8 +271,6 @@ fn leaf_not_after(chain_pem: &str) -> Result<i64> {
     Ok(cert.validity().not_after.timestamp())
 }
 
-/// Whether a certificate expiring at `not_after` (unix seconds) needs
-/// renewal, given `now` and the renewal window.
 pub fn needs_renewal(not_after: i64, now: i64, window: Duration) -> bool {
     not_after - now <= window.as_secs() as i64
 }
@@ -392,8 +378,6 @@ pub async fn renewal_tick(
     }
 }
 
-/// Runs `renewal_tick` on `check_interval` forever. Meant to be spawned as a
-/// background task for the life of the process.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_renewal_loop(
     node: Arc<ClusterNode>,

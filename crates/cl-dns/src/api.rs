@@ -28,7 +28,6 @@ pub enum RecordType {
     Other,
 }
 
-/// A Cloudflare DNS record, as returned by or sent to the API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
@@ -103,7 +102,6 @@ struct Zone {
     name_servers: Vec<String>,
 }
 
-/// Cloudflare API v4 client, bearer token authenticated.
 pub struct Cloudflare {
     http: reqwest::Client,
     base_url: String,
@@ -112,7 +110,6 @@ pub struct Cloudflare {
 }
 
 impl Cloudflare {
-    /// Client pointed at the real Cloudflare API.
     pub fn new(token: impl Into<String>) -> Self {
         Self::with_base_url(token, DEFAULT_BASE_URL)
     }
@@ -131,7 +128,6 @@ impl Cloudflare {
         }
     }
 
-    /// Confirms the token is valid and has the expected permissions.
     pub async fn verify_token(&self) -> Result<()> {
         let url = format!("{}/user/tokens/verify", self.base_url);
         let _: serde_json::Value = self.request(reqwest::Method::GET, &url, None::<()>).await?;
@@ -162,16 +158,12 @@ impl Cloudflare {
         Ok(zone.id)
     }
 
-    /// Resolves a zone id back to its name. Used to find the zone apex to
-    /// query authoritative nameservers directly for, when confirming a
-    /// challenge record has actually propagated rather than just landed in
-    /// Cloudflare's control plane.
+    /// Resolves a zone id back to its name, to find the apex whose authoritative
+    /// nameservers confirm a challenge record has propagated.
     pub async fn zone_name(&self, zone_id: &str) -> Result<String> {
         Ok(self.zone_info(zone_id).await?.0)
     }
 
-    /// The zone's name and the hostnames of its authoritative nameservers
-    /// (empty when Cloudflare's response omits them).
     pub async fn zone_info(&self, zone_id: &str) -> Result<(String, Vec<String>)> {
         let url = format!("{}/zones/{}", self.base_url, zone_id);
         let zone: Zone = self.request(reqwest::Method::GET, &url, None::<()>).await?;

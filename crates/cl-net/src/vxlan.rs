@@ -30,40 +30,32 @@ use crate::error::{NetError, Result};
 /// to the old 8472 unless told otherwise, so we set it explicitly everywhere.
 pub const VXLAN_PORT: u16 = 4789;
 
-/// Linux interface names are capped at `IFNAMSIZ - 1` usable bytes.
 const IFNAMSIZ_USABLE: usize = 15;
 
 /// Bytes of overhead a VXLAN encapsulation adds over an IPv4 underlay:
 /// outer IPv4 (20) + outer UDP (8) + VXLAN header (8) + inner Ethernet (14).
 pub const VXLAN_OVERHEAD_IPV4: u16 = 50;
 
-/// Same, over an IPv6 underlay: outer IPv6 (40) is bigger than IPv4.
+/// Same, over an IPv6 underlay (outer IPv6 header is 40 bytes).
 pub const VXLAN_OVERHEAD_IPV6: u16 = 70;
 
-/// Assumed when the kernel does not report an MTU for the underlay link,
-/// which should not happen but must not be a panic if it does. Also the plain
-/// (non-vxlan) MTU used for a single-node overlay's bridge, which has no
-/// underlay link to read one from.
+/// Used when the kernel reports no underlay MTU, and for a single-node overlay bridge (no underlay link).
 pub const DEFAULT_UNDERLAY_MTU: u16 = 1500;
 
-/// Deterministic interface name for a stack network's bridge.
 pub fn bridge_name(network: &str) -> String {
     short_name("clbr-", network)
 }
 
-/// Deterministic interface name for a stack network's VXLAN device.
 pub fn vxlan_name(network: &str) -> String {
     short_name("clvx-", network)
 }
 
-/// Build a `<= 15` byte interface name from a prefix and a network name. See
-/// `egress::short_name`, which every interface and chain name shares.
+/// Names are capped at 15 bytes. See `egress::short_name`.
 fn short_name(prefix: &str, name: &str) -> String {
     crate::egress::short_name(prefix, name, IFNAMSIZ_USABLE)
 }
 
-/// FNV-1a. Used for both the interface name suffix and the VNI derivation;
-/// not cryptographic, just needs to spread names across the output space.
+/// FNV-1a: spreads names across the output space for interface suffixes and VNIs.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
@@ -75,29 +67,16 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// The MAC every node gives this network's bridge.
 ///
-/// The bridge is an *anycast* gateway: every node holds the same address
-/// (`10.244.x.1`) on its own bridge, and a container talks to whichever one is
-/// local to it. But all those bridges sit in one flooded VXLAN L2 domain, so a
-/// container's ARP request for the gateway reaches every node and any of them
-/// may answer first. With a per-node MAC, the container caches whichever MAC
-/// won the race — and if that is a remote node's bridge, every packet it sends
-/// to its "gateway" is tunnelled to a machine that holds no socket and no
-/// conntrack entry for the flow, which promptly resets it. The result is a
-/// container whose connections are refused for as long as the ARP entry lives,
-/// re-rolled each time it is re-resolved: intermittent, per-container, and
-/// invisible to every health check that talks to the container directly.
+/// The bridge is an anycast gateway: every node holds the same address on its
+/// own bridge, all in one flooded VXLAN L2 domain. With per-node MACs a
+/// container could cache a remote node's bridge MAC from the ARP race, and
+/// every packet to its "gateway" would be tunnelled to a node with no
+/// conntrack entry and reset: intermittent, per-container, invisible to
+/// direct health checks. One shared MAC makes the race harmless.
 ///
-/// Giving every node the same MAC makes the race harmless — whoever answers,
-/// the answer names a MAC the container's own local bridge owns, so the frame
-/// is consumed locally and never leaves the node.
-///
-/// Derived from the name so every node computes it without coordinating, the
-/// same way `allocate_vni` does. `0x02` marks it locally administered and
-/// keeps the multicast bit clear.
-///
-/// Setting it explicitly also pins it: a bridge left to itself adopts the
-/// lowest MAC among its ports, so it silently changes as containers come and
-/// go.
+/// Derived from the name so nodes agree without coordinating (like
+/// `allocate_vni`). `0x02` marks it locally administered, multicast bit clear.
+/// Setting it also pins it: a bridge otherwise adopts its lowest port MAC.
 pub fn gateway_mac(name: &str) -> [u8; 6] {
     let hash = fnv1a(name.as_bytes()).to_be_bytes();
     [0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
@@ -123,15 +102,13 @@ fn gateway_filter_args(vxlan: &str, mac: [u8; 6]) -> Vec<String> {
     .collect()
 }
 
-/// VXLAN VNIs are 24 bit. Derive one deterministically from the network name
-/// so every node computes the same VNI without coordination; on a collision
-/// with `taken` (or the reserved 0), perturb the input with a counter and
-/// rehash until a free one is found.
+/// VXLAN VNIs are 24 bit. Derived from the network name so every node agrees;
+/// on a collision with `taken` (or reserved 0) the input is perturbed with a
+/// counter and rehashed.
 ///
-/// Only as good as `taken`: every node has to pass the same set or they
-/// disagree about the VNI. Nothing replicates such a set today, so the daemon
-/// passes none and instead refuses a network whose plain VNI collides with
-/// another's (`vni_collides`) rather than renumbering a live tunnel.
+/// Only as good as `taken`: every node must pass the same set. Nothing
+/// replicates one today, so the daemon passes none and refuses a colliding
+/// network (`vni_collides`) rather than renumbering a live tunnel.
 pub fn allocate_vni(name: &str, taken: &BTreeSet<u32>) -> u32 {
     const VNI_SPACE: u64 = 1 << 24;
     let mut attempt = 0u32;
@@ -176,12 +153,9 @@ fn vni_collides_with<'a>(
         .map(str::to_string)
 }
 
-/// Overlay device MTU: the underlay link's MTU minus VXLAN encapsulation
-/// overhead. Set this on the bridge and the VXLAN device both, or large
-/// packets get silently dropped somewhere on the path (the classic vxlan
-/// black hole: no ICMP, no reset, TCP just stalls past a certain payload
-/// size). `underlay_is_ipv6` picks which overhead to subtract, since IPv6's
-/// bigger header eats more of the budget.
+/// Overlay device MTU: underlay MTU minus encapsulation overhead. Set on the
+/// bridge and VXLAN device both, or large packets vanish (the classic vxlan
+/// black hole: no ICMP, TCP stalls past a payload size).
 pub fn overlay_mtu(underlay_mtu: u16, underlay_is_ipv6: bool) -> u16 {
     let overhead = if underlay_is_ipv6 {
         VXLAN_OVERHEAD_IPV6
@@ -203,7 +177,6 @@ pub struct FdbDiff {
     pub remove: Vec<Ipv4Addr>,
 }
 
-/// Diff the desired peer set against what's currently in the FDB.
 pub fn diff_fdb(desired: &BTreeSet<Ipv4Addr>, actual: &BTreeSet<Ipv4Addr>) -> FdbDiff {
     FdbDiff {
         add: desired.difference(actual).copied().collect(),
@@ -211,10 +184,8 @@ pub fn diff_fdb(desired: &BTreeSet<Ipv4Addr>, actual: &BTreeSet<Ipv4Addr>) -> Fd
     }
 }
 
-/// The wildcard MAC used for every point to point FDB entry.
 const WILDCARD_MAC: [u8; 6] = [0; 6];
 
-/// The interface the overlay rides on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Underlay {
     pub index: u32,
@@ -229,10 +200,7 @@ struct VxlanParams {
     link: Option<u32>,
 }
 
-/// Netlink side of the overlay: creating the bridge and VXLAN device,
-/// enslaving one to the other, and keeping the FDB in sync. Every method is
-/// idempotent, since the reconcile loop calls these on every pass regardless
-/// of whether anything actually changed.
+/// Netlink side of the overlay. Every method is idempotent; reconcile calls them every pass.
 pub struct Overlay {
     handle: Handle,
 }
@@ -242,13 +210,9 @@ impl Overlay {
         Self { handle }
     }
 
-    /// The interface carrying `address`, as (index, name, mtu).
-    ///
-    /// The VXLAN device has to be told which link to send its encapsulated
-    /// traffic out of, and its MTU has to be derived from that link's. Both come
-    /// from the node's own address on the internal network, which is the one
-    /// thing the config already pins down, rather than from an interface name
-    /// nobody should have to write into a config file.
+/// The interface carrying `address`, as (index, name, mtu). Keyed off the
+/// node's own internal address, the one thing the config already pins down,
+/// so nobody writes an interface name into config.
     pub async fn underlay_for(&self, address: Ipv4Addr) -> Result<Option<Underlay>> {
         let mut addrs = self.handle.address().get().execute();
         let mut index = None;
@@ -298,7 +262,6 @@ impl Overlay {
         Ok(Some(Underlay { index, name, mtu }))
     }
 
-    /// Index of a link by name, if it exists.
     async fn find_link(&self, name: &str) -> Result<Option<u32>> {
         let mut links = self
             .handle
@@ -315,8 +278,7 @@ impl Overlay {
         }
     }
 
-    /// Ensure the bridge exists, has the gateway address, the right MTU and
-    /// is up. Returns its link index.
+/// Ensure the bridge exists with gateway address, MTU, up. Returns its index.
     pub async fn ensure_bridge(
         &self,
         name: &str,
@@ -350,9 +312,7 @@ impl Overlay {
         Ok(index)
     }
 
-    /// The VNI, local address and underlay link a VXLAN device was created
-    /// with, or `None` if `index` is not a vxlan device (or the kernel did
-    /// not report its settings).
+/// VNI, local address and underlay link a VXLAN device was created with.
     async fn vxlan_params(&self, index: u32) -> Result<Option<VxlanParams>> {
         use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo};
         let mut links = self.handle.link().get().match_index(index).execute();
@@ -387,9 +347,7 @@ impl Overlay {
         Ok(found)
     }
 
-    /// Ensure the VXLAN device exists over `underlay_index`, enslaved to
-    /// `bridge_index`, with the given VNI, local address and MTU. Returns its
-    /// link index.
+/// Ensure the VXLAN device exists, enslaved to `bridge_index`. Returns its index.
     #[allow(clippy::too_many_arguments)]
     pub async fn ensure_vxlan(
         &self,
@@ -462,16 +420,12 @@ impl Overlay {
         Ok(index)
     }
 
-    /// Pin an already-existing bridge's MAC to the shared anycast value, if
-    /// this node has that bridge at all. A no-op when it does not.
-    ///
-    /// `ensure_bridge` covers every network this node currently runs something
-    /// on. This covers the ones it merely still *has*: when the last instance
-    /// on a network moves to another node the bridge is left behind (it is only
-    /// swept once the stack is gone cluster-wide), and a leftover bridge still
-    /// holds the anycast gateway address on the same flooded segment — so it
-    /// still answers ARP for it, and with the wrong MAC it still hijacks
-    /// containers on other nodes. See `gateway_mac`.
+/// Pin an existing bridge's MAC to the shared anycast value; no-op if absent.
+///
+/// Covers bridges this node merely still has (left behind after the last
+/// instance moved away, swept only once the stack is gone): they still answer
+/// ARP for the anycast gateway, and with the wrong MAC hijack containers on
+/// other nodes. See `gateway_mac`.
     pub async fn ensure_existing_bridge_mac(&self, name: &str) -> Result<()> {
         let Some(index) = self.find_link(name).await? else {
             return Ok(());
@@ -479,25 +433,15 @@ impl Overlay {
         self.ensure_mac(name, index, gateway_mac(name)).await
     }
 
-    /// Drop every frame this node's own bridge sends before it leaves through
-    /// the network's VXLAN device. A no-op when the device does not exist.
-    ///
-    /// Every node's bridge carries the same anycast gateway address and MAC
-    /// (see `gateway_mac`) on one flooded segment, so whatever the host itself
-    /// puts on the bridge and the bridge floods or forwards over the tunnel -
-    /// its ARP requests, its answers to a remote container's ARP for the
-    /// gateway - reaches every other node's bridge with that bridge's *own*
-    /// MAC as the source. The kernel logs each one ("received packet on
-    /// clvx-... with own address as source address"), thousands an hour per
-    /// network.
-    ///
-    /// None of them is any use over there: a container only ever needs the
-    /// gateway on its own node, and the host here cannot talk to a container
-    /// on another node through the overlay anyway, since that container's
-    /// reply to the shared gateway address is taken by its own node's bridge
-    /// (the host reaches such a container through its node's relay instead,
-    /// see `crate::relay`). Container-to-container frames carry the
-    /// containers' own MACs and are untouched.
+/// Drop every frame this node's own bridge sends out through the VXLAN
+/// device. No-op if the device does not exist.
+///
+/// The host's own ARP traffic on the shared-MAC bridge reaches other nodes
+/// with that bridge's own MAC as source; the kernel logs each one ("received
+/// packet ... with own address as source address"), thousands an hour. None
+/// is useful there: containers only need the gateway on their own node, and
+/// the host reaches remote containers through the relay (`crate::relay`).
+/// Container-to-container frames carry their own MACs and are untouched.
     pub async fn keep_gateway_frames_local(&self, bridge: &str, vxlan: &str) -> Result<()> {
         if self.find_link(vxlan).await?.is_none() {
             return Ok(());
@@ -550,9 +494,7 @@ impl Overlay {
             .map_err(|e| NetError::from_netlink(name, e))
     }
 
-    /// Add the gateway address to the bridge if it isn't already there.
-    /// Re-adding an existing address is an idempotent no-op on Linux, but we
-    /// still check first so a permission-denied dry run doesn't misreport.
+/// Checks first so a permission-denied dry run does not misreport.
     async fn ensure_address(
         &self,
         name: &str,
@@ -591,8 +533,6 @@ impl Overlay {
             .map_err(|e| NetError::from_netlink(name, e))
     }
 
-    /// Read the current point to point FDB entries (wildcard MAC, family
-    /// bridge) on a VXLAN device.
     async fn current_fdb(&self, vxlan_name: &str, vxlan_index: u32) -> Result<BTreeSet<Ipv4Addr>> {
         let mut current = BTreeSet::new();
         let mut entries = self
@@ -621,7 +561,6 @@ impl Overlay {
         Ok(current)
     }
 
-    /// Bring the FDB in line with `peers`: every other node's internal IP.
     pub async fn reconcile_fdb(
         &self,
         vxlan_name: &str,
@@ -648,16 +587,13 @@ impl Overlay {
         Ok(())
     }
 
-    /// Give this node a host port on a segment bridge: a veth pair whose peer
-    /// is enslaved to `bridge`, with `mac` on the host end and `addr`/32 on it.
-    ///
-    /// The unique MAC is what lets a router reach this specific node over
-    /// VXLAN (the bridge's anycast gateway MAC never leaves its node). Both
-    /// ends take the bridge's MTU and come up. `arp_ignore=1` on the veth and
-    /// the bridge keeps either from answering ARP for the other's address
-    /// (the bridge holds the anycast `.1`, and the veth sees the segment's
-    /// flooded ARP); `rp_filter=2` on the veth is loose reverse-path
-    /// filtering, the same rationale as for egress bridges. Idempotent.
+/// Give this node a host port on a segment bridge: a veth pair whose peer is
+/// enslaved to `bridge`, with `mac` on the host end and `addr`/32 on it.
+///
+/// The unique MAC is what lets a router reach this node over VXLAN (the
+/// anycast gateway MAC never leaves its node). `arp_ignore=1` on veth and
+/// bridge stops either answering ARP for the other's address; `rp_filter=2`
+/// is loose reverse-path filtering, as for egress bridges. Idempotent.
     pub async fn ensure_host_port(
         &self,
         bridge: &str,
@@ -708,7 +644,6 @@ impl Overlay {
         self.ensure_up(veth, veth_index).await
     }
 
-    /// Remove a host port (deleting one end removes the pair). Missing is fine.
     pub async fn teardown_host_port(&self, veth: &str) -> Result<()> {
         if let Some(index) = self.find_link(veth).await? {
             self.handle
@@ -721,9 +656,7 @@ impl Overlay {
         Ok(())
     }
 
-    /// Remove a network's bridge and VXLAN device. Missing links are not an
-    /// error, since deleting an already-gone device is the reconcile loop's
-    /// steady state after a network is torn down.
+/// Remove a network's bridge and VXLAN device; missing links are fine.
     pub async fn teardown(&self, bridge: &str, vxlan: &str) -> Result<()> {
         for name in [vxlan, bridge] {
             if let Some(index) = self.find_link(name).await? {
@@ -739,7 +672,6 @@ impl Overlay {
     }
 }
 
-/// Write a `/proc/sys` value, `path` relative to `/proc/sys`.
 fn set_sysctl(path: &str, value: &str) -> Result<()> {
     std::fs::write(format!("/proc/sys/{path}"), value).map_err(|e| NetError::Io {
         context: format!("sysctl {path}"),
@@ -747,25 +679,14 @@ fn set_sysctl(path: &str, value: &str) -> Result<()> {
     })
 }
 
-/// Turn off TX checksum offload (and, as a dependency, TSO) on a
-/// clouduler-managed bridge. Some kernel/NIC-driver combinations miscompute
-/// the checksum for traffic the host itself originates onto a software
-/// bridge it also has an address on: the kernel hands the packet out
-/// believing hardware will fill in the checksum, no hardware ever does, and
-/// the receiving container's stack silently drops the corrupt segment.
-/// Symptom: the TCP handshake completes fine (small control packets, whose
-/// checksum is often trivially valid anyway) but the first real request or
-/// response payload vanishes, so every reverse-proxy call to that backend
-/// times out or resets even though the backend itself is healthy. Confirmed
-/// live: `ethtool -K <bridge> tx off` turned deterministic failures into
-/// deterministic successes with zero other change.
-/// Whether `ethtool` is on `PATH` at all. Checked once at daemon startup and
-/// by `clouduler init` rather than left to surface only when the first
-/// overlay bridge actually needs `disable_tx_checksum_offload` — a missing
-/// binary there doesn't fail loudly on its own, it just leaves that bridge's
-/// containers silently dropping every real request/response payload (see
-/// `disable_tx_checksum_offload`'s doc comment), which is a much harder
-/// symptom to trace back to "install ethtool" than a clear startup warning.
+/// Turn off TX checksum offload (and TSO) on a bridge. Some kernel/NIC
+/// combinations leave the checksum unfilled for host-originated traffic on a
+/// bridge the host has an address on, so the container drops the segment:
+/// handshake works, first payload vanishes, proxy calls time out. Confirmed
+/// live with `ethtool -K <bridge> tx off`.
+/// Whether `ethtool` is on `PATH`. Checked at startup and by `clouduler init`:
+/// a missing binary silently leaves bridges dropping payloads (see
+/// `disable_tx_checksum_offload`), a hard symptom to trace back.
 pub fn ethtool_available() -> bool {
     std::process::Command::new("ethtool")
         .arg("--version")
@@ -903,10 +824,7 @@ mod tests {
         assert_eq!(vxlan_name("monitoring"), vxlan_name("monitoring"));
     }
 
-    /// The whole point: every node has to arrive at the same MAC from the name
-    /// alone. If two nodes disagree, a container can ARP its anycast gateway
-    /// and cache a *remote* node's bridge, which then resets every connection
-    /// it makes.
+/// Every node must derive the same MAC from the name alone, or a container can cache a remote bridge and get reset.
     #[test]
     fn the_gateway_mac_is_the_same_on_every_node() {
         assert_eq!(gateway_mac("clbr-gitlab"), gateway_mac("clbr-gitlab"));
@@ -1033,8 +951,7 @@ mod tests {
     #[test]
     #[ignore = "needs CAP_NET_ADMIN and a real netlink socket"]
     fn ensure_bridge_is_idempotent_against_a_real_kernel() {
-        // Exercised manually / in the qemu harness: run ensure_bridge twice
-        // and assert the second call is a no-op.
+// Exercised manually / in the qemu harness.
     }
 
     #[test]

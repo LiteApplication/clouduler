@@ -5,13 +5,10 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use anyhow::{Context, Result};
 use ipnet::IpNet;
 
-/// Whether this process can write to /etc, /usr/bin and /var/lib, which is
-/// what installing the service needs.
+/// Whether this process can write to /etc, /usr/bin and /var/lib.
 ///
-/// Reads the effective uid out of /proc rather than calling geteuid, so this
-/// crate keeps its dependency list as it is. A kernel that does not give us
-/// the field is treated as unprivileged: guessing the other way would let init
-/// march into a write it cannot do and fail halfway through.
+/// Reads the euid from /proc to avoid a libc dependency. A kernel without the
+/// field is treated as unprivileged, so init fails early rather than halfway.
 pub fn is_root() -> bool {
     effective_uid() == Some(0)
 }
@@ -31,9 +28,8 @@ pub fn hostname() -> Result<String> {
 
 /// The address this machine would use to reach `peer`.
 ///
-/// A connected UDP socket sends nothing; the kernel just runs the route lookup
-/// and binds the source address it would have used. So this works against a
-/// peer that is down, and needs no privileges and no interface enumeration.
+/// A connected UDP socket sends nothing; the kernel just runs the route lookup,
+/// so this works against a down peer without privileges.
 pub fn source_address_for(peer: IpAddr) -> Option<IpAddr> {
     let bind: SocketAddr = match peer {
         IpAddr::V4(_) => "0.0.0.0:0".parse().ok()?,
@@ -46,10 +42,8 @@ pub fn source_address_for(peer: IpAddr) -> Option<IpAddr> {
 
 /// This machine's address inside `subnet`, when it has one.
 ///
-/// Probes the first host address in the subnet, which is enough to make the
-/// kernel pick the interface that carries it. The answer is checked against the
-/// subnet, so a machine not on that network gets nothing rather than its
-/// default route address.
+/// Probes the first host address so the kernel picks the carrying interface,
+/// then checks the answer against the subnet to reject the default route address.
 pub fn address_in(subnet: IpNet) -> Option<IpAddr> {
     let probe = subnet.hosts().next()?;
     let local = source_address_for(probe)?;
@@ -60,9 +54,7 @@ pub fn address_in(subnet: IpNet) -> Option<IpAddr> {
 mod tests {
     use super::*;
 
-    /// Whatever uid the test runs as, the answer has to agree with itself and
-    /// be readable at all, which is the part that would break on a stripped
-    /// /proc.
+    /// The answer must agree with itself even on a stripped /proc.
     #[test]
     fn the_effective_uid_is_readable_and_agrees_with_the_root_check() {
         let uid = effective_uid().expect("/proc/self/status exposes Uid");

@@ -1,13 +1,9 @@
 //! Docker networks backing the container overlay.
 //!
-//! Clouduler does not let docker build the network. The bridge already exists,
-//! made by `cl-net` with a VXLAN device enslaved to it so it spans every node.
-//! What docker is asked for is a network that *attaches to that bridge*, with
-//! the subnet and gateway the cluster's IPAM handed out, so a container docker
-//! places on it lands on the overlay rather than on a node-local island.
-//!
-//! That is what `com.docker.network.bridge.name` does: point docker's bridge
-//! driver at a device someone else owns.
+//! Docker does not build the network. `cl-net` already made the bridge with a
+//! VXLAN device enslaved to it; docker is asked for a network that attaches to
+//! it (`com.docker.network.bridge.name`) with the subnet and gateway from the
+//! cluster IPAM, so containers land on the overlay, not a node-local island.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -18,13 +14,11 @@ use bollard::query_parameters::InspectNetworkOptions;
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
 
-/// Label marking a network as ours, so a sweep can tell it from one the
-/// operator made by hand.
+/// Label marking a network as ours, so sweeps skip hand-made ones.
 pub const LABEL_MANAGED: &str = "clouduler.managed";
 pub const LABEL_STACK: &str = "clouduler.stack";
 pub const MANAGED_VALUE: &str = "true";
 
-/// What a stack network needs to exist as far as docker is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkSpec {
     /// Docker network name, `<stack>_<network>`.
@@ -33,8 +27,8 @@ pub struct NetworkSpec {
     pub bridge: String,
     pub subnet: String,
     pub gateway: Ipv4Addr,
-    /// Underlay MTU minus VXLAN overhead. Getting this wrong shows up as large
-    /// packets silently vanishing between nodes, so it is not optional.
+    /// Underlay MTU minus VXLAN overhead. A wrong value silently drops large
+    /// packets between nodes.
     pub mtu: u16,
     pub stack: String,
 }
@@ -42,11 +36,9 @@ pub struct NetworkSpec {
 impl Docker {
     /// Create the network if it is missing. Idempotent.
     ///
-    /// An existing network is left exactly as it is rather than reconciled:
-    /// docker cannot change a network's subnet in place, and deleting one with
-    /// containers attached fails anyway. A network whose spec drifted is
-    /// reported so the caller can decide, which in practice means the operator
-    /// removes the stack and redeploys it.
+    /// An existing network is left as is: docker cannot change a subnet in place
+    /// and deleting one with containers attached fails. Drift is reported so the
+    /// operator can remove the stack and redeploy.
     pub async fn ensure_network(&self, spec: &NetworkSpec) -> Result<bool> {
         if self.network_exists(&spec.name).await? {
             return Ok(false);
@@ -57,8 +49,8 @@ impl Docker {
             "com.docker.network.bridge.name".to_string(),
             spec.bridge.clone(),
         );
-        // Docker would otherwise add its own masquerade and inter-container
-        // rules for a bridge it does not own.
+        // Docker would otherwise add masquerade and inter-container rules for a
+        // bridge it does not own.
         options.insert(
             "com.docker.network.bridge.enable_ip_masquerade".to_string(),
             "false".to_string(),
@@ -92,29 +84,21 @@ impl Docker {
 
         match self.inner.create_network(request).await {
             Ok(_) => Ok(true),
-            // Another node's daemon, or our own previous pass, got there first.
+            // Another node's daemon or our previous pass got there first.
             Err(e) if already_exists(&e) => Ok(false),
             Err(e) => Err(classify(e)),
         }
     }
 
-    /// Create a nat-kind cluster network if missing. Idempotent, like
-    /// `ensure_network`, but unlike it this asks docker to build and own the
-    /// bridge itself rather than pointing at one `cl-net` already made:
-    /// there is no VXLAN device to enslave and no fixed egress interface to
-    /// pin traffic to, so ordinary docker bridge NAT — masqueraded out
-    /// whatever the host's own routing table picks for a given destination
-    /// — is exactly the behavior wanted.
+    /// Create a nat-kind cluster network if missing. Idempotent, but unlike
+    /// `ensure_network` docker builds and owns the bridge: there is no VXLAN
+    /// device or fixed egress interface, so plain bridge NAT is wanted.
     ///
-    /// `subnet`/`gateway` are still pinned rather than left to docker's own
-    /// IPAM: a client on this network reaching a route on the same node
-    /// never actually leaves it (the kernel delivers the forwarded packet
-    /// straight to the local proxy listener instead of routing it back out
-    /// through POSTROUTING), so the proxy sees the container's raw address
-    /// on this subnet rather than a masqueraded one. `cl-daemon`'s proxy
-    /// wiring trusts that subnet for exactly this reason, which only works
-    /// if every node derives the same one deterministically instead of
-    /// asking docker to pick.
+    /// `subnet`/`gateway` are still pinned: a client reaching a route on the same
+    /// node never leaves it (the kernel delivers the forwarded packet to the local
+    /// proxy listener, skipping POSTROUTING), so the proxy sees the container's
+    /// raw address. `cl-daemon`'s proxy wiring trusts that subnet, which only
+    /// works if every node derives the same one deterministically.
     pub async fn ensure_nat_network(
         &self,
         name: &str,
@@ -155,21 +139,15 @@ impl Docker {
         }
     }
 
-    /// Attach an already-created container to a second network. Docker only
-    /// takes one network at create time (`HostConfig.network_mode`); a
-    /// service's egress network, if it has one, is always this second
-    /// attachment (see `Docker::set_default_route` for how it still ends up
-    /// carrying the container's default route despite that).
+    /// Attach an already-created container to a second network. Docker takes one
+    /// network at create time (`HostConfig.network_mode`), so a service's egress
+    /// network is always this second attachment (see `Docker::set_default_route`).
     ///
-    /// `ipv4` pins the address on this network the same way create-time
-    /// `EndpointIpamConfig` does; `None` lets docker pick one from the
-    /// network's subnet, which is normal for an egress network (its address
-    /// there is not something anything else in the cluster needs to know).
+    /// `ipv4` pins the address like create-time `EndpointIpamConfig`; `None` lets
+    /// docker pick, normal for an egress network.
     ///
-    /// Reconnecting a container already on the network is a 403 from docker,
-    /// not useful information here (the reconcile loop calls this on every
-    /// create, not just the first), so it reads as success like the rest of
-    /// this file's idempotent `ensure_*` calls.
+    /// Reconnecting is a 403 from docker, which reads as success because the
+    /// reconcile loop calls this on every create.
     pub async fn connect_network(
         &self,
         container: &str,
@@ -180,8 +158,8 @@ impl Docker {
             .await
     }
 
-    /// `connect_network`, optionally asking docker to name the interface
-    /// (`com.docker.network.endpoint.ifname`, honoured by docker 28+).
+    /// `connect_network`, optionally naming the interface
+    /// (`com.docker.network.endpoint.ifname`, docker 28+).
     pub async fn connect_network_named(
         &self,
         container: &str,
@@ -219,15 +197,10 @@ impl Docker {
 
     /// Point a container's default route at `network`'s gateway.
     ///
-    /// Docker only gives the *primary* (create-time) network the default
-    /// route; a network attached afterward with `connect_network` never gets
-    /// it, and there is no version-independent flag to ask for it either
-    /// (`GwPriority` exists only on newer daemons). So this does it directly:
-    /// find the container's PID and, in its own network namespace, replace
-    /// the default route — the same operation `ip route replace default via
-    /// <gw>` would do run inside the container, but from the host, needing
-    /// only the daemon's own privileges rather than a capability grant on
-    /// the workload.
+    /// Docker gives only the primary (create-time) network the default route, and
+    /// `GwPriority` exists only on newer daemons. So this finds the container's PID
+    /// and replaces the default route in its network namespace from the host,
+    /// needing only the daemon's own privileges, not a capability on the workload.
     pub async fn set_default_route(&self, container: &str, network: &str) -> Result<()> {
         let gateway = self.network_gateway(network).await?;
         self.ip_route_in_netns(
@@ -237,16 +210,13 @@ impl Docker {
         .await
     }
 
-    /// Keep traffic to `destinations` on the container's primary (overlay)
-    /// attachment, via `gateway`, instead of letting it follow the default
-    /// route.
+    /// Keep traffic to `destinations` on the primary (overlay) attachment, via
+    /// `gateway`, instead of the default route.
     ///
-    /// For a container whose default route was moved to an egress network
-    /// (`set_default_route`): the egress bridge's kill-switch drops anything
-    /// not leaving through its interface, which includes the node addresses
-    /// the reverse proxy answers on. A more specific `/32` route wins over
-    /// the default one, so those addresses stay reachable and everything else
-    /// is still under the kill-switch.
+    /// After `set_default_route` moved the default to an egress network, its
+    /// kill-switch drops anything not leaving through its interface, including the
+    /// node addresses the reverse proxy answers on. A more specific `/32` route
+    /// wins, keeping those reachable.
     pub async fn pin_routes(
         &self,
         container: &str,
@@ -268,8 +238,7 @@ impl Docker {
         Ok(())
     }
 
-    /// Run each `ip route` argument list (e.g. `["route", "replace", ...]`
-    /// minus the leading `ip`) inside the container's network namespace.
+    /// Run each `ip route` argument list inside the container's network namespace.
     /// Stops at the first failure.
     pub async fn apply_netns_routes(&self, container: &str, routes: &[Vec<String>]) -> Result<()> {
         for route in routes {
@@ -283,8 +252,7 @@ impl Docker {
         Ok(())
     }
 
-    /// `ip route <args>` run inside the container's network namespace, from
-    /// the host, needing only the daemon's own privileges.
+    /// `ip route <args>` run inside the container's network namespace from the host.
     async fn ip_route_in_netns(&self, container: &str, args: &[&str]) -> Result<()> {
         let pid = self.container_pid(container).await?;
 
@@ -334,10 +302,8 @@ impl Docker {
             })
     }
 
-    /// The containers attached to `name`, as `(container id, address on that
-    /// network)`. Empty when the network does not exist. Used to tell the
-    /// stacks sharing an egress bridge apart by the address each container
-    /// holds on it.
+    /// The containers attached to `name` as `(container id, address)`. Empty when
+    /// the network does not exist. Tells stacks sharing an egress bridge apart.
     pub async fn network_members(&self, name: &str) -> Result<Vec<(String, Ipv4Addr)>> {
         let Some(network) = self.inspect_network_opt(name).await? else {
             return Ok(Vec::new());
@@ -358,8 +324,7 @@ impl Docker {
         Ok(self.inspect_network_opt(name).await?.is_some())
     }
 
-    /// `inspect_network`, but `Ok(None)` instead of an error when it does not
-    /// exist yet.
+    /// `inspect_network`, but `Ok(None)` when it does not exist.
     async fn inspect_network_opt(
         &self,
         name: &str,
@@ -377,16 +342,13 @@ impl Docker {
         }
     }
 
-    /// Every overlay network this daemon still has, by name. Lets a caller
-    /// tell an orphan (a network from a stack that no longer exists) apart
-    /// from one that's still wanted, so it can be swept: left behind, an
-    /// orphan keeps its subnet allocated in docker's own IPAM forever, and a
-    /// later stack can be handed that same subnet by the cluster's own
-    /// allocator and fail to create its network with a pool-overlap error.
+    /// Every overlay network this daemon still has, by name, so orphans (networks
+    /// of removed stacks) can be swept: left behind they keep their subnet
+    /// allocated in docker's IPAM, and a later stack handed the same subnet fails
+    /// with a pool-overlap error.
     ///
     /// `exclude_stacks` are `LABEL_STACK` values owned by another reconciler
-    /// (egress, wireguard) rather than a deployed stack, so this sweep never
-    /// mistakes their networks for orphans of its own.
+    /// (egress, wireguard), whose networks must not be mistaken for orphans.
     pub async fn list_managed_networks(&self, exclude_stacks: &[&str]) -> Result<Vec<String>> {
         let mut filters = HashMap::new();
         filters.insert(
@@ -414,10 +376,9 @@ impl Docker {
             .collect())
     }
 
-    /// Names of the networks labelled as belonging to `stack` (`LABEL_STACK`).
-    /// The counterpart of `list_managed_networks` for the reconcilers that own
-    /// a label of their own (egress and nat use `_cluster`) and need to find
-    /// their own leftovers.
+    /// Names of the networks labelled as belonging to `stack` (`LABEL_STACK`), for
+    /// reconcilers with their own label (egress and nat use `_cluster`) to find
+    /// their leftovers.
     pub async fn list_networks_of_stack(&self, stack: &str) -> Result<Vec<String>> {
         let mut filters = HashMap::new();
         filters.insert(
@@ -438,9 +399,8 @@ impl Docker {
         Ok(networks.into_iter().filter_map(|n| n.name).collect())
     }
 
-    /// Remove a network. A missing one is success, and one still in use is
-    /// reported so a caller sweeping after a stack removal can wait rather than
-    /// tear a running container's network out from under it.
+    /// Remove a network. A missing one is success; one still in use is reported so
+    /// a sweeper can wait rather than pull it from under a running container.
     pub async fn remove_network(&self, name: &str) -> Result<()> {
         match self.inner.remove_network(name).await {
             Ok(()) => Ok(()),
@@ -452,15 +412,13 @@ impl Docker {
     }
 }
 
-/// Logs loudly when a nat network that already exists does not have the
-/// subnet clouduler would now pin it to.
+/// Logs loudly when an existing nat network lacks the subnet clouduler would now
+/// pin it to.
 ///
-/// Docker cannot change a network's subnet in place, so this cannot self
-/// heal: the network predates the pinning (added so `cl-daemon`'s proxy
-/// wiring can recognize a same-node nat peer, see `ensure_nat_network`'s doc
-/// comment) and every route gated on that trust will 403 a same-node peer on
-/// it until an operator removes the stack using it, deletes the docker
-/// network by hand, and lets it get recreated with the pinned subnet.
+/// Docker cannot change a subnet in place, so this cannot self heal: the network
+/// predates the pinning (see `ensure_nat_network`) and every route gated on the
+/// same-node trust will 403 a same-node peer until an operator removes the stack,
+/// deletes the docker network by hand, and lets it be recreated.
 fn warn_on_nat_subnet_drift(
     name: &str,
     expected: &str,
@@ -484,8 +442,7 @@ fn warn_on_nat_subnet_drift(
     }
 }
 
-/// Docker answers a duplicate create with a 409 and a message, not a typed
-/// error, so the string is the only thing to go on.
+/// Docker answers a duplicate create with a 409 and an untyped message.
 fn already_exists(err: &bollard::errors::Error) -> bool {
     match err {
         bollard::errors::Error::DockerResponseServerError {
@@ -496,8 +453,7 @@ fn already_exists(err: &bollard::errors::Error) -> bool {
     }
 }
 
-/// Reconnecting an already-connected container is a 403, with the container
-/// id in the message rather than a typed field.
+/// Reconnecting a connected container is a 403 with the container id only in the message.
 fn already_connected(err: &bollard::errors::Error) -> bool {
     match err {
         bollard::errors::Error::DockerResponseServerError {
@@ -544,9 +500,8 @@ mod tests {
     #[test]
     fn the_spec_carries_everything_needed_to_reach_the_overlay() {
         let spec = spec();
-        // The bridge is the part that makes this an overlay network rather
-        // than a node-local one; without it docker makes its own bridge and
-        // containers on two nodes cannot see each other.
+        // The bridge makes this an overlay network; without it docker makes its
+        // own bridge and containers on two nodes cannot see each other.
         assert!(!spec.bridge.is_empty());
         assert!(spec.mtu < 1500, "must leave room for the vxlan header");
     }

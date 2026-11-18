@@ -1,6 +1,5 @@
-//! Docker engine access. Everything that talks to the local daemon goes here.
-//! Wraps bollard with clouduler's own container spec/state types and the
-//! ownership labels that distinguish clouduler's containers from the user's.
+//! Docker engine access: bollard wrapped with clouduler's container spec/state
+//! types and the ownership labels that tell its containers from the user's.
 
 mod action;
 mod client;

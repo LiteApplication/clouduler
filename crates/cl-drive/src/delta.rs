@@ -1,17 +1,14 @@
 //! The transfer engine: decides what to send for a volume and drives the
 //! sender side of the `transport` protocol.
 //!
-//! `DeltaEngine` is the default and always available: rolling-hash delta
-//! sync over `fast_rsync`, our own directory walk, rename/delete handling
-//! and resumable (temp file + rename) writes on the receiver.
+//! `DeltaEngine` is the default: rolling-hash delta sync over `fast_rsync`,
+//! our own directory walk, rename/delete handling and resumable (temp file +
+//! rename) receiver writes.
 //!
-//! `BtrfsEngine` and `ZfsEngine` are optional fast paths for when both ends
-//! back the drive with a matching filesystem. Neither crates.io crate for
-//! this (`btrfsutil`, `libzetta`) is maintained enough to depend on as of
-//! this writing, so both shell out to the `btrfs`/`zfs` binaries and detect
-//! availability by probing the filesystem type of the drive path with
-//! `statfs`. They are behind the same `SyncEngine` trait so a caller that
-//! picks the fast path can always fall back to `DeltaEngine`.
+//! `BtrfsEngine` and `ZfsEngine` are optional fast paths for matching
+//! filesystems (detected via `statfs`). No maintained crate exists, so they
+//! would shell out to `btrfs`/`zfs`. Same `SyncEngine` trait, so callers can
+//! fall back to `DeltaEngine`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,31 +24,23 @@ use crate::error::{DriveError, Result};
 use crate::scan::{self, FileMeta};
 use crate::transport::{self, Message};
 
-/// Below this size, sending the whole file beats a signature round trip:
-/// the extra request/response pair costs more than the delta would ever save.
-/// Only applies to files that exist on both ends; brand new files have
-/// nothing to diff against and are always sent whole.
+/// Below this size, sending the whole file beats a signature round trip.
+/// Brand new files are always sent whole.
 const WHOLE_FILE_THRESHOLD: u64 = 8 * 1024;
 
 /// Above this size a changed file is streamed whole instead of diffed.
 ///
-/// The delta path is O(filesize) in *resident memory* on both ends, and
-/// nothing else in this protocol is. The receiver's `Message::Delta` handler
-/// holds the base file and the reconstructed output at the same time —
-/// `fast_rsync::apply` writes into a `Vec`, it cannot stream — so applying a
-/// delta costs `2 x filesize` plus the delta itself; the sender's
-/// `send_delta` holds another full copy to diff against. With multi-gigabyte
-/// files in a volume (a database relation, an ONNX model, a stray core dump)
-/// that is several gigabytes for one file, and `transport::serve` accepts
-/// every peer concurrently, so it multiplies by the number of nodes pushing.
-/// On an 8GB node that is an OOM kill, which looks from the sender like a
-/// bare "Connection reset by peer".
+/// The delta path is O(filesize) resident memory on both ends: the receiver's
+/// `Message::Delta` handler holds the base and the output at once
+/// (`fast_rsync::apply` writes into a `Vec`), so `2 x filesize` plus the delta,
+/// and the sender's `send_delta` holds another copy. `transport::serve` accepts
+/// peers concurrently, so this multiplies. On an 8GB node a multi-gigabyte
+/// file is an OOM kill, which looks from the sender like a bare "Connection
+/// reset by peer".
 ///
-/// Past this size the `WholeFileBegin`/`WholeFileChunk`/`WholeFileEnd` path
-/// is used instead: it streams in `WHOLE_FILE_CHUNK` pieces and its peak
-/// memory is that chunk, whatever the file's size. The cost is bandwidth —
-/// a big file that changed is resent in full rather than diffed — which is
-/// the right trade against an unbounded allocation that takes the node down.
+/// Past this size the `WholeFileBegin`/`Chunk`/`End` path streams in
+/// `WHOLE_FILE_CHUNK` pieces with bounded memory, at the cost of resending big
+/// changed files in full.
 const MAX_DELTA_FILE: u64 = 256 * 1024 * 1024;
 
 /// Against a destination holding at least `DROP_CHECK_MIN_FILES` files, a
@@ -60,9 +49,9 @@ const DROP_CHECK_MIN_FILES: usize = 200;
 const DROP_FRACTION: usize = 20;
 
 /// Refuses a sync that would delete a destination's data because the source
-/// has lost its own: an empty (or nearly empty) tree pushed over a populated
-/// one. A volume deliberately emptied needs one file left in it, or its
-/// replicas cleared by hand; a replicated wipe is not recoverable.
+/// lost its own (empty or nearly empty tree over a populated one). A volume
+/// deliberately emptied needs one file left, or its replicas cleared by hand;
+/// a replicated wipe is not recoverable.
 pub(crate) fn guard_against_data_loss(
     volume: &VolumeId,
     local: &scan::Manifest,
@@ -87,7 +76,6 @@ pub(crate) fn guard_against_data_loss(
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// What one sync did, for reporting and tests.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SyncStats {
     pub files_added: u64,
@@ -98,16 +86,14 @@ pub struct SyncStats {
     pub engine: String,
 }
 
-/// Replicates one volume from a local directory to a peer's drive transport
-/// listener. Implementations run as the sender; `transport::receive` is the
-/// one receiver used by every engine that talks this protocol.
+/// Replicates one volume to a peer's drive transport listener, as sender;
+/// `transport::receive` is the one receiver for every engine.
 pub trait SyncEngine: Send + Sync {
     fn name(&self) -> &str;
 
-    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off
-    /// push and carries that destination's configured path - see
-    /// `Message::Hello`'s doc comment in `transport.rs` for what it changes
-    /// on the receiving end. Every other caller passes `None`.
+    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off push and
+    /// carries the destination's configured path (see `Message::Hello` in
+    /// `transport.rs`). Every other caller passes `None`.
     #[allow(clippy::too_many_arguments)]
     fn sync<'a>(
         &'a self,
@@ -119,9 +105,9 @@ pub trait SyncEngine: Send + Sync {
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>>;
 
-    /// Whether `peer`'s copy of a served volume was written since it last
-    /// agreed with its source. Engines that cannot ask refuse, which keeps a
-    /// served volume from being pushed over blind.
+    /// Whether `peer`'s copy of a served volume was written since it last agreed
+    /// with its source. Engines that cannot ask refuse, so a served volume is
+    /// never pushed over blind.
     fn copy_state<'a>(
         &'a self,
         _peer: SocketAddr,
@@ -135,13 +121,10 @@ pub trait SyncEngine: Send + Sync {
     }
 }
 
-/// The default engine: works anywhere, no filesystem cooperation required.
 #[derive(Debug, Clone)]
 pub struct DeltaEngine {
     whole_file_threshold: u64,
-    /// The cluster key every connection authenticates with. A watch, not a
-    /// snapshot, so a long-lived scheduler follows a key that arrives or
-    /// rotates after it was built.
+    /// The cluster key, as a watch so a long-lived scheduler follows rotation.
     keys: cl_raft::KeyWatch,
 }
 
@@ -189,14 +172,9 @@ fn transfer_err(e: std::io::Error) -> DriveError {
     }
 }
 
-/// Run one piece of filesystem or hashing work on the blocking pool.
-///
-/// The protocol chatter here is genuinely async, but the work between the
-/// messages is not: reading a multi-gigabyte database file, blake3 hashing it,
-/// building an rsync signature index, computing a delta. Left inline in these
-/// `async fn`s it holds a tokio worker for the duration, which starves
-/// everything else this process runs — including its raft heartbeats. See
-/// `scan::scan_off_runtime` for what that looks like from the outside.
+/// Run filesystem or hashing work on the blocking pool. Inline in these
+/// `async fn`s it would hold a tokio worker and starve raft heartbeats; see
+/// `scan::scan_off_runtime`.
 pub(crate) async fn off_runtime<T, F>(what: &'static str, f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
@@ -209,11 +187,9 @@ where
         })?
 }
 
-/// A node that is down rather than merely refusing gives no RST, so a plain
-/// `TcpStream::connect` can sit for the OS's own connect timeout — minutes,
-/// not seconds. A sync loop over several targets (the background scheduler,
-/// or `folder-import`'s immediate push) has to move on and record the
-/// failure instead of hanging on one unreachable peer.
+/// A down node gives no RST, so a plain `TcpStream::connect` can sit for the OS
+/// timeout (minutes). Sync loops over several targets must move on and record
+/// the failure.
 pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl DeltaEngine {
@@ -274,10 +250,8 @@ impl DeltaEngine {
             ..Default::default()
         };
 
-        // Directories first, parents before children, before any file is
-        // written into them. Empty directories exist nowhere else in this
-        // protocol — `create_dir_all` on the way to a file only ever produces
-        // the ones that happen to contain something.
+        // Parents first, before files go in: empty directories exist nowhere else
+        // in this protocol.
         for path in &diff.added_dirs {
             let meta = local.dirs[path];
             transport::send(
@@ -293,9 +267,7 @@ impl DeltaEngine {
             .map_err(transfer_err)?;
         }
 
-        // Directories both sides already have, but whose mode/owner drifted —
-        // a permission fix applied on the source after the directory was
-        // first replicated, say.
+        // Directories both sides have whose mode/owner drifted.
         for path in &diff.changed_dirs {
             let meta = local.dirs[path];
             transport::send(
@@ -324,23 +296,18 @@ impl DeltaEngine {
             .map_err(transfer_err)?;
         }
 
-        // Rename detection: hash local "added" candidates directly, and ask
-        // the peer for the hash of each "removed" candidate (it still has
-        // the file; we don't). A match means a move, not new content.
+        // Rename detection: hash local "added" candidates, ask the peer for the
+        // hash of each "removed" one. A match means a move.
         let mut removed: Vec<String> = diff.removed;
         let mut renamed_from = std::collections::HashSet::new();
         let mut renamed_to = std::collections::HashSet::new();
 
         if !removed.is_empty() {
-            // One hash can belong to many paths, so this maps to a *list* and
-            // each match pops one. Content equality is not identity: a
-            // database directory routinely holds hundreds of byte-identical
-            // files (every freshly created postgres `_fsm`/`_vm` fork is
-            // zero length), and they all hash the same. Keyed to a single
-            // path, every one of those additions would claim the same source
-            // and the sender would emit N renames out of one file — the
-            // second arrives at a receiver that no longer has `from`, and the
-            // whole sync dies there. See the empty-file guard below too.
+            // One hash can belong to many paths, so map to a *list* and pop one per
+            // match. A database directory holds hundreds of byte-identical files
+            // (empty postgres `_fsm`/`_vm` forks); keyed to one path, N additions
+            // claim the same source, the second `Rename` hits a receiver that no
+            // longer has `from`, and the whole sync dies. See the empty-file guard.
             let mut removed_hashes: HashMap<[u8; 32], Vec<String>> = HashMap::new();
             for path in &removed {
                 transport::send(&mut conn, &Message::HashRequest(path.clone()))
@@ -371,26 +338,19 @@ impl DeltaEngine {
                 if meta.is_symlink {
                     continue;
                 }
-                // Empty files are never renames. Every empty file hashes
-                // alike, so a match here is evidence of nothing, and pairing
-                // two arbitrary ones costs more than it saves: `Rename` moves
-                // the receiver's existing file, which carries the *source's*
-                // mode and mtime, so the result differs from what the sender
-                // has and gets re-sent on the next pass anyway. Sending zero
-                // bytes whole is cheaper than that round trip.
+                // Empty files are never renames: they all hash alike, and `Rename`
+                // moves the receiver's file with the *source's* mode and mtime, so
+                // it differs from the sender's copy and is re-sent anyway.
                 if meta.size == 0 {
                     continue;
                 }
                 let full = src.join(path);
-                // An unreadable candidate is simply not a rename, same as before.
                 let hashed = off_runtime("hashing a rename candidate", move || {
                     Ok(scan::hash_file(&full).ok())
                 })
                 .await?;
                 let Some(hash) = hashed else { continue };
-                // `pop` so a source is claimed at most once: N identical
-                // removals can pair with N identical additions, and any
-                // addition left over is simply sent whole.
+                // `pop` so a source is claimed at most once; leftovers are sent whole.
                 let Some(from) = removed_hashes.get_mut(&hash).and_then(Vec::pop) else {
                     continue;
                 };
@@ -435,9 +395,7 @@ impl DeltaEngine {
 
         for path in &diff.changed {
             let meta = &local.files[path];
-            // Too small to be worth a signature round trip, or too big to
-            // diff without an unbounded allocation on both ends. See
-            // `MAX_DELTA_FILE`.
+            // Too small for a signature round trip, or too big to diff (`MAX_DELTA_FILE`).
             if meta.is_symlink
                 || meta.size < self.whole_file_threshold
                 || meta.size > MAX_DELTA_FILE
@@ -453,8 +411,7 @@ impl DeltaEngine {
             progress.report(files_done, total_files);
         }
 
-        // Last, once every file inside them is gone: `diff.removed_dirs` is
-        // already ordered children-first.
+        // Last, once their files are gone (`removed_dirs` is children-first).
         for path in &diff.removed_dirs {
             transport::send(&mut conn, &Message::RemoveDir(path.clone()))
                 .await
@@ -516,8 +473,7 @@ impl DeltaEngine {
                 }
             })
             .await?;
-            // Deleted since the scan (a database's scratch file): nothing to
-            // send, and the next pass sees it gone.
+            // Deleted since the scan (e.g. database scratch file): next pass sees it gone.
             let Some(data) = data else {
                 return Ok(());
             };
@@ -538,10 +494,8 @@ impl DeltaEngine {
             .map_err(transfer_err);
         }
 
-        // Large regular file: stream it as a `WholeFileBegin`/`WholeFileChunk`*/
-        // `WholeFileEnd` sequence instead of one giant frame. See
-        // `WHOLE_FILE_CHUNK`'s doc comment for why a single frame can't be
-        // trusted to hold an entire file past a few tens of megabytes.
+        // Large file: stream as `WholeFileBegin`/`Chunk`*/`End`; see
+        // `WHOLE_FILE_CHUNK` for why one frame can't hold it.
         let full_path = src.join(path);
         let opened = full_path.clone();
         let file = off_runtime(
@@ -556,8 +510,8 @@ impl DeltaEngine {
             },
         )
         .await?;
-        // Deleted since the scan: nothing to send. Checked before `Begin` so
-        // the receiver is never left with a half-announced file.
+        // Deleted since the scan; checked before `Begin` so the receiver never sees
+        // a half-announced file.
         let Some(mut file) = file else {
             return Ok(());
         };
@@ -573,9 +527,8 @@ impl DeltaEngine {
         )
         .await
         .map_err(transfer_err)?;
-        // The handle and the buffer are handed to the blocking pool and back
-        // once per chunk, so neither the read nor the allocation lands on a
-        // runtime thread, and the buffer is reused instead of reallocated.
+        // Handle and buffer go to the blocking pool and back per chunk, keeping IO
+        // and allocation off runtime threads; the buffer is reused.
         let mut buf = vec![0u8; transport::WHOLE_FILE_CHUNK];
         loop {
             let at = full_path.clone();
@@ -616,8 +569,7 @@ impl DeltaEngine {
         meta: &FileMeta,
         stats: &mut SyncStats,
     ) -> Result<()> {
-        // Deleted since the scan: skip it before asking the peer for a
-        // signature it would then wait on a delta for.
+        // Deleted since the scan: skip before asking the peer for a signature.
         if !src.join(path).exists() {
             return Ok(());
         }
@@ -637,8 +589,6 @@ impl DeltaEngine {
                 })
             }
         };
-        // Indexing the signature, reading the local file and running the
-        // rolling-hash diff are all CPU and IO over the whole file.
         let full = src.join(path);
         let named = path.to_string();
         let delta = off_runtime("computing a delta", move || {
@@ -676,17 +626,15 @@ impl DeltaEngine {
     }
 }
 
-/// Detects btrfs/zfs and shells out to their send/receive tools. Neither is
-/// implemented yet; both fall through to `DeltaEngine` today. Kept as a
-/// documented seam rather than built in full, since exercising it needs a
-/// real btrfs or zfs filesystem the test environment does not have.
+/// Detects btrfs/zfs and would shell out to their send/receive tools. Not
+/// implemented; both fall through to `DeltaEngine`. A documented seam, since
+/// testing needs a real btrfs/zfs filesystem.
 pub mod fast_path {
     use std::path::Path;
 
     use nix::sys::statfs::{FsType, BTRFS_SUPER_MAGIC};
 
-    /// Filesystem magic numbers from `statfs(2)`, used to detect a fast path
-    /// without shelling out just to find out we can't use it.
+    /// Filesystem magic numbers from `statfs(2)`.
     const ZFS_SUPER_MAGIC: FsType = FsType(0x2fc12fc1);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,9 +644,8 @@ pub mod fast_path {
         Other,
     }
 
-    /// Probe the filesystem backing `path` with `statfs`. Returns `Other`
-    /// (rather than an error) for anything unrecognized or unreadable, since
-    /// callers only use this to decide whether to try a fast path.
+    /// Probe the filesystem backing `path`; `Other` for anything unrecognized or
+    /// unreadable.
     pub fn detect(path: &Path) -> FsKind {
         let Ok(stat) = nix::sys::statfs::statfs(path) else {
             return FsKind::Other;
@@ -717,8 +664,7 @@ pub mod fast_path {
         #[test]
         fn detect_does_not_panic_on_a_normal_directory() {
             let tmp = tempfile::tempdir().unwrap();
-            // Whatever the test filesystem is, it's very unlikely to be
-            // btrfs or zfs in CI; this just checks the probe doesn't crash.
+            // CI is very unlikely to be btrfs/zfs; this just checks the probe doesn't crash.
             let _ = detect(tmp.path());
         }
 
@@ -776,7 +722,6 @@ mod tests {
         let id = VolumeId::new("fast", "db");
         assert!(guard_against_data_loss(&id, &manifest_of(5), &manifest_of(400)).is_err());
         assert!(guard_against_data_loss(&id, &manifest_of(30), &manifest_of(400)).is_ok());
-        // Small volumes can legitimately shrink a lot.
         assert!(guard_against_data_loss(&id, &manifest_of(1), &manifest_of(50)).is_ok());
     }
 
@@ -785,16 +730,13 @@ mod tests {
         assert_eq!(DeltaEngine::new(cl_raft::throwaway_key()).name(), "delta");
     }
 
-    /// The delta path costs `2 x filesize` resident on the receiver and
-    /// another copy on the sender, so it has to have an upper bound as well
-    /// as a lower one. Both ends of the window must stay ordered, and the cap
-    /// has to leave the chunked whole-file path (which is bounded by
-    /// `WHOLE_FILE_CHUNK`, not by size) as the thing that handles the rest.
+    /// The delta path costs `2 x filesize` resident, so it needs an upper bound
+    /// too. The window must stay ordered and leave the chunked whole-file path
+    /// to handle the rest.
     #[test]
     fn the_delta_window_is_bounded_at_both_ends() {
         const {
             assert!(WHOLE_FILE_THRESHOLD < MAX_DELTA_FILE);
-            // A capped file must still stream in more than one chunk.
             assert!(MAX_DELTA_FILE > transport::WHOLE_FILE_CHUNK as u64);
         }
     }

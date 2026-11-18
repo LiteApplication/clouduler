@@ -1,17 +1,13 @@
 //! Wire protocol for bulk volume transfer.
 //!
-//! Kept off the raft rpc channel so a multi-megabyte delta never sits behind
-//! a heartbeat. Framed like `cl_raft::rpc` (length delimited over plain TCP),
-//! but encoded with `bincode` rather than JSON: this channel carries mostly
-//! raw file bytes and deltas, and a byte vector round-trips as its literal
-//! bytes plus a length prefix instead of a comma-separated JSON array of
-//! decimal integers. Nothing else talks this protocol, so there's no
+//! Kept off the raft rpc channel so a big delta never sits behind a heartbeat.
+//! Framed like `cl_raft::rpc` (length delimited over TCP) but encoded with
+//! `bincode`: a byte vector is its literal bytes plus a length prefix, not a JSON
+//! array of integers. Nothing else speaks this protocol, so there is no
 //! cross-version compatibility to preserve.
 //!
-//! This module owns both directions of the protocol: `send`/`recv` and the
-//! `Message` enum are shared, and `serve` runs the receive side (the sender
-//! side lives in `delta::DeltaEngine`, which is the thing that decides what
-//! to send).
+//! Both directions live here: `send`/`recv` and `Message` are shared and
+//! `serve` is the receive side (the sender is `delta::DeltaEngine`).
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
@@ -35,44 +31,35 @@ use crate::error::{DriveError, Result};
 use crate::registry::{resolve_no_follow, DriveRegistry};
 use crate::scan::{self, Manifest};
 
-/// Deltas and whole files can be large; refuse anything absurd so a corrupt
-/// length prefix cannot make us allocate wildly.
+/// Refuse anything absurd so a corrupt length prefix can't cause a huge allocation.
 const MAX_FRAME: usize = 256 * 1024 * 1024;
 
-/// Files at or below this size go over the wire as a single `WholeFile`
-/// message. Above it, `send_whole` streams `WholeFileBegin`/`WholeFileChunk`/
-/// `WholeFileEnd` instead, so one huge file can't force a single allocation
-/// and frame the size of the whole thing and so progress can be observed
-/// (and backpressure applied) chunk by chunk rather than after one giant
-/// read. Chosen with headroom under `MAX_FRAME` for the message envelope.
+/// Files at or below this size go as a single `WholeFile` message. Above it,
+/// `send_whole` streams `WholeFileBegin`/`Chunk`/`End` so no single huge
+/// allocation or frame is needed and backpressure applies per chunk. Leaves
+/// headroom under `MAX_FRAME` for the envelope.
 pub const WHOLE_FILE_CHUNK: usize = 32 * 1024 * 1024;
 
-/// How many peers may be pushing to this node at once. See `serve`.
+/// How many peers may push to this node at once. See `serve`.
 const MAX_CONCURRENT_RECEIVES: usize = 2;
 
-/// How long a connection may take to send its first frame. A real sender
-/// writes `Hello` the instant it connects, so this only ever fires on a
-/// connection that holds one of the `MAX_CONCURRENT_RECEIVES` slots while
-/// doing nothing.
+/// How long a connection may take to send its first frame. A real sender writes
+/// `Hello` immediately, so this only fires on an idle connection holding a slot.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a connection may go silent between frames once a sync is under
-/// way. This is far longer than any network stall would warrant on purpose:
-/// the sender legitimately says nothing while it scans its own volume after
-/// `Ready`, hashes every rename candidate (whole files, possibly many
-/// gigabytes) and computes a delta of a large file, all before the next frame
-/// goes out. A tight timeout would turn those into failed syncs; this one
-/// still frees the slot of a peer that has simply gone away.
+/// How long a connection may go silent between frames mid-sync. Deliberately
+/// long: after `Ready` the sender says nothing while it scans, hashes every
+/// rename candidate (possibly many GB) and computes large deltas. A tight
+/// timeout would fail those syncs; this still frees the slot of a vanished peer.
 const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// rpc_port + 1. Keeps bulk transfer off the raft socket without adding a
-/// second port to the config file.
+/// rpc_port + 1: keeps bulk transfer off the raft socket without a second config port.
 pub fn drive_port(rpc_port: u16) -> u16 {
     rpc_port.wrapping_add(1)
 }
 
-/// Rolling signature block size. Small enough to localize a match, large
-/// enough that the signature itself stays a small fraction of the file.
+/// Rolling signature block size: small enough to localize a match, large enough
+/// to keep the signature a small fraction of the file.
 pub fn signature_options() -> SignatureOptions {
     SignatureOptions {
         block_size: 2048,
@@ -83,16 +70,11 @@ pub fn signature_options() -> SignatureOptions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     /// Sender announces the volume and the generation this sync will reach.
-    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off
-    /// push (see `backup_runner`'s module doc) and carries the backup
-    /// destination's own configured path: the receiver stages the volume
-    /// under `DriveRegistry::ensure_staging_volume`, in a hidden directory
-    /// next to that path, instead of requiring it already implement the
-    /// drive. Colocating with the destination (rather than staging under
-    /// this node's data dir) keeps the staged copy on whatever volume the
-    /// destination itself lives on. Nothing else in this protocol cares -
-    /// added here rather than as a new `Message` variant since only the
-    /// initial handshake needs to say it.
+    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off push
+    /// (see `backup_runner`) and carries the destination's configured path: the
+    /// receiver stages under `DriveRegistry::ensure_staging_volume`, in a hidden
+    /// directory next to it, instead of requiring that it implement the drive.
+    /// A field here rather than a new variant since only the handshake needs it.
     Hello {
         volume: VolumeId,
         generation: u64,
@@ -100,8 +82,8 @@ pub enum Message {
     },
     /// Receiver's current manifest, scanned without hashing.
     Ready(Manifest),
-    /// A one-shot manifest request outside a sync, used for migration
-    /// verification. Answered with `Ready` and the connection closed.
+    /// One-shot manifest request outside a sync (migration verification);
+    /// answered with `Ready`, then the connection closes.
     ManifestRequest {
         volume: VolumeId,
         hash_content: bool,
@@ -122,19 +104,16 @@ pub enum Message {
         mode: u32,
         uid: u32,
         gid: u32,
-        /// Nanoseconds since the epoch, straight from the sender's
-        /// `FileMeta::mtime_nanos`. Applied on write so the receiver's copy
-        /// carries the source's mtime rather than the time it was written —
-        /// without this, the next scan sees a fresh "now" mtime that never
-        /// matches the sender's, and re-syncs the file forever.
+        /// Nanoseconds since the epoch from the sender's `FileMeta::mtime_nanos`,
+        /// applied on write. Otherwise the receiver's mtime is "now", never
+        /// matches the sender's, and the file re-syncs forever.
         mtime_nanos: i64,
         is_symlink: bool,
         link_target: Option<String>,
         data: Vec<u8>,
     },
-    /// Starts a chunked whole-file transfer for a regular file too large to
-    /// send as one `WholeFile` frame. Followed by one or more
-    /// `WholeFileChunk`s and a final `WholeFileEnd`.
+    /// Starts a chunked transfer for a file too large for one `WholeFile` frame;
+    /// followed by `WholeFileChunk`s and a final `WholeFileEnd`.
     WholeFileBegin {
         path: String,
         mode: u32,
@@ -155,14 +134,11 @@ pub enum Message {
         data: Vec<u8>,
     },
     /// Move `from` to `to` on the receiver, then stamp the sender's `mode`,
-    /// ownership and `mtime_nanos` on it.
+    /// ownership and `mtime_nanos`.
     ///
-    /// The metadata is not decoration. A rename moves the receiver's existing
-    /// file, which carries whatever mode, ownership and mtime the *source*
-    /// had when it was synced — not the ones the sender's `to` has now.
-    /// Without restamping, `Manifest::diff` sees a mismatch on the very next
-    /// pass and re-sends the file whole, which is exactly the work the
-    /// rename existed to avoid. Same reasoning as `WholeFile::mtime_nanos`.
+    /// The restamp is required: the moved file carries the metadata the *source*
+    /// had when synced, so without it the next `Manifest::diff` mismatches and
+    /// re-sends the file whole. Same reasoning as `WholeFile::mtime_nanos`.
     Rename {
         from: String,
         to: String,
@@ -176,10 +152,8 @@ pub enum Message {
     Done,
     Ack(u64),
     Error(String),
-    /// Create a directory (and any missing parents) with these permissions
-    /// and ownership. Sent for directories the peer is missing, ahead of any
-    /// file, so an *empty* directory survives replication — nothing else
-    /// would create one.
+    /// Create a directory (and missing parents) with these permissions and
+    /// ownership, ahead of any file, so *empty* directories survive replication.
     ///
     /// New variants go at the end: `Message` is encoded with bincode, which
     /// writes the variant's index and is not self-describing, so inserting
@@ -190,38 +164,31 @@ pub enum Message {
         uid: u32,
         gid: u32,
     },
-    /// Remove a directory the sender no longer has. Best effort and
-    /// non-recursive on the receiving side.
+    /// Remove a directory the sender no longer has. Best effort, non-recursive.
     RemoveDir(String),
-    /// Restamp a directory the peer already has whose mode, uid or gid
-    /// diverged — an existing directory whose ownership changed underneath
-    /// it, not a new one.
+    /// Restamp an existing directory whose mode, uid or gid diverged.
     SetDirMeta {
         path: String,
         mode: u32,
         uid: u32,
         gid: u32,
     },
-    /// Restamp the volume root itself. The root is never "added" or
-    /// "removed" like an ordinary directory, so its own permissions and
-    /// ownership travel over their own message.
+    /// Restamp the volume root itself (never "added" or "removed" like other directories).
     SetRootMeta {
         mode: u32,
         uid: u32,
         gid: u32,
     },
-    /// Asks a peer whether its copy of a served volume was written since it
-    /// last agreed with its source. Answered with `SyncStateReport` and the
-    /// connection closed.
+    /// Asks whether the peer's copy of a served volume was written since it last
+    /// agreed with its source. Answered with `SyncStateReport`, then close.
     SyncStateRequest {
         volume: VolumeId,
     },
     SyncStateReport(CopyState),
 }
 
-/// What a node knows about its own copy of a served volume: the digest of
-/// its tree now, and of the tree it held when it last pushed or received a
-/// sync. See `DriveRegistry::record_synced`.
+/// A node's digest of its served-volume copy now, and of the tree it held when
+/// it last pushed or received. See `DriveRegistry::record_synced`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CopyState {
     pub current: String,
@@ -230,7 +197,6 @@ pub struct CopyState {
     pub empty: bool,
 }
 
-/// This node's `CopyState` for a volume.
 pub async fn local_copy_state(registry: &DriveRegistry, volume: &VolumeId) -> Result<CopyState> {
     let root = registry.ensure_volume(volume)?;
     let manifest = scan::scan_off_runtime(root, false).await?;
@@ -241,7 +207,6 @@ pub async fn local_copy_state(registry: &DriveRegistry, volume: &VolumeId) -> Re
     })
 }
 
-/// Ask a peer for its `CopyState` of a volume.
 pub async fn request_copy_state(
     peer: SocketAddr,
     volume: &VolumeId,
@@ -281,7 +246,7 @@ pub async fn send(conn: &mut Connection, msg: &Message) -> io::Result<()> {
     conn.send(bytes::Bytes::from(raw)).await
 }
 
-/// `Ok(None)` means the peer closed the connection cleanly.
+/// `Ok(None)` means the peer closed cleanly.
 pub async fn recv(conn: &mut Connection) -> io::Result<Option<Message>> {
     match conn.next().await {
         Some(Ok(raw)) => Ok(Some(bincode::deserialize(&raw).map_err(io::Error::other)?)),
@@ -296,26 +261,22 @@ fn io_err(e: io::Error) -> DriveError {
     }
 }
 
-/// Scopes the stream handshake to this protocol, so a proof captured on the
-/// raft rpc channel cannot open this one.
+/// Scopes the stream handshake to this protocol, so a proof captured on the raft
+/// rpc channel can't open this one.
 pub const AUTH_LABEL: &str = "drive";
 
-/// How many connections may be mid-handshake at once. The handshake itself is
-/// bounded to `HANDSHAKE_TIMEOUT`, but without a cap a flood of connections
-/// that never answer would each hold a task and a socket for that long. Real
-/// peers handshake in milliseconds, so a small cap costs them nothing; when it
-/// is full the excess connections are dropped rather than queued, since a
-/// queued unauthenticated connection is exactly the resource being protected.
+/// How many connections may be mid-handshake at once. Without a cap, a flood
+/// of unanswering connections each holds a task and socket for
+/// `HANDSHAKE_TIMEOUT`. Excess connections are dropped, not queued: a queued
+/// unauthenticated connection is the resource being protected.
 const MAX_PENDING_HANDSHAKES: usize = 64;
 
-/// Accept connections and run the receive side of the sync protocol until
-/// the task is cancelled.
+/// Accept connections and run the receive side until cancelled.
 ///
-/// The listener is reachable by anything that can route to the internal
-/// address, and what it serves can read and overwrite any volume, so every
-/// connection must prove it holds the cluster key before a single frame is
-/// decoded. `keys` is read per connection so a rotated key takes effect
-/// without restarting the listener; a node with no key refuses everything.
+/// The listener can read and overwrite any volume and is reachable from the
+/// internal network, so every connection must prove it holds the cluster key
+/// before a frame is decoded. `keys` is read per connection so rotation applies
+/// without restart; a node with no key refuses everything.
 pub async fn serve(
     addr: SocketAddr,
     registry: Arc<DriveRegistry>,
@@ -326,19 +287,16 @@ pub async fn serve(
     serve_listener(listener, registry, keys).await
 }
 
-/// `serve` on an already bound listener, so tests can learn the address
-/// before connecting.
+/// `serve` on a bound listener, so tests can learn the address first.
 pub async fn serve_listener(
     listener: TcpListener,
     registry: Arc<DriveRegistry>,
     keys: KeyWatch,
 ) -> io::Result<()> {
-    // Every node that replicates a drive here pushes on its own schedule, and
-    // a transfer's working set is bounded per connection but not across them.
-    // Unlimited, one sync pass per peer arriving at the same moment multiplies
-    // that by the size of the cluster — which on a small node is an OOM kill,
-    // reported to each sender as a bare "Connection reset by peer". Senders
-    // that wait simply take longer; the sync interval is minutes.
+    // A transfer's working set is bounded per connection but not across them;
+    // unlimited, every peer pushing at once multiplies it, which on a small
+    // node is an OOM kill shown to each sender as "Connection reset by peer".
+    // Waiting senders just take longer; the interval is minutes.
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RECEIVES));
     let handshakes = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_HANDSHAKES));
 
@@ -357,8 +315,7 @@ pub async fn serve_listener(
                 debug!(%peer, "refusing drive connection, this node holds no cluster key");
                 return;
             };
-            // Authenticate before taking a transfer slot, so a peer that never
-            // proves itself cannot starve the real senders of slots.
+            // Authenticate before taking a slot so an unproven peer can't starve real senders.
             if let Err(e) = stream_auth::accept(&mut stream, &key, AUTH_LABEL).await {
                 warn!(%peer, error = %e, "drive peer failed authentication, dropping the connection");
                 return;
@@ -371,20 +328,16 @@ pub async fn serve_listener(
                 Err(_) => return,
             };
             if let Err(e) = receive(stream, &registry).await {
-                // `warn`, not `debug`: this is the *only* place the real
-                // reason a sync failed exists. All the sender ever learns is
-                // that the socket closed, so it reports "Broken pipe" — which
-                // says nothing about which file or which error. A sync that
-                // keeps failing is invisible at the default level otherwise.
+                // `warn`, not `debug`: the only place the real failure reason exists.
+                // The sender only sees the socket close ("Broken pipe").
                 warn!(%peer, error = %e, "drive transfer connection closed");
             }
         });
     }
 }
 
-/// A fixed key watch loaded from the configured key file, for the one-shot
-/// CLI senders (`folder-import`) that have no daemon channel to borrow. Mirrors
-/// what `cl_raft::client::client_for` does for the rpc channel.
+/// A fixed key watch from the key file, for one-shot CLI senders
+/// (`folder-import`) with no daemon channel. Mirrors `cl_raft::client::client_for`.
 pub fn key_watch_from_config(cfg: &cl_config::ClusterConfig) -> Result<KeyWatch> {
     let key = cl_secret::ClusterKey::load(&cfg.secrets.key_file).map_err(|e| {
         DriveError::Transfer {
@@ -397,12 +350,10 @@ pub fn key_watch_from_config(cfg: &cl_config::ClusterConfig) -> Result<KeyWatch>
     Ok(cl_raft::fixed_key(Arc::new(key)))
 }
 
-/// Dial a peer's drive listener and prove we hold the cluster key before
-/// framing, so no manifest or file is ever sent to something that is not a
-/// member. Shared by every sender (sync, migration verify, the CLIs).
+/// Dial a peer's drive listener and prove we hold the cluster key before any
+/// framing, so nothing is sent to a non-member. Shared by every sender.
 pub async fn connect_authenticated(peer: SocketAddr, keys: &KeyWatch) -> Result<Connection> {
-    // No key means we cannot prove membership and the listener would refuse
-    // us anyway; failing here says why instead of a bare reset.
+    // No key: the listener would refuse us anyway; fail here with a reason.
     let key = keys.borrow().clone().ok_or_else(|| DriveError::Transfer {
         message: "this node holds no cluster key, so it cannot authenticate to the drive transport"
             .into(),
@@ -421,8 +372,7 @@ pub async fn connect_authenticated(peer: SocketAddr, keys: &KeyWatch) -> Result<
     Ok(frame(stream))
 }
 
-/// `recv`, bounded: a peer that stops talking must not hold a receive slot
-/// forever.
+/// `recv`, bounded so a silent peer can't hold a receive slot forever.
 async fn recv_within(
     conn: &mut Connection,
     limit: Duration,
@@ -436,15 +386,13 @@ async fn recv_within(
     }
 }
 
-/// A chunked whole-file transfer in progress: the final target, the temp file
-/// being written, the metadata to stamp on it and the open handle chunks are
-/// appended to.
+/// A chunked whole-file transfer in progress: target, temp file, metadata to
+/// stamp, and the open handle chunks append to.
 ///
-/// Owns the temp file's lifetime: unless `armed` is cleared after the final
-/// rename, dropping this removes it. Every way out of `receive` other than a
-/// completed `WholeFileEnd` (a second `WholeFileBegin` replacing it, a
-/// dropped connection, a failed write, a timeout) just drops the state, so
-/// none of them can leave a half written `.tmp` file behind forever.
+/// Owns the temp file: unless `armed` is cleared after the final rename,
+/// dropping removes it. Every exit other than a completed `WholeFileEnd`
+/// (replacement, dropped connection, failed write, timeout) just drops it, so
+/// none can leave a half-written `.tmp` behind.
 struct ChunkedWrite {
     target: PathBuf,
     tmp: PathBuf,
@@ -457,7 +405,7 @@ struct ChunkedWrite {
 }
 
 impl ChunkedWrite {
-    /// The file is in place; there is nothing left to clean up.
+    /// In place; nothing to clean up.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -472,10 +420,9 @@ impl Drop for ChunkedWrite {
     }
 }
 
-/// Run the receive side of one sync over an already accepted connection.
-/// The stream must already have passed `stream_auth::accept`: `serve` does
-/// that, and tests that call this directly have to do it themselves. Exposed
-/// so tests can drive it over a loopback pair without a listener.
+/// Run the receive side of one sync over an accepted connection, which must
+/// already have passed `stream_auth::accept` (`serve` does; direct test callers
+/// must). Exposed for loopback tests.
 pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> {
     let mut conn = frame(stream);
 
@@ -513,8 +460,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
         };
 
     let root = match &staging {
-        // `ensure_staging_volume` refuses a path that is not a backup
-        // destination configured for this node.
+        // `ensure_staging_volume` refuses a path not configured as a backup destination.
         Some(destination_path) => {
             registry.ensure_staging_volume(Path::new(destination_path), &volume)?
         }
@@ -536,9 +482,8 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 gid,
                 mtime_nanos,
             }) => {
-                // Drop (and so delete the temp file of) a transfer that was
-                // never finished before starting the next. Done first: for
-                // the same target both would use the same temp name.
+                // Drop (deleting the temp of) an unfinished transfer first: the same
+                // target would use the same temp name.
                 drop(chunked.take());
                 let target = resolve_no_follow(&root, &path)?;
                 if let Some(parent) = target.parent() {
@@ -564,9 +509,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let mut state = chunked.take().ok_or_else(|| DriveError::Transfer {
                     message: "WholeFileChunk with no WholeFileBegin in progress".into(),
                 })?;
-                // Hand the open handle to the blocking pool and take it back,
-                // so writing a chunk of a multi-gigabyte file never runs on a
-                // runtime thread.
+                // Writes go through the blocking pool, off runtime threads.
                 chunked = Some(
                     off_runtime("writing a chunk", move || {
                         let file = state.file.as_mut().ok_or_else(|| DriveError::Transfer {
@@ -611,8 +554,6 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }
             Some(Message::SignatureRequest(path)) => {
                 let target = resolve_no_follow(&root, &path)?;
-                // Reading the file and building its rolling-hash signature is
-                // whole-file IO plus CPU.
                 let data = off_runtime("building a signature", move || {
                     let data = read_no_follow(&target).unwrap_or_default();
                     Ok(Signature::calculate(&data, signature_options()).into_serialized())
@@ -624,10 +565,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }
             Some(Message::HashRequest(path)) => {
                 let target = resolve_no_follow(&root, &path)?;
-                // Streamed, not `fs::read`: a hash is requested for every
-                // file the sender no longer has, whatever its size. A
-                // symlink has no content of its own to hash and must not be
-                // read through to whatever it points at.
+                // Streamed, not `fs::read`: hashes are requested for every file the
+                // sender dropped, whatever the size. A symlink has no content to hash
+                // and must not be read through.
                 let hash = off_runtime("hashing a file", move || {
                     let is_link = std::fs::symlink_metadata(&target)
                         .map(|m| m.file_type().is_symlink())
@@ -678,8 +618,6 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 data,
             }) => {
                 let target = resolve_no_follow(&root, &path)?;
-                // Reading the base, applying the delta and writing the result
-                // is whole-file IO on both ends plus the patch itself.
                 off_runtime("applying a delta", move || {
                     let base = read_no_follow(&target).unwrap_or_default();
                     let mut out = Vec::new();
@@ -706,15 +644,10 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                         source,
                     })?;
                 }
-                // A rename is only ever the sender's *guess* that two files
-                // with equal content are the same file moved. A guess that
-                // misses — the source was already consumed by an earlier
-                // rename this pass, or deleted underneath us — must not take
-                // the whole volume down with it: returning here drops the
-                // connection mid-stream, the sender reports a bare "Broken
-                // pipe", and the volume then fails every pass forever. Skip
-                // it instead; the file is missing from the diff next pass and
-                // gets sent whole.
+                // A rename is only the sender's *guess*. A miss (source consumed by an
+                // earlier rename, or deleted) must not kill the volume: returning drops
+                // the connection, the sender sees "Broken pipe", and the volume fails
+                // every pass. Skip; the file is sent whole next pass.
                 if let Err(source) = std::fs::rename(&src, &dst) {
                     if source.kind() == io::ErrorKind::NotFound {
                         warn!(%from, %to, "skipping a rename whose source is gone");
@@ -762,8 +695,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let target = resolve_no_follow(&root, &path)?;
                 let root = root.clone();
                 off_runtime("restamping a directory", move || {
-                    // `set_permissions` and `chown` follow a final symlink,
-                    // which would restamp whatever it points at.
+                    // `set_permissions` and `chown` follow a final symlink.
                     reject_symlink(&root, &target, &path)?;
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
                         .map_err(|source| DriveError::Io {
@@ -794,11 +726,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }
             Some(Message::RemoveDir(path)) => {
                 let target = resolve_no_follow(&root, &path)?;
-                // Non-recursive and best effort on purpose: `remove_dir` only
-                // succeeds on an empty directory, so this can never take out a
-                // tree the sender still has files in, and a directory that is
-                // busy (a mount point, say) is left alone rather than failing
-                // the whole sync.
+                // Non-recursive, best effort: `remove_dir` only succeeds on an empty
+                // directory, so it can't take out a tree the sender still has files in,
+                // and a busy one (mount point) is left alone rather than failing the sync.
                 off_runtime("removing a directory", move || {
                     if let Err(e) = std::fs::remove_dir(&target) {
                         debug!(path = %target.display(), error = %e, "could not remove a directory");
@@ -821,8 +751,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 }
             }
             Some(Message::Done) => {
-                // A served volume's copy now matches its source: remember
-                // that tree, so a later write to this copy is noticed.
+                // Copy now matches its source: remember the tree so later writes are noticed.
                 if staging.is_none() && registry.is_served(&volume.drive) {
                     let applied = scan::scan_off_runtime(root.clone(), false).await?;
                     registry.record_synced(&volume, &applied.digest());
@@ -832,9 +761,8 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                     .map_err(io_err)?;
                 break;
             }
-            // Nothing a well behaved sender emits here, so whatever is on
-            // the other end is confused or hostile: end the connection
-            // rather than keep serving it.
+            // Not something a well-behaved sender emits: confused or hostile peer, end
+            // the connection.
             Some(other) => {
                 return Err(DriveError::Transfer {
                     message: format!("unexpected message on drive transport: {other:?}"),
@@ -847,8 +775,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     Ok(())
 }
 
-/// Ask a peer for its manifest without starting a sync. Used by migration
-/// verification to compare source and target after the final delta.
+/// Ask a peer for its manifest without starting a sync (migration verification).
 pub async fn request_manifest(
     peer: SocketAddr,
     volume: &VolumeId,
@@ -876,18 +803,16 @@ pub async fn request_manifest(
     }
 }
 
-/// A temp path next to `target`, on the same directory so the final rename
-/// is same-filesystem and therefore atomic.
+/// A temp path next to `target` so the final rename is same-filesystem (atomic).
 fn temp_path(target: &Path) -> PathBuf {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     target.with_file_name(format!(".{name}.tmp-{}", std::process::id()))
 }
 
-/// Create the temp file fresh. A leftover from a crashed run is removed
-/// first (`remove_file` unlinks a symlink rather than following it), and the
-/// open itself refuses to follow a link or reuse an existing file, so a
-/// symlink planted at the temp name between the two cannot redirect the write
-/// elsewhere. Mode is tightened to 0600 until the real mode is stamped.
+/// Create the temp file fresh. A leftover is removed first (`remove_file` unlinks
+/// a symlink rather than following it) and the open refuses to follow a link or
+/// reuse a file, so a symlink planted between the two can't redirect the write.
+/// Mode is 0600 until the real mode is stamped.
 fn create_temp(tmp: &Path) -> Result<std::fs::File> {
     let _ = std::fs::remove_file(tmp);
     std::fs::OpenOptions::new()
@@ -902,9 +827,8 @@ fn create_temp(tmp: &Path) -> Result<std::fs::File> {
         })
 }
 
-/// Read a file without following a symlink in its final component, which
-/// `std::fs::read` would. Intermediate components are the caller's concern
-/// (`resolve_no_follow`).
+/// Read a file without following a symlink in its final component (which
+/// `std::fs::read` would); intermediates are `resolve_no_follow`'s concern.
 fn read_no_follow(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -915,9 +839,8 @@ fn read_no_follow(path: &Path) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Refuse to act on `target` if it is itself a symlink, for operations whose
-/// underlying syscalls would follow it. `target == root` is exempt: the drive
-/// root is trusted, and `"."` resolves to it.
+/// Refuse `target` if it is itself a symlink, for syscalls that would follow it.
+/// `target == root` is exempt: the drive root is trusted and `"."` resolves to it.
 fn reject_symlink(root: &Path, target: &Path, rel: &str) -> Result<()> {
     if target == root {
         return Ok(());
@@ -930,8 +853,8 @@ fn reject_symlink(root: &Path, target: &Path, rel: &str) -> Result<()> {
     }
 }
 
-/// Stamp mode, ownership and mtime through an open handle, so nothing here
-/// resolves a path again and a swapped-in symlink cannot redirect it.
+/// Stamp mode, ownership and mtime through an open handle, so a swapped-in
+/// symlink can't redirect it.
 fn stamp_open_file(
     file: &std::fs::File,
     tmp: &Path,
@@ -951,9 +874,8 @@ fn stamp_open_file(
     filetime::set_file_handle_times(file, Some(mtime), Some(mtime)).map_err(io)
 }
 
-/// Stamp metadata on a path that may be a symlink (a renamed link), without
-/// ever following it: ownership via `lchown`, times via the symlink variant,
-/// and no chmod at all since a link's own mode is meaningless on Linux.
+/// Stamp metadata on a possibly-symlink path without following it: `lchown`,
+/// symlink times, no chmod (a link's own mode is meaningless on Linux).
 fn stamp_path_no_follow(
     path: &Path,
     mode: u32,
@@ -980,16 +902,12 @@ fn stamp_path_no_follow(
     }
 }
 
-/// Write `data` to a temp file next to `target`, then rename into place.
-/// The rename means an interrupted transfer never leaves a half written
-/// file visible under the real name, and it replaces a symlink at `target`
-/// rather than writing through it.
+/// Write `data` to a temp file next to `target`, then rename into place, so an
+/// interrupted transfer never shows a half-written file and a symlink at
+/// `target` is replaced rather than written through.
 ///
-/// `mtime_nanos` is the sender's original mtime, applied to the temp file
-/// before the rename: leaving this at "now" (the write time) would make the
-/// receiver's next scan see a fresh mtime that never matches the sender's,
-/// so `Manifest::diff` would keep reporting the file changed and re-sync it
-/// every pass forever.
+/// `mtime_nanos` is the sender's mtime, applied before the rename; "now" would
+/// never match the sender's and `Manifest::diff` would re-sync the file forever.
 fn write_temp_then_rename(
     target: &Path,
     data: &[u8],
@@ -1058,9 +976,8 @@ fn write_whole(
         path: tmp.clone(),
         source,
     })?;
-    // A symlink's own mode is meaningless on Linux (always 0o777) and
-    // `set_permissions` follows the link rather than the symlink itself, so
-    // only ownership is stamped here — with `lchown`, which does not follow.
+    // A symlink's mode is meaningless on Linux and `set_permissions` follows the
+    // link, so stamp ownership only, with `lchown`.
     std::os::unix::fs::lchown(&tmp, Some(uid), Some(gid)).map_err(|source| DriveError::Io {
         path: tmp.clone(),
         source,
@@ -1205,9 +1122,8 @@ mod receive_tests {
         done: JoinHandle<Result<()>>,
     }
 
-    /// A loopback sync session against a registry whose only drive is
-    /// `drive_root`, past the `Hello`/`Ready` handshake. Volume "v" is the
-    /// returned root.
+    /// A loopback sync session whose only drive is `drive_root` (volume "v"), past
+    /// the `Hello`/`Ready` handshake.
     async fn session(drive_root: &Path) -> (Session, PathBuf) {
         let registry = DriveRegistry::from_drives(
             "n1",
@@ -1578,8 +1494,7 @@ mod port_tests {
     }
 }
 
-/// The listener must refuse anything that has not proven it holds the cluster
-/// key, before it will read a manifest or write a byte.
+/// The listener must refuse anything that hasn't proven it holds the cluster key.
 #[cfg(test)]
 mod auth_tests {
     use std::collections::BTreeMap;
@@ -1589,7 +1504,6 @@ mod auth_tests {
 
     use super::*;
 
-    /// A real `serve_listener` over a temp drive, and the key it holds.
     async fn listener(root: &Path) -> (SocketAddr, KeyWatch) {
         let registry = Arc::new(DriveRegistry::from_drives(
             "n1",

@@ -26,18 +26,12 @@ pub struct Unit {
 }
 
 impl Unit {
-    /// `Wants` rather than `Requires` on docker: a manager with no docker still
-    /// votes, holds the replicated state and serves the ui, so the daemon must
-    /// come up on a node where docker is broken. It is the node people go to to
-    /// find out why.
+    /// `Wants` rather than `Requires` on docker: a manager with broken docker
+    /// still votes and serves the ui, and is where people go to find out why.
     ///
-    /// Still runs as root (`User=` is deliberately left unset): docker and the
-    /// overlay networking it manages (creating VXLAN interfaces, bridges, veth
-    /// pairs via rtnetlink) need real root, not just membership of a group.
-    /// `Group=` only sets root's *primary* group here, which costs nothing —
-    /// root bypasses the unix permission model outright — but keeps the
-    /// process's own group identity consistent with the `clouduler` group the
-    /// daemon chowns its files to on startup, in case anything ever cares.
+    /// Still runs as root (`User=` unset): docker and the overlay networking
+    /// (VXLAN, bridges, veth via rtnetlink) need real root. `Group=` only sets
+    /// root's primary group, matching the `clouduler` group the daemon chowns to.
     pub fn render(&self) -> String {
         format!(
             "[Unit]\n\
@@ -115,15 +109,10 @@ pub fn is_available() -> bool {
 
 /// Copy this executable to where the unit will call it from.
 ///
-/// init is normally run straight from a downloaded binary sitting in a home
-/// directory or /tmp, and a unit pointing there breaks the moment that file is
-/// cleaned up or the user is removed. Copying first makes the installed service
-/// depend only on paths root controls.
-///
-/// Shared with the self-update worker via `cl_update::install`, which does
-/// the actual temp-file-and-rename swap: a running daemon cannot have its own
-/// executable overwritten in place (ETXTBSY), but can have the directory
-/// entry swapped underneath it.
+/// init usually runs from a downloaded binary in a home directory or /tmp,
+/// which breaks the unit once cleaned up. Shared with the self-update worker
+/// via `cl_update::install`, which swaps via temp file and rename because a
+/// running executable cannot be overwritten in place (ETXTBSY).
 pub fn install_binary(source: &Path, destination: &Path) -> Result<()> {
     cl_update::install::install_binary(source, destination).with_context(|| {
         format!(
@@ -134,7 +123,6 @@ pub fn install_binary(source: &Path, destination: &Path) -> Result<()> {
     })
 }
 
-/// Write the unit and reload systemd so it is visible.
 pub fn install(unit: &Unit) -> Result<PathBuf> {
     // The unit has `Group=clouduler` and systemd refuses to start a service
     // whose group does not exist.
@@ -158,7 +146,6 @@ pub fn install(unit: &Unit) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Enable at boot and start now.
 pub fn enable_and_start(unit: &Unit) -> Result<()> {
     if unit.proxy_ports.is_some() {
         // The socket first, so the ports are held before the daemon is up.
