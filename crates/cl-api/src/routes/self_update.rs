@@ -52,7 +52,7 @@ async fn github_token_status(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<GithubTokenStatus> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(GithubTokenStatus {
         configured: cluster_state.secrets.contains_key(GITHUB_TOKEN_SECRET),
     })
@@ -181,7 +181,7 @@ async fn start_run(
     }
     drop(config);
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let existing = cl_update::orchestrator::load_run_revision(&cluster_state);
     let revision = existing.as_ref().map(|(_, r)| *r).unwrap_or(0);
     if let Some((existing, _)) = existing {
@@ -207,7 +207,7 @@ async fn get_run(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Option<UpdateRunState>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(load_run(&cluster_state))
 }
 
@@ -215,7 +215,7 @@ async fn cancel_run(
     _admin: RequireAdmin,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let (mut run, revision) = cl_update::orchestrator::load_run_revision(&cluster_state)
         .ok_or_else(|| ApiError::Conflict("no self-update run is on record".into()))?;
     if !run.in_progress() {
@@ -330,7 +330,7 @@ async fn latest(
 }
 
 async fn unseal_github_token(state: &AppState) -> Option<String> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let entry = cluster_state.secrets.get(GITHUB_TOKEN_SECRET)?;
     let sealed = Sealed::from_blob(entry.sealed.clone());
     let key = state.key.read().await.clone()?;

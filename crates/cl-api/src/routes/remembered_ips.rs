@@ -41,7 +41,7 @@ fn now() -> i64 {
 
 async fn list(_admin: RequireAdmin, State(state): State<AppState>) -> Json<Vec<RememberedIp>> {
     let now = now();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut rows: Vec<RememberedIp> = cluster_state
         .proxy_sessions
         .iter()

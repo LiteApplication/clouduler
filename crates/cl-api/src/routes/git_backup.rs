@@ -140,7 +140,7 @@ struct GitBackupStatus {
 
 async fn status(_identity: Identity, State(state): State<AppState>) -> Json<GitBackupStatus> {
     let configured = state.cluster_config.read().await.backup.is_some();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(GitBackupStatus {
         configured,
         deploy_public_key: public_from_state(&cluster_state),
@@ -158,7 +158,7 @@ async fn webhook_secret_status(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<WebhookSecretStatus> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(WebhookSecretStatus {
         configured: cluster_state.secrets.contains_key(WEBHOOK_SECRET),
     })
@@ -212,7 +212,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 async fn verify_webhook_token(state: &AppState, presented: &str) -> bool {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let Some(entry) = cluster_state.secrets.get(WEBHOOK_SECRET) else {
         return false;
     };
@@ -333,7 +333,7 @@ async fn run_reconcile(state: &AppState, author: Option<(String, String)>) -> Re
         .clone()
         .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let key = {
         let key_guard = state.key.read().await;
         key_guard
@@ -457,7 +457,7 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
         .clone()
         .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let key = {
         let key_guard = state.key.read().await;
         key_guard
@@ -717,7 +717,7 @@ async fn apply_pulled_tree(
     cluster_config: &ClusterConfig,
     parsed: &ParsedTree,
 ) -> Result<(), ApiError> {
-    let current = state.cluster.state().await;
+    let current = state.cluster.snapshot().await;
     let yaml_changed =
         current.cluster_config.as_ref().map(|c| c.yaml.as_str()) != parsed.cluster_yaml.as_deref();
     if yaml_changed {
@@ -744,7 +744,7 @@ async fn apply_pulled_tree(
         deploy_from_files(state, name, spec.clone(), configs).await?;
     }
 
-    let current = state.cluster.state().await;
+    let current = state.cluster.snapshot().await;
     for name in current.stacks.keys() {
         if !parsed.stacks.contains_key(name) {
             let response = state
@@ -780,7 +780,7 @@ async fn apply_pulled_tree(
         }
     }
 
-    let current = state.cluster.state().await;
+    let current = state.cluster.snapshot().await;
     for name in current.configs.keys() {
         if cl_backup::snapshot::is_bookkeeping_config(name) || super::objects::is_reserved(name) {
             continue;
@@ -805,7 +805,7 @@ async fn apply_pulled_tree(
 /// independent of the spec redeploy: editing a module does not restart containers. A stack
 /// with modules in raft but no `terraform/<stack>/` in the tree gets an empty set.
 async fn apply_pulled_terraform(state: &AppState, parsed: &ParsedTree) -> Result<(), ApiError> {
-    let current = state.cluster.state().await;
+    let current = state.cluster.snapshot().await;
     let mut stacks: BTreeSet<&String> = parsed.terraform.keys().collect();
     stacks.extend(current.terraform_modules.keys());
     for stack in stacks {
@@ -879,7 +879,7 @@ mod tests {
             })
             .await
             .expect("deploy");
-        let before = h.state.cluster.state().await;
+        let before = h.state.cluster.snapshot().await;
         assert_eq!(before.stacks["site"].revision, 1);
 
         let cluster_config = h.state.cluster_config.read().await.clone();
@@ -887,7 +887,7 @@ mod tests {
             .await
             .expect("apply unchanged tree");
 
-        let after = h.state.cluster.state().await;
+        let after = h.state.cluster.snapshot().await;
         assert_eq!(
             after.stacks["site"].revision, 1,
             "an unchanged spec must not bump the stack's revision"
@@ -930,7 +930,7 @@ mod tests {
             .await
             .expect("apply changed tree");
 
-        let after = h.state.cluster.state().await;
+        let after = h.state.cluster.snapshot().await;
         assert_eq!(after.stacks["site"].revision, 2);
         assert_eq!(after.stacks["site"].spec, SPEC_V2);
     }
@@ -1001,7 +1001,7 @@ mod tests {
         apply_pulled_tree(&h.state, &cluster_config, &t)
             .await
             .expect("apply");
-        let st = h.state.cluster.state().await;
+        let st = h.state.cluster.snapshot().await;
         assert_eq!(st.stacks["site"].revision, 1, "no redeploy");
         assert_eq!(st.terraform_modules["site"]["web"].source, MODULE);
         let rev = st.terraform_modules["site"]["web"].revision;
@@ -1010,7 +1010,7 @@ mod tests {
         apply_pulled_tree(&h.state, &cluster_config, &t)
             .await
             .expect("reapply");
-        let st = h.state.cluster.state().await;
+        let st = h.state.cluster.snapshot().await;
         assert_eq!(st.terraform_modules["site"]["web"].revision, rev);
 
         // Edit one module, add another.
@@ -1022,7 +1022,7 @@ mod tests {
         apply_pulled_tree(&h.state, &cluster_config, &t)
             .await
             .expect("apply edit");
-        let st = h.state.cluster.state().await;
+        let st = h.state.cluster.snapshot().await;
         assert_eq!(st.stacks["site"].revision, 1, "still no redeploy");
         assert_eq!(st.terraform_modules["site"].len(), 2);
         assert_eq!(st.terraform_modules["site"]["web"].revision, rev + 1);
@@ -1031,7 +1031,7 @@ mod tests {
         apply_pulled_tree(&h.state, &cluster_config, &tree(&[("site", SPEC_TWO)]))
             .await
             .expect("apply removal");
-        let st = h.state.cluster.state().await;
+        let st = h.state.cluster.snapshot().await;
         assert!(st.terraform_modules.is_empty());
         assert_eq!(st.stacks["site"].revision, 1);
     }

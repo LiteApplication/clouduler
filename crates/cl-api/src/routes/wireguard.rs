@@ -127,7 +127,7 @@ async fn list(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<WireguardIngressRule>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(WireguardIngressStore::load(&cluster_state).rules)
 }
 
@@ -147,7 +147,7 @@ async fn create(
 ) -> Result<Json<WireguardIngressRule>, ApiError> {
     wireguard_network(&state, &body.network).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let rule = WireguardIngressRule {
         id: crate::static_routes::new_id(),
@@ -169,7 +169,7 @@ async fn update(
 ) -> Result<Json<WireguardIngressRule>, ApiError> {
     wireguard_network(&state, &body.network).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let Some(existing) = store.rules.iter_mut().find(|r| r.id == id) else {
         return Err(ApiError::NotFound(format!(
@@ -191,7 +191,7 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let before = store.rules.len();
     store.rules.retain(|r| r.id != id);

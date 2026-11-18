@@ -133,7 +133,7 @@ pub(crate) async fn terraform_status(
     stack: &str,
 ) -> Result<TerraformStatus, ApiError> {
     let enabled_cluster = state.cluster_config.read().await.terraform.is_some();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let spec = cluster_state
         .stacks
         .get(stack)

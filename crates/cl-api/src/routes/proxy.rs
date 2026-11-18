@@ -107,7 +107,7 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<Ro
     let Some(table) = state.proxy_routes.get() else {
         return Json(Vec::new());
     };
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let apexes: std::collections::HashSet<String> = state
         .cluster_config
         .read()

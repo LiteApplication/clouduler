@@ -624,7 +624,7 @@ async fn reconcile_loop(
     loop {
         ticker.tick().await;
         let cfg = config_rx.borrow().clone();
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
 
         // Before the routes, so a request never meets a route its caller's
         // stack has not yet been restricted from.
@@ -914,7 +914,7 @@ struct Acme {
 /// may not have caught up to a token set on another node yet.
 async fn cloudflare_token(cluster: &ClusterNode, key: Option<&ClusterKey>) -> Option<String> {
     let key = key?;
-    let state = cluster.state().await;
+    let state = cluster.snapshot().await;
     let entry = state.secrets.get(CLOUDFLARE_TOKEN_SECRET)?;
     match Sealed::from_blob(entry.sealed.clone()).open(key, CLOUDFLARE_TOKEN_SECRET) {
         Ok(plaintext) => match String::from_utf8(plaintext) {
@@ -1053,7 +1053,7 @@ async fn issue_missing(
     zones: &Zones,
     http01: &Http01Store,
 ) {
-    let state = cluster.state().await;
+    let state = cluster.snapshot().await;
     for (host, allow_http01) in tls_hosts(cfg, &state) {
         if state.certificates.contains_key(&host) {
             continue;
@@ -1206,7 +1206,7 @@ async fn run_dns_reconcile(
         if !cluster.is_leader() {
             continue;
         }
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let cfg = config_rx.borrow().clone();
         let key = key_rx.borrow().clone();
         prune_stale_status(&cluster, &cfg, &state, false, true).await;

@@ -42,7 +42,7 @@ impl Worker {
     }
 
     async fn tick(&self) -> Result<(), String> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let Some((mut run, revision)) = orchestrator::load_run_revision(&state) else {
             return Ok(());
         };
@@ -123,7 +123,7 @@ impl Worker {
     }
 
     async fn unseal_github_token(&self) -> Option<String> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let entry = state.secrets.get(GITHUB_TOKEN_SECRET)?;
         let sealed = Sealed::from_blob(entry.sealed.clone());
         let key = self.cluster_key.borrow().clone()?;

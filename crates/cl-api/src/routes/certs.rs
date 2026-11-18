@@ -40,7 +40,7 @@ async fn list_certificates(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<CertificateSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(certificate_summaries(&cluster_state))
 }
 
@@ -142,7 +142,7 @@ async fn list_dns(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<DnsRecordSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut rows: Vec<DnsRecordSummary> = cluster_state
         .dns_records
         .values()

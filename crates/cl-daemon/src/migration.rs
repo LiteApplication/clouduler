@@ -63,7 +63,7 @@ pub fn start(
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
 
             for job in claimable(&state, &node_name) {
                 if !running.lock().await.insert(job.instance.clone()) {

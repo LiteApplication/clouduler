@@ -80,7 +80,7 @@ pub(super) async fn cluster_overview(ctx: &Ctx) -> ToolResult {
 }
 
 pub(super) async fn list_stacks(ctx: &Ctx) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     if state.stacks.is_empty() {
         return Ok("no stacks deployed".into());
     }
@@ -102,7 +102,7 @@ pub(super) async fn list_stacks(ctx: &Ctx) -> ToolResult {
 
 pub(super) async fn list_nodes(ctx: &Ctx) -> ToolResult {
     let summaries = nodes::list_nodes(&ctx.state).await;
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let mut out = String::new();
     for n in summaries {
         let _ = write!(

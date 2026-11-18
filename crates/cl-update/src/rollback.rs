@@ -193,7 +193,7 @@ pub fn verify_runnable(path: &Path) -> Result<(), String> {
 /// Whether this node is back as a working member: on the roster, not marked
 /// unreachable, and a leader is known.
 async fn rejoined(cluster: &ClusterNode, node: &str) -> bool {
-    let state = cluster.state().await;
+    let state = cluster.snapshot().await;
     state.nodes.contains_key(node)
         && !state.unreachable.contains(node)
         && cluster.quorum().leader().is_some()

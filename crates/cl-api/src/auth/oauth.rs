@@ -396,7 +396,7 @@ pub async fn verify_access_token(state: &AppState, token: &str) -> Result<OAuthG
         .clone()
         .ok_or_else(|| ApiError::Unavailable("this node holds no cluster key".into()))?;
     let payload = decode_access_token(&key, token, now_secs())?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let store = McpClientStore::load(&cluster_state);
     match store.find(&payload.cid) {
         Some(c) if c.approved_by.is_some() && c.generation == payload.generation => {}
@@ -442,7 +442,7 @@ pub async fn authenticate_mcp(
         });
     }
     if let Some((id, secret)) = keys::parse(token) {
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         let store = ApiKeyStore::load(&cluster_state);
         return keys::verify(&store, id, secret)
             .map(|record| McpCaller {

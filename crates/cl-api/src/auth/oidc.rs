@@ -122,7 +122,7 @@ impl OidcAuthenticator {
     async fn client_secret(&self) -> Option<String> {
         let key_guard = self.key.read().await;
         let key = key_guard.as_ref()?;
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let entry = state.secrets.get(OIDC_CLIENT_SECRET)?;
         match Sealed::from_blob(entry.sealed.clone()).open(key, OIDC_CLIENT_SECRET) {
             Ok(plaintext) => match String::from_utf8(plaintext) {

@@ -95,7 +95,7 @@ async fn run(
 
     loop {
         ticker.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let live = crate::daemon::live_config(&state, &boot_cfg);
         let nodes = nodes_of(&live);
 

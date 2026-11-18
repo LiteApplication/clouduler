@@ -318,7 +318,7 @@ pub async fn renewal_tick(
     if !node.is_leader() {
         return;
     }
-    let state = node.state().await;
+    let state = node.snapshot().await;
     let now = now_unix();
     for cert in state.certificates.values() {
         if !needs_renewal(cert.not_after, now, RENEWAL_WINDOW) {

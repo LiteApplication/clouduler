@@ -73,7 +73,7 @@ async fn run(
 
     loop {
         ticker.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let cfg = crate::daemon::live_config(&state, &boot_cfg);
 
         let allocations = cl_api::container_router::allocations_of(&state);

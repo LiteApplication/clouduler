@@ -168,7 +168,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 continue;
             }
 
-            let state = self.node.state().await;
+            let state = self.node.snapshot().await;
             let now = Instant::now();
 
             self.remove_deleted_volumes(&state.volume_removals).await;

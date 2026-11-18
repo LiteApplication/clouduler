@@ -48,7 +48,7 @@ async fn list(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<RegistryAccount>>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let key = state
         .key
         .read()

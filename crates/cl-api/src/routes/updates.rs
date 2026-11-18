@@ -158,7 +158,7 @@ pub(crate) async fn check_images(state: &AppState) {
         warn!("cannot check image updates: no docker connection on this node");
         return;
     };
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let registries = super::registries::load(state).await;
 
     let images: BTreeSet<String> = cluster_state
@@ -207,7 +207,7 @@ pub(crate) async fn check_images(state: &AppState) {
 }
 
 async fn rows(state: &AppState) -> Vec<UpdateRow> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
 
     let nodes: BTreeSet<String> = cluster_state
         .assignments
@@ -330,7 +330,7 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
     let Some(docker) = state.docker.get().await else {
         return Vec::new();
     };
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
 
     let mut statuses = Vec::new();
     for assignment in cluster_state.assignments.values() {
@@ -495,7 +495,7 @@ pub(crate) async fn apply_selection(
 
     // Queue everything in the replicated record before answering so every browser sees the
     // whole batch at once. An instance already mid-update is left alone.
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut queued = Vec::new();
     for instance in instances {
         let Some(assignment) = cluster_state.assignments.get(&instance) else {

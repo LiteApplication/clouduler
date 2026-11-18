@@ -21,14 +21,17 @@ pub fn cluster_state_events(
             let mut interval = tokio::time::interval(STATE_POLL_INTERVAL);
             loop {
                 interval.tick().await;
-                let state = cluster.state().await;
-                if Some(state.version) != last_version {
+                // Check the version under the lock; only build a snapshot on change.
+                let version = cluster.read(|s| s.version).await;
+                if Some(version) != last_version {
+                    let state = cluster.snapshot().await;
+                    let version = state.version;
                     let redacted = state.redacted();
                     let event = Event::default()
                         .event("state")
                         .json_data(&redacted)
                         .unwrap_or_else(|_| Event::default().event("state").data("{}"));
-                    return Some((Ok(event), (cluster, Some(state.version))));
+                    return Some((Ok(event), (cluster, Some(version))));
                 }
             }
         },

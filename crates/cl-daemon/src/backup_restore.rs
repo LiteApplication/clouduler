@@ -78,7 +78,7 @@ pub fn start_restore_watcher(
         let mut ticker = tokio::time::interval(RESTORE_POLL_INTERVAL);
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let Ok(registry) = DriveRegistry::new(&cfg, &node_name) else {
                 continue;
             };

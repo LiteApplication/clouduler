@@ -63,7 +63,7 @@ async fn list_destinations(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<DestinationSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .restic_destinations
@@ -109,7 +109,7 @@ async fn put_destination(
     };
     cl_raft::backup_validate::validate_destination(&probe).map_err(ApiError::BadRequest)?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let existing = cluster_state.restic_destinations.get(&body.id).cloned();
 
     let key_guard = state.key.read().await;
@@ -213,7 +213,7 @@ async fn list_targets(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<DriveBackupTarget>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(cluster_state.restic_targets.values().cloned().collect())
 }
 
@@ -252,7 +252,7 @@ async fn put_target(
             "frequency_secs must be at least 1".into(),
         ));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let last_run = cluster_state
         .restic_targets
         .get(&body.id)
@@ -306,7 +306,7 @@ async fn run_target(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<String>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let target = cluster_state
         .restic_targets
         .get(&id)
@@ -356,7 +356,7 @@ async fn list_runs(
     State(state): State<AppState>,
     Query(query): Query<RunsQuery>,
 ) -> Json<Vec<BackupRun>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut runs: Vec<BackupRun> = cluster_state
         .restic_runs
         .values()
@@ -372,7 +372,7 @@ async fn list_snapshots(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SnapshotInfo>>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let destination = cluster_state
         .restic_destinations
         .get(&id)
@@ -517,7 +517,7 @@ async fn list_restore_requests(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<RestoreRequest>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut requests: Vec<RestoreRequest> =
         cluster_state.restore_requests.values().cloned().collect();
     requests.sort_by_key(|r| std::cmp::Reverse(r.requested_at));

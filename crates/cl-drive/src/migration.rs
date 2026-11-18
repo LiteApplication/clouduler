@@ -196,7 +196,7 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
 
 /// The recorded phase raft has for `instance`, where a resumed migration picks up.
 async fn recorded_phase(node: &ClusterNode, instance: &InstanceId) -> Result<MigrationPhase> {
-    let state = node.state().await;
+    let state = node.snapshot().await;
     let assignment = state
         .assignments
         .get(instance)
@@ -237,7 +237,7 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
 async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     let volume_count = job.volumes.len() as u64;
     for (idx, volume) in job.volumes.iter().enumerate() {
-        let state = node.state().await;
+        let state = node.snapshot().await;
         let generation = state
             .volumes
             .get(volume)

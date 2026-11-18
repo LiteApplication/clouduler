@@ -377,7 +377,7 @@ async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<PutSettings>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let st = state.cluster.state().await;
+    let st = state.cluster.snapshot().await;
     let new = body.settings;
 
     let mut url_in: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -551,7 +551,7 @@ async fn test(
     State(state): State<AppState>,
     Json(body): Json<TestBody>,
 ) -> Result<Json<TestResult>, ApiError> {
-    let st = state.cluster.state().await;
+    let st = state.cluster.snapshot().await;
     let saved = settings::load(&st);
     let key = state
         .key

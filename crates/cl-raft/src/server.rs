@@ -170,7 +170,7 @@ async fn answer(ctx: &Context, query: Query) -> QueryResult {
         Query::State { include_secrets } => {
             let guard = ctx.shared.read().await;
             let state = if include_secrets {
-                guard.data.clone()
+                (*guard.data).clone()
             } else {
                 guard.data.redacted()
             };

@@ -96,7 +96,7 @@ pub fn spawn_wrap_for_new_nodes(state: AppState) {
                 continue;
             };
 
-            let cluster_state = state.cluster.state().await;
+            let cluster_state = state.cluster.snapshot().await;
             for (name, node) in &cluster_state.nodes {
                 let Some(pubkey_b64) = &node.node_pubkey else {
                     continue;
@@ -170,7 +170,7 @@ pub fn spawn_unwrap_own_key(state: AppState, node_name: String, keypair: Option<
                 return;
             }
 
-            let cluster_state = state.cluster.state().await;
+            let cluster_state = state.cluster.snapshot().await;
             let Some(entry) = cluster_state.wrapped_keys.get(&node_name) else {
                 continue;
             };

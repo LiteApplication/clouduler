@@ -296,7 +296,7 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
 
     /// One look at every served drive this node is a candidate for.
     pub async fn pass(self: &Arc<Self>) {
-        let state = self.node.state().await;
+        let state = self.node.snapshot().await;
         let drives: Vec<String> = self
             .registry
             .drives()
@@ -452,7 +452,7 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
     /// conflict is recorded without stopping the drive, and a safe handover
     /// is begun.
     async fn consider_failback(&self, drive: &str, to: &str) -> bool {
-        let state = self.node.state().await;
+        let state = self.node.snapshot().await;
         match self.plan(drive, to, &state).await {
             Err(reason) => {
                 info!(%drive, %to, %reason, "not handing the drive back yet");
@@ -507,7 +507,7 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
     }
 
     async fn hand_over(&self, drive: &str, to: &str) -> std::result::Result<(), Failure> {
-        let state = self.node.state().await;
+        let state = self.node.snapshot().await;
         let (plan, plans) = self.plan(drive, to, &state).await.map_err(Failure::Other)?;
         let push = match plan {
             DrivePlan::Conflict { volume, reason } => {

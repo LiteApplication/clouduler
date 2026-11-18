@@ -1500,7 +1500,7 @@ async fn seed_config(config_path: &Path, cluster: &ClusterNode) -> Result<()> {
 /// Publish every configured node into the replicated roster, and attach the
 /// workers as learners so they receive state without voting.
 async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
-    let known = cluster.state().await;
+    let known = cluster.snapshot().await;
 
     // This node last: when the leader is itself being re-addressed, every
     // other member is moved first, while it can still lead them all at the
@@ -1604,7 +1604,7 @@ async fn reap_removed_nodes(cluster: Arc<ClusterNode>, interval: Duration) {
         if !cluster.is_leader() {
             continue;
         }
-        let known = cluster.state().await;
+        let known = cluster.snapshot().await;
         for id in &known.removed {
             if let Err(e) = cluster.remove_node(node_id(*id)).await {
                 warn!(node = %id, error = %e, "could not drop removed node from raft membership");
@@ -1715,7 +1715,7 @@ async fn report_self(
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let Some(current) = state.nodes.get(&node_name) else {
             continue;
         };
@@ -1792,7 +1792,7 @@ async fn warn_fence_margin(
     let mut last: Vec<String> = Vec::new();
     loop {
         let cfg = config_rx.borrow_and_update().clone();
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let mut warnings: Vec<String> = cfg.failover.fence_margin_warning().into_iter().collect();
         let longest = state
             .stacks

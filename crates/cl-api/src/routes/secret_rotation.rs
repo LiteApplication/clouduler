@@ -289,7 +289,7 @@ async fn start_roll_for(
 ) -> RollStarted {
     // A follower may not have applied the new revision yet; planning against the old one finds nothing.
     for _ in 0..50 {
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         let applied = match kind {
             ObjectKind::Secret => cluster_state.secrets.get(name).map(|s| s.revision),
             ObjectKind::Config => cluster_state.configs.get(name).map(|c| c.revision),
@@ -300,7 +300,7 @@ async fn start_roll_for(
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let plan = plan_roll_for(&cluster_state, kind, name, revision);
     drop(cluster_state);
 
@@ -668,7 +668,11 @@ mod tests {
         let plan = plan_config_roll(&s, "c", 3);
         assert_eq!(plan.instances(), ["app.web.1"]);
         let skipped: Vec<&str> = plan.skipped.iter().map(|k| k.instance.as_str()).collect();
-        assert_eq!(skipped, ["app.web.0", "app.web.2"], "write: true worker is not a user");
+        assert_eq!(
+            skipped,
+            ["app.web.0", "app.web.2"],
+            "write: true worker is not a user"
+        );
     }
 
     #[test]

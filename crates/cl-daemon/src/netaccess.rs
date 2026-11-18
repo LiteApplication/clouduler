@@ -106,7 +106,7 @@ pub fn start(
         let mut last_warnings: Vec<String> = Vec::new();
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let cfg = crate::daemon::live_config(&state, &boot_cfg);
             let plan = net_access_plan(&input_for(&cfg, &node_name));
             if plan.warnings != last_warnings {

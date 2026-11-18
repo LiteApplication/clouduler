@@ -77,7 +77,7 @@ async fn list_configs(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<ConfigSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .configs
@@ -109,7 +109,7 @@ async fn get_config(
     if is_reserved(&name) {
         return Err(ApiError::NotFound(format!("no config {name}")));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let entry = cluster_state
         .configs
         .get(&name)
@@ -185,7 +185,7 @@ async fn list_secrets(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<SecretSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .secrets

@@ -174,7 +174,7 @@ pub fn start(
             }
             cfg = live_config(&cluster, &cfg).await;
 
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             // Unknown state keeps the restrictions applied so far; see
             // `restricted_stacks`.
             if let Some(stacks) = restricted_stacks(&cfg, &state) {
@@ -263,7 +263,7 @@ pub fn start(
 
             // Applied whether or not the node has an internal address yet: the
             // default deny must not depend on it, only the DNAT target does.
-            let cluster_state = cluster.state().await;
+            let cluster_state = cluster.snapshot().await;
             let ingress_store = WireguardIngressStore::load(&cluster_state);
             for (network, (kind, iface_addr)) in &interfaces {
                 if *kind != NetworkKind::Wireguard {
@@ -317,7 +317,7 @@ fn spawn_resolver(
         loop {
             ticker.tick().await;
             cfg = live_config(&cluster, &cfg).await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             if let Some(stacks) = restricted_stacks(&cfg, &state) {
                 resolver.refresh(&names_to_resolve(&stacks)).await;
                 tx.send_replace(resolver.resolved().clone());
@@ -533,7 +533,7 @@ async fn ensure_tunnel(
     iface: &str,
 ) -> Result<()> {
     let secret_name = wireguard_secret_name(network, node_name);
-    let state = cluster.state().await;
+    let state = cluster.snapshot().await;
     let entry = state
         .secrets
         .get(&secret_name)

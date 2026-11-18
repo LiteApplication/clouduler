@@ -36,7 +36,7 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
 
 pub(crate) async fn cluster_status(state: &AppState) -> StatusBody {
     let quorum = state.cluster.quorum().status();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
 
     let managers: Vec<&str> = cluster_state
         .nodes

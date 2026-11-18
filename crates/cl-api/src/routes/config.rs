@@ -38,7 +38,7 @@ async fn network_status(
     if !cfg.networks.contains_key(&name) {
         return Err(ApiError::NotFound(format!("no network named {name}")));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let allocations = crate::container_router::allocations_of(&cluster_state);
     let router = crate::container_router::router_status(&cluster_state, &cfg, &allocations, &name);
     let nodes = if router.is_some() {
@@ -73,7 +73,7 @@ async fn put_config(
     let previous = state.cluster_config.read().await.clone();
 
     // Only a collision this edit introduces blocks it, so a cluster that already has one can be edited to fix it.
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     if let Some((overlay, a, b)) = deployed_overlay_collision(&body.config, &cluster_state) {
         if deployed_overlay_collision(&previous, &cluster_state).is_none() {
             return Err(ApiError::Conflict(format!(
@@ -180,7 +180,7 @@ async fn rename_network(
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let renamed: Vec<(&str, StackFile)> = cluster_state
         .stacks
         .iter()
@@ -205,7 +205,7 @@ async fn rename_network(
         rename_wireguard_secrets(&state, &old_name, &new_name, &node_names).await?;
     }
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     for (stack_name, stack) in &cluster_state.stacks {
         let Ok(mut file) = StackFile::parse(&stack.spec) else {
             continue;
@@ -327,7 +327,7 @@ async fn rename_drive(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     apply_config(&state, &config).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     for (stack_name, stack) in &cluster_state.stacks {
         let Ok(mut file) = StackFile::parse(&stack.spec) else {
             continue;
@@ -377,7 +377,7 @@ async fn rename_wireguard_secrets(
 ) -> Result<(), ApiError> {
     for node in nodes {
         let old_name = crate::wireguard::wireguard_secret_name(old, node);
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         let Some(entry) = cluster_state.secrets.get(&old_name).cloned() else {
             continue;
         };
@@ -415,7 +415,7 @@ async fn rename_wireguard_secrets(
 }
 
 async fn rename_in_redirects(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = RedirectStore::load(&cluster_state);
     let mut changed = false;
     for rule in store.rules.iter_mut() {
@@ -443,7 +443,7 @@ async fn rename_in_redirects(state: &AppState, old: &str, new: &str) -> Result<(
 }
 
 async fn rename_in_static_routes(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = StaticRouteStore::load(&cluster_state);
     let mut changed = false;
     for rule in store.routes.iter_mut() {
@@ -475,7 +475,7 @@ async fn rename_in_wireguard_ingress(
     old: &str,
     new: &str,
 ) -> Result<(), ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let mut changed = false;
     for rule in store.rules.iter_mut() {

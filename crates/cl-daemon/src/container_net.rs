@@ -296,7 +296,7 @@ pub fn start(
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let cfg = crate::daemon::live_config(&state, &boot_cfg);
             if let Err(e) = reconcile(&state, &cfg, &node_name, netlink.as_ref(), &mut watch).await
             {

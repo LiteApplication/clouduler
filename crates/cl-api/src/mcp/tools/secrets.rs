@@ -87,7 +87,7 @@ fn valid_object_name(name: &str) -> Result<(), String> {
 }
 
 pub(super) async fn list_configs(ctx: &Ctx) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let mut out = String::new();
     for c in state.configs.values().filter(|c| !is_reserved(&c.name)) {
         let _ = writeln!(
@@ -106,7 +106,7 @@ pub(super) async fn list_configs(ctx: &Ctx) -> ToolResult {
 }
 
 pub(super) async fn get_config(ctx: &Ctx, args: NameArgs) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let entry = state
         .configs
         .get(&args.name)
@@ -126,7 +126,7 @@ pub(super) async fn get_config(ctx: &Ctx, args: NameArgs) -> ToolResult {
 }
 
 pub(super) async fn list_secrets(ctx: &Ctx) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let mut out = String::new();
     for s in state
         .secrets
@@ -167,7 +167,7 @@ fn used_by(state: &cl_raft::ClusterState, secret: &str) -> Vec<String> {
 }
 
 pub(super) async fn inspect_secret(ctx: &Ctx, args: NameArgs) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     // A reserved secret is the cluster's own credential; to the AI it does not exist.
     let entry = state
         .secrets
@@ -237,7 +237,7 @@ pub(super) async fn store_config(ctx: &Ctx, name: &str, content: &str) -> Result
     if content.len() > MAX_OBJECT_BYTES {
         return Err(format!("config is over the {MAX_OBJECT_BYTES} byte limit"));
     }
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let owner = state.configs.get(name).and_then(|c| c.owner.clone());
     if let Some(o) = owner.as_deref().filter(|o| *o != focus) {
         return Err(format!(
@@ -266,7 +266,7 @@ pub(super) async fn generate_secret(ctx: &Ctx, args: GenerateSecretArgs) -> Tool
     if is_reserved_secret(&args.name) {
         return Err(format!("{} is a reserved name", args.name));
     }
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let existing = state.secrets.get(&args.name);
     if existing.is_some() && !args.overwrite {
         return Err(format!(

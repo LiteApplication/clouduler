@@ -85,7 +85,7 @@ pub(super) fn parse_instance(raw: &str) -> Result<InstanceId, String> {
 
 /// A full id (`stack.service.N`) names one instance in any stack; a bare service name means every replica in the focused stack.
 pub(super) async fn resolve_target(ctx: &Ctx, target: &str) -> Result<Vec<InstanceId>, String> {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     if let Ok(id) = target.parse::<InstanceId>() {
         if !state.assignments.contains_key(&id) {
             return Err(format!("no instance {id}"));
@@ -138,7 +138,7 @@ pub(super) async fn first_running(ctx: &Ctx, ids: &[InstanceId]) -> Result<Insta
     if ids.len() == 1 {
         return Ok(ids[0].clone());
     }
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let mut seen = Vec::new();
     for id in ids {
         let Some(assignment) = state.assignments.get(id) else {

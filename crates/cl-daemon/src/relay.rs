@@ -83,7 +83,7 @@ pub fn start(
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let live = crate::daemon::live_config(&state, &boot_cfg);
             refreshed.set_relays(crate::placement::relay_routes(&state, &live, &node_name));
 

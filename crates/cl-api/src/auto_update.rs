@@ -164,7 +164,7 @@ async fn submit(state: &AppState, request: Request) {
 }
 
 pub async fn record_detections(state: &AppState, seen: Vec<(InstanceId, Option<String>, bool)>) {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let now = crate::alerts::unix_now();
     for (instance, latest, update_available) in seen {
         let auto = setting(&cluster_state, &instance);
@@ -191,7 +191,7 @@ pub async fn record_detections(state: &AppState, seen: Vec<(InstanceId, Option<S
 }
 
 pub async fn act(state: &AppState) {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let now = crate::alerts::unix_now();
     let mut to_apply = Vec::new();
 

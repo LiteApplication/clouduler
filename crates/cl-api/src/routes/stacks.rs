@@ -43,7 +43,7 @@ struct StackSummary {
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<StackSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .stacks
@@ -81,7 +81,7 @@ async fn detail(
 
 /// The spec is verbatim; it holds secret *names* only.
 pub(crate) async fn stack_detail(state: &AppState, name: &str) -> Result<StackDetail, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let stack = cluster_state
         .stacks
         .get(name)
@@ -131,7 +131,7 @@ async fn check_overlay_collision(
     parsed: &StackFile,
 ) -> Result<(), ApiError> {
     let cfg = state.cluster_config.read().await.clone();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let others: Vec<(&str, StackFile)> = cluster_state
         .stacks
         .iter()
@@ -241,7 +241,7 @@ pub(crate) async fn deploy_stack(
         check_overlay_collision(state, name, &parsed).await?;
         validate_against_cluster(state, name, &parsed).await?;
         let requirements = parsed.requirements();
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         for config_name in &requirements.file_configs {
             if !configs.contains_key(config_name)
                 && !cluster_state.configs.contains_key(config_name)
@@ -313,7 +313,7 @@ pub(crate) async fn deploy_from_files(
 
     // Owned names come from the stack's own spec, not this request: a redeploy that omits an unchanged
     // config must keep its claim, and a config renamed out of the spec must not linger.
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     for config_name in &requirements.file_configs {
         if !configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
             return Err(ApiError::BadRequest(format!(
@@ -626,7 +626,7 @@ async fn update_webhook(
     if !ok {
         return Err(ApiError::Unauthenticated("bad webhook token".into()));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     if !cluster_state.stacks.contains_key(&name) {
         return Err(ApiError::NotFound(format!("no stack {name}")));
     }

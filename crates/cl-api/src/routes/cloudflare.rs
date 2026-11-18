@@ -28,7 +28,7 @@ struct TokenStatus {
 }
 
 async fn token_status(_identity: Identity, State(state): State<AppState>) -> Json<TokenStatus> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(TokenStatus {
         configured: cluster_state.secrets.contains_key(CLOUDFLARE_TOKEN_SECRET),
     })

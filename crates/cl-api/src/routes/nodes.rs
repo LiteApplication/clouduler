@@ -64,7 +64,7 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<No
 }
 
 pub(crate) async fn list_nodes(state: &AppState) -> Vec<NodeSummary> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let config = state.cluster_config.read().await;
 
     let nodes = config
@@ -148,7 +148,7 @@ async fn join_command(
         cl_raft::state::Role::Worker => "worker",
     };
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = crate::auth::keys::ApiKeyStore::load(&cluster_state);
     let new_key =
         crate::auth::keys::generate(Some(format!("join {name}")), crate::auth::oauth::now_secs());
@@ -193,7 +193,7 @@ struct NodeMetrics {
 const METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 async fn metrics(_identity: Identity, State(state): State<AppState>) -> Json<Vec<NodeMetrics>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let reads = cluster_state
         .nodes
         .values()
@@ -238,7 +238,7 @@ async fn metrics_history(
     if name == state.node_name {
         return Ok(Json(node_metrics::history()));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     if !cluster_state.nodes.contains_key(&name) {
         return Err(ApiError::NotFound(format!("no node {name}")));
     }
@@ -282,7 +282,7 @@ async fn detail(
 }
 
 pub(crate) async fn node_detail(state: &AppState, name: String) -> Result<NodeDetail, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let node = cluster_state.nodes.get(&name);
 
     let Some(node) = node else {
@@ -334,7 +334,7 @@ fn internal_usage_path(name: &str) -> String {
 
 /// Always this node's own reading; a node only forwards to the node it is asking about.
 async fn internal_usage(_auth: InternalAuth, State(state): State<AppState>) -> Json<ResourceUsage> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let drives = cluster_state
         .nodes
         .get(&state.node_name)
@@ -400,7 +400,7 @@ async fn interfaces(
     if name == state.node_name {
         return Ok(Json(local_interfaces()));
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     if cluster_state.unreachable.contains(&name) {
         return Ok(Json(Vec::new()));
     }
@@ -549,7 +549,7 @@ async fn logs(
     if name == state.node_name {
         return Ok(serve_logs(&query).into_response());
     }
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     if !cluster_state.nodes.contains_key(&name) {
         return Err(ApiError::NotFound(format!("no node {name}")));
     }
@@ -612,7 +612,7 @@ pub(crate) async fn fetch_node_logs(
     let lines = if node == state.node_name {
         node_logs::ring().tail(tail)
     } else {
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         if !cluster_state.nodes.contains_key(node) {
             return Err(ApiError::NotFound(format!("no node {node}")));
         }

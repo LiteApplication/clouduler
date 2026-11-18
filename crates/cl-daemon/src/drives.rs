@@ -270,7 +270,7 @@ async fn keep_staging_destinations_current(
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     loop {
         ticker.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let paths = state
             .restic_destinations
             .values()
@@ -531,7 +531,7 @@ async fn ensure_served_volume_directories(
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
     loop {
         ticker.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         for id in state.volumes.keys() {
             if !drives.contains(&id.drive) {
                 continue;
@@ -674,7 +674,7 @@ async fn watch_volume_mounts(
     let mut failing: BTreeSet<String> = BTreeSet::new();
     loop {
         ticker.tick().await;
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
 
         let mut needed: BTreeMap<String, MountSpec> = BTreeMap::new();
         for assignment in state.assignments_on(&node_name) {
@@ -764,7 +764,7 @@ struct ActionHooks {
 impl SyncHooks for ActionHooks {
     fn run<'a>(&'a self, volume: &'a VolumeId, phase: SyncPhase) -> BoxFuture<'a, HookOutcome> {
         Box::pin(async move {
-            let state = self.cluster.state().await;
+            let state = self.cluster.snapshot().await;
             let mut work = Vec::new();
             for (id, assignment) in &state.assignments {
                 if assignment.node != self.node

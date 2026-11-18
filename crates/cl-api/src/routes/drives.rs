@@ -74,7 +74,7 @@ async fn list_drives(
     State(state): State<AppState>,
 ) -> Json<Vec<DriveSummary>> {
     let cluster_config = state.cluster_config.read().await;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_config
             .drives
@@ -147,7 +147,7 @@ async fn list_volumes(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<VolumeSummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .volumes
@@ -237,7 +237,7 @@ async fn sync_volume(
     Path((drive, volume)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let id = VolumeId::new(drive, volume);
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let current = cluster_state
         .volumes
         .get(&id)
@@ -278,7 +278,7 @@ async fn inspect_volume(
     Query(query): Query<InspectQuery>,
 ) -> Result<Json<VolumeInspection>, ApiError> {
     let id = VolumeId::new(drive, volume);
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let record = cluster_state
         .volumes
         .get(&id)

@@ -354,7 +354,7 @@ pub fn start(
         let mut seen = Signature::default();
         loop {
             ticker.tick().await;
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let cfg = crate::daemon::live_config(&state, &boot_cfg);
             let signature = Signature::of(&state);
             if signature != seen {

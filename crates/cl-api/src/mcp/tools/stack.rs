@@ -137,7 +137,7 @@ fn belongs_to(summary: &InstanceSummary, stack: &str) -> bool {
 }
 
 async fn stack_report(ctx: &Ctx, name: &str) -> ToolResult {
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let mut out = String::new();
     let Some(stack) = state.stacks.get(name) else {
         out.push_str(
@@ -245,7 +245,7 @@ pub(super) async fn list_instances(ctx: &Ctx, args: ListInstancesArgs) -> ToolRe
 
 pub(super) async fn get_instance(ctx: &Ctx, args: GetInstanceArgs) -> ToolResult {
     let id = parse_instance(&args.id)?;
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let summary = match state.assignments.get(&id) {
         Some(a) => instances::summarize(&ctx.state, &state, a).await,
         None => instances::list_all(&ctx.state)
@@ -360,7 +360,7 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
         tokio::time::sleep(POLL_EVERY).await;
     };
 
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let revision = state.stacks.get(&name).map(|s| s.revision).unwrap_or(0);
     let mut out = format!("deployed stack {name} (revision {revision})\n");
     if settled {

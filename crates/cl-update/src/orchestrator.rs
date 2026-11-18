@@ -100,7 +100,7 @@ impl Orchestrator {
             return Ok(());
         }
 
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let stored = state.configs.get(CHECK_CONFIG);
         let revision = stored.map(|e| e.revision).unwrap_or(0);
         let last = stored
@@ -152,7 +152,7 @@ impl Orchestrator {
     }
 
     async fn tick(&self) -> Result<(), String> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let Some((mut run, revision)) = load_run_revision(&state) else {
             return Ok(());
         };
@@ -231,7 +231,7 @@ impl Orchestrator {
     }
 
     async fn unseal_github_token(&self) -> Option<String> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let entry = state.secrets.get(GITHUB_TOKEN_SECRET)?;
         let sealed = Sealed::from_blob(entry.sealed.clone());
         let key = self.cluster_key.borrow().clone()?;

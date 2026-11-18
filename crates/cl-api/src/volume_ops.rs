@@ -58,7 +58,7 @@ pub async fn freeze(
     force: bool,
     wait: Option<Duration>,
 ) -> Result<String, String> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let record = cluster_state
         .volumes
         .get(volume)
@@ -130,7 +130,7 @@ async fn wait_stopped(
 ) -> Result<(), String> {
     let started = tokio::time::Instant::now();
     loop {
-        let cluster_state = state.cluster.state().await;
+        let cluster_state = state.cluster.snapshot().await;
         let running: Vec<String> = instances
             .iter()
             .filter(|i| {
@@ -157,7 +157,7 @@ async fn wait_stopped(
 
 /// Checks the volume is frozen and lifts the freeze; the source pushes at its next sync tick. Returns what the freeze stopped.
 pub async fn begin_unfreeze(state: &AppState, volume: &VolumeId) -> Result<FrozenVolume, String> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let frozen = cluster_state
         .volumes
         .get(volume)

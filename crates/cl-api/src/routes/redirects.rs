@@ -21,7 +21,7 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<RedirectRule>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(RedirectStore::load(&cluster_state).rules)
 }
 
@@ -46,7 +46,7 @@ async fn create(
 ) -> Result<Json<RedirectRule>, ApiError> {
     validate(&state, &body).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = RedirectStore::load(&cluster_state);
     let rule = RedirectRule {
         id: new_id(),
@@ -71,7 +71,7 @@ async fn update(
 ) -> Result<Json<RedirectRule>, ApiError> {
     validate(&state, &body).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = RedirectStore::load(&cluster_state);
     let Some(existing) = store.rules.iter_mut().find(|r| r.id == id) else {
         return Err(ApiError::NotFound(format!("no redirect {id}")));
@@ -94,7 +94,7 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = RedirectStore::load(&cluster_state);
     let before = store.rules.len();
     store.rules.retain(|r| r.id != id);

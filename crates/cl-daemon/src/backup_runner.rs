@@ -82,7 +82,7 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
             if !cluster.is_leader() {
                 continue;
             }
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
             let now = unix_now();
 
             for target in state.restic_targets.values() {
@@ -211,7 +211,7 @@ pub fn start_runner(
             let Some(key) = key_rx.borrow().clone() else {
                 continue;
             };
-            let state = cluster.state().await;
+            let state = cluster.snapshot().await;
 
             for run in state.restic_runs.values() {
                 if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
@@ -628,7 +628,7 @@ async fn wait_for_stopped(
 ) -> Result<()> {
     let start = tokio::time::Instant::now();
     loop {
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         let local: Vec<String> = state
             .assignments
             .values()
@@ -700,7 +700,7 @@ async fn wait_for_drive_synced(
     let start = tokio::time::Instant::now();
     loop {
         let elapsed = start.elapsed();
-        let state = cluster.state().await;
+        let state = cluster.snapshot().await;
         if drive_synced(registry, &state, drive, node) || elapsed >= deadline {
             return;
         }
@@ -815,7 +815,7 @@ async fn run_restic_backup(
 ) -> Result<BackupRunOutcome> {
     backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret)
         .await?;
-    let state = cluster.state().await;
+    let state = cluster.snapshot().await;
     let cred_dir = data_dir.join("restic").join("creds").join(&destination.id);
     let (repo, _guards) = backup_secrets::build_repo(&state, key, &cred_dir, destination)?;
 

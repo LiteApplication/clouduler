@@ -63,7 +63,7 @@ impl ClusterBackend {
     }
 
     async fn peers(&self) -> Vec<(String, String)> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let cfg = self.config.borrow().clone();
         state
             .nodes

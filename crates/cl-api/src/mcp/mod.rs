@@ -320,7 +320,7 @@ async fn build_redactor(state: &AppState) -> Result<Redactor, String> {
          to return it"
             .to_string()
     })?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Redactor::from_state(&cluster_state, &key)
         .map_err(|e| format!("could not build the redactor: {e}"))
 }

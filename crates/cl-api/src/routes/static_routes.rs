@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<StaticRouteRule>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(StaticRouteStore::load(&cluster_state).routes)
 }
 
@@ -64,7 +64,7 @@ async fn create(
 ) -> Result<Json<StaticRouteRule>, ApiError> {
     validate(&state, &body).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = StaticRouteStore::load(&cluster_state);
     let route = StaticRouteRule {
         id: new_id(),
@@ -94,7 +94,7 @@ async fn update(
 ) -> Result<Json<StaticRouteRule>, ApiError> {
     validate(&state, &body).await?;
 
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = StaticRouteStore::load(&cluster_state);
     let Some(existing) = store.routes.iter_mut().find(|r| r.id == id) else {
         return Err(ApiError::NotFound(format!("no static route {id}")));
@@ -122,7 +122,7 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = StaticRouteStore::load(&cluster_state);
     let before = store.routes.len();
     store.routes.retain(|r| r.id != id);

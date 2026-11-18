@@ -207,7 +207,7 @@ pub(super) async fn read_file(ctx: &Ctx, args: ReadFileArgs) -> ToolResult {
     }
     let id = resolve_in_focus(ctx, &args.target).await?;
 
-    let state = ctx.state.cluster.state().await;
+    let state = ctx.state.cluster.snapshot().await;
     let secret_targets: Vec<String> = state
         .stacks
         .get(&id.stack)

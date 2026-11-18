@@ -157,7 +157,7 @@ impl Scheduler {
             if gate == FenceState::Hold {
                 continue;
             }
-            let state = self.cluster.state().await;
+            let state = self.cluster.snapshot().await;
 
             if self.cluster.is_leader() && gate == FenceState::Open {
                 if let Err(e) = self.schedule(&state).await {
@@ -221,7 +221,7 @@ impl Scheduler {
         // Re-read: `state` predates the placements above, and `volume_requests` decides a volume's
         // primary from assignments. A stale copy lags one sweep behind and hands the primary back
         // and forth with placement forever, restarting containers each time.
-        let state = &self.cluster.state().await;
+        let state = &self.cluster.snapshot().await;
         for request in volume_requests(state, &live) {
             if !self.cluster.is_leader() {
                 warn!("lost leadership mid-pass, abandoning the scheduling pass");
@@ -410,7 +410,7 @@ impl Scheduler {
         }
         let deadline = Instant::now() + CONFIG_SETTLE_TIMEOUT;
         let state = loop {
-            let state = self.cluster.state().await;
+            let state = self.cluster.snapshot().await;
             let applied = committed.iter().all(|(name, revision)| {
                 state
                     .configs

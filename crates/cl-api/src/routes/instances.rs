@@ -509,7 +509,7 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
 }
 
 pub(crate) async fn list_all(state: &AppState) -> Vec<InstanceSummary> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     // Concurrent so one unreachable node (`FETCH_TIMEOUT`) does not serialize the whole list.
     let mut out = futures::future::join_all(
         cluster_state
@@ -585,7 +585,7 @@ async fn detail(
     Path(id): Path<String>,
 ) -> Result<Json<InstanceSummary>, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
@@ -601,7 +601,7 @@ async fn internal_summary(
     Path(id): Path<String>,
 ) -> Result<Json<InstanceSummary>, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
@@ -632,7 +632,7 @@ pub(crate) async fn restart_instance(
     instance: InstanceId,
 ) -> Result<(), ApiError> {
     let id = instance.to_string();
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
@@ -657,7 +657,7 @@ pub(crate) async fn restart_instance(
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
 
     // Placement leaves a valid assignment alone, so judge against a copy with it cleared.
-    let mut probe = cluster_state.clone();
+    let mut probe = (*cluster_state).clone();
     probe.assignments.remove(&instance);
     let outcome = cl_sched::place::place(
         &probe,
@@ -732,7 +732,7 @@ async fn move_instance(
     Json(body): Json<MoveRequest>,
 ) -> Result<StatusCode, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let drives = required_drives(&cluster_state, &instance);
 
     let response = state
@@ -756,7 +756,7 @@ async fn retry_migration(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let to = failed_move_target(&cluster_state, &instance)?;
     let drives = required_drives(&cluster_state, &instance);
     let response = state
@@ -854,7 +854,7 @@ async fn last_rebalance(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Option<LastRebalance>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     Json(
         cluster_state
             .configs
@@ -870,7 +870,7 @@ async fn rebalance(
     _admin: RequireAdmin,
     State(state): State<AppState>,
 ) -> Result<Json<RebalanceResponse>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let config = state.cluster_config.read().await;
     let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
     let desired = cl_sched::desired_instances(
@@ -1185,7 +1185,7 @@ async fn pull_steps(
 
     // The declared reference (`nginx:1.25`), not the running container's image: once pinned
     // that is `repo@sha256:...`, and pulling a digest is a no-op forever. See `updates::declared_image`.
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let image = cluster_state
         .stacks
         .get(&instance.stack)
@@ -1321,7 +1321,7 @@ async fn logs(
     Query(query): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
@@ -1384,7 +1384,7 @@ async fn stats(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
@@ -1540,7 +1540,7 @@ async fn internal_capture(
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     let instance = parse_id(&id)?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let stack = cluster_state
         .stacks
         .get(&instance.stack)

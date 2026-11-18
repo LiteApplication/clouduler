@@ -21,7 +21,7 @@ impl FromRequestParts<AppState> for Identity {
                 .to_str()
                 .map_err(|_| ApiError::Unauthenticated("malformed authorization header".into()))?;
             if let Some((id, secret)) = keys::parse_authorization_header(value) {
-                let cluster_state = state.cluster.state().await;
+                let cluster_state = state.cluster.snapshot().await;
                 let store = ApiKeyStore::load(&cluster_state);
                 return keys::verify(&store, id, secret)
                     .map(|record| Identity {

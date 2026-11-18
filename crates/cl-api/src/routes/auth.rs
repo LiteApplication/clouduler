@@ -66,7 +66,7 @@ async fn login_with_key(
 ) -> Result<impl IntoResponse, ApiError> {
     let (id, secret) = keys::parse(params.key.trim())
         .ok_or_else(|| ApiError::Unauthenticated("that is not an api key".into()))?;
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let store = ApiKeyStore::load(&cluster_state);
     let identity = keys::verify(&store, id, secret)
         .map(|record| Identity {

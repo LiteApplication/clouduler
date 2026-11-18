@@ -29,7 +29,7 @@ struct KeySummary {
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<KeySummary>> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let store = ApiKeyStore::load(&cluster_state);
     Json(
         store
@@ -61,7 +61,7 @@ async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateKeyRequest>,
 ) -> Result<Json<CreateKeyResponse>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = ApiKeyStore::load(&cluster_state);
     let new_key = keys::generate(body.name, now());
     let id = new_key.record.id.clone();
@@ -79,7 +79,7 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    let cluster_state = state.cluster.snapshot().await;
     let mut store = ApiKeyStore::load(&cluster_state);
     let before = store.keys.len();
     store.keys.retain(|k| k.id != id);
@@ -123,7 +123,7 @@ pub fn spawn_bootstrap_first_key(state: AppState) {
         loop {
             ticker.tick().await;
 
-            let cluster_state = state.cluster.state().await;
+            let cluster_state = state.cluster.snapshot().await;
             let store = ApiKeyStore::load(&cluster_state);
             if !store.keys.is_empty() {
                 return;

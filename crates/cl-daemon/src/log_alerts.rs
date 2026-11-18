@@ -355,7 +355,8 @@ pub async fn run(cluster: Arc<ClusterNode>, docker: cl_docker::DockerHandle, nod
             followers.clear();
             continue;
         };
-        let stacks = cluster.state().await.stacks;
+        let snapshot = cluster.snapshot().await;
+        let stacks = &snapshot.stacks;
         // Nothing declares log rules: skip the docker call entirely.
         let mut wanted: HashMap<String, (Target, Vec<LogRule>)> = HashMap::new();
         let parsed: HashMap<&String, StackFile> = stacks

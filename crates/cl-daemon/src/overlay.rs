@@ -188,7 +188,7 @@ impl Context_ {
     }
 
     async fn reconcile(&self, netlink: Option<&Overlay>) -> Result<()> {
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let cfg = crate::daemon::live_config(&state, &self.boot_cfg);
 
         // Recomputed from the live config every tick, not just once at boot,

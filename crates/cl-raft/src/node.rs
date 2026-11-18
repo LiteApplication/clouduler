@@ -252,7 +252,7 @@ impl ClusterNode {
                 continue;
             }
 
-            let state = self.state().await;
+            let state = self.snapshot().await;
             let now = Instant::now();
             let mut alive = Vec::new();
 
@@ -510,6 +510,12 @@ impl ClusterNode {
 
     /// Read the applied state; local, so it may lag the leader (use `submit` for linearizability).
     pub async fn state(&self) -> ClusterState {
+        (*self.shared.read().await.data).clone()
+    }
+
+    /// A cheap shared snapshot of the applied state (an Arc clone, not a deep copy).
+    /// Prefer this over `state()` when you only read.
+    pub async fn snapshot(&self) -> std::sync::Arc<ClusterState> {
         self.shared.read().await.data.clone()
     }
 

@@ -200,7 +200,7 @@ impl Sender {
             retryable: false,
             retry_after: None,
         };
-        let state = self.cluster.state().await;
+        let state = self.cluster.snapshot().await;
         let settings = settings::load(&state);
         let Some(dest) = settings.destinations.iter().find(|d| d.name == name) else {
             return Err(fatal("the destination was removed"));

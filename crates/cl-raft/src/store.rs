@@ -38,10 +38,17 @@ const KEY_SNAPSHOT: &str = "snapshot";
 pub struct StateMachine {
     pub last_applied: Option<LogId>,
     pub membership: StoredMembership,
-    pub data: ClusterState,
+    pub data: Arc<ClusterState>,
     /// Schema this blob was written at (see `crate::migrations`); absent reads as `0`.
     #[serde(default)]
     pub schema_version: u32,
+}
+
+impl StateMachine {
+    /// Copy-on-write access to the state: clones only if a reader still holds a snapshot.
+    pub fn data_mut(&mut self) -> &mut ClusterState {
+        Arc::make_mut(&mut self.data)
+    }
 }
 
 impl Default for StateMachine {
@@ -51,7 +58,7 @@ impl Default for StateMachine {
         Self {
             last_applied: None,
             membership: StoredMembership::default(),
-            data: ClusterState::default(),
+            data: Arc::new(ClusterState::default()),
             schema_version: crate::state::CURRENT_SCHEMA_VERSION,
         }
     }
@@ -156,7 +163,7 @@ impl Store {
         let mut sm = self.sm.write().await;
         let membership = self.rewrite_membership(&mut sm, id, addr).await?;
 
-        sm.data.emergency_stacks = stacks.clone();
+        sm.data_mut().emergency_stacks = stacks.clone();
 
         // The other managers' fate is unknown: a worker may still run an instance this
         // stale state thinks is unassigned. Marking them unreachable rather than
@@ -168,10 +175,10 @@ impl Store {
             .filter(|n| n.as_str() != this_name)
             .cloned()
             .collect();
-        sm.data.unreachable.extend(others);
+        sm.data_mut().unreachable.extend(others);
 
         for volume in stack_volumes {
-            match sm.data.volumes.get_mut(volume) {
+            match sm.data_mut().volumes.get_mut(volume) {
                 Some(existing) => {
                     existing.primary = this_name.to_string();
                     existing
@@ -179,7 +186,7 @@ impl Store {
                         .insert(this_name.to_string(), existing.generation);
                 }
                 None => {
-                    sm.data.volumes.insert(
+                    sm.data_mut().volumes.insert(
                         volume.clone(),
                         crate::state::VolumeState {
                             id: volume.clone(),
@@ -219,11 +226,11 @@ impl Store {
         secrets: std::collections::BTreeMap<String, crate::state::SecretEntry>,
     ) -> Result<(), StorageError> {
         let mut sm = self.sm.write().await;
-        sm.data.cluster_config = cluster_config;
-        sm.data.stacks = stacks;
-        sm.data.configs = configs;
-        sm.data.secrets = secrets;
-        sm.data.version += 1;
+        sm.data_mut().cluster_config = cluster_config;
+        sm.data_mut().stacks = stacks;
+        sm.data_mut().configs = configs;
+        sm.data_mut().secrets = secrets;
+        sm.data_mut().version += 1;
         write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
         Ok(())
     }
@@ -240,13 +247,13 @@ impl Store {
         states: std::collections::BTreeMap<String, crate::terraform::TerraformState>,
     ) -> Result<(), StorageError> {
         let mut sm = self.sm.write().await;
-        sm.data.terraform_modules = modules;
-        sm.data.terraform_states = states;
-        sm.data.terraform_runs.clear();
-        sm.data.terraform_requests.clear();
-        sm.data.terraform_applied.clear();
-        sm.data.terraform_outputs.clear();
-        sm.data.version += 1;
+        sm.data_mut().terraform_modules = modules;
+        sm.data_mut().terraform_states = states;
+        sm.data_mut().terraform_runs.clear();
+        sm.data_mut().terraform_requests.clear();
+        sm.data_mut().terraform_applied.clear();
+        sm.data_mut().terraform_outputs.clear();
+        sm.data_mut().version += 1;
         write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
         Ok(())
     }
@@ -484,6 +491,8 @@ pub struct StateMachineStore {
 impl StateMachineStore {
     async fn persist(&self, sm: &StateMachine) -> Result<(), StorageError> {
         let db = self.db.clone();
+        // Cheap: `data` is an Arc, so this copies a pointer. The caller holds the write
+        // lock across this await, so nothing mutates (and un-shares) it meanwhile.
         let sm = sm.clone();
         blocking(move || write_meta(&db, KEY_STATE_MACHINE, &sm)).await
     }
@@ -512,7 +521,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                     version: sm.data.version,
                     error: None,
                 },
-                EntryPayload::Normal(ref request) => sm.data.apply(request),
+                EntryPayload::Normal(ref request) => sm.data_mut().apply(request),
                 EntryPayload::Membership(ref membership) => {
                     sm.membership = StoredMembership::new(Some(entry.log_id), membership.clone());
                     Response {
@@ -635,14 +644,19 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         let db = self.db.clone();
         let stored = StoredSnapshot {
             meta: meta.clone(),
-            data: data.clone(),
+            data,
         };
-        blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await?;
+        // Hand the buffer back out of the blocking task instead of cloning it.
+        let stored = blocking(move || {
+            write_meta(&db, KEY_SNAPSHOT, &stored)?;
+            Ok(stored)
+        })
+        .await?;
         drop(sm);
 
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Box::new(Cursor::new(stored.data)),
         })
     }
 }
@@ -670,6 +684,23 @@ enum LoadedStateMachine {
 /// Peeks a blob's `schema_version`, runs needed migrations (see
 /// `crate::migrations`), then decodes normally.
 fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
+    // Cheap peek (skips every other field without building a tree). Only a blob that
+    // needs migrating goes through the `Value` tree, which is several times the size of
+    // the state it describes.
+    #[derive(Deserialize)]
+    struct Peek {
+        #[serde(default)]
+        schema_version: u32,
+    }
+    let read_err = |e: serde_json::Error| {
+        StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e)))
+    };
+    let peeked: Peek = serde_json::from_slice(raw).map_err(read_err)?;
+    if peeked.schema_version == crate::state::CURRENT_SCHEMA_VERSION {
+        let mut sm: StateMachine = serde_json::from_slice(raw).map_err(read_err)?;
+        sm.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
+        return Ok(LoadedStateMachine::Current(Box::new(sm)));
+    }
     let value: serde_json::Value = serde_json::from_slice(raw)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
     let found = value
