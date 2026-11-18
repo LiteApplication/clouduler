@@ -56,6 +56,22 @@ CHANGED_FILES="$(git diff --name-only "$LAST_TAG" HEAD)"
 
 in_array() { local x="$1"; shift; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
 crate_version() { awk '/^\[/{p=($0=="[package]")} p && /^version *= *"/{gsub(/^version *= *"|".*$/,""); print; exit}' "crates/$1/Cargo.toml"; }
+# True when every added/removed line of crates/$1/Cargo.toml is a version line
+# (a workspace-inheritance switch or a plain version bump), so the file is noise.
+version_only_cargo() {
+    local other
+    other="$(git diff -U0 "$LAST_TAG" HEAD -- "crates/$1/Cargo.toml" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE '^[+-]version(\.workspace)? *= .' || true)"
+    [ -z "$other" ]
+}
+# A crate changed when any file under crates/$1/ changed, except a version-only Cargo.toml.
+crate_changed() {
+    local c="$1" files
+    files="$(grep "^crates/$c/" <<< "$CHANGED_FILES" || true)"
+    if grep -qx "crates/$c/Cargo.toml" <<< "$files" && version_only_cargo "$c"; then
+        files="$(grep -vx "crates/$c/Cargo.toml" <<< "$files" || true)"
+    fi
+    [ -n "$files" ]
+}
 
 UI_CHANGED=0
 if grep -q '^ui/' <<<"$CHANGED_FILES"; then UI_CHANGED=1; fi
@@ -65,7 +81,7 @@ KEEP=()
 for dir in crates/*/; do
     c="$(basename "$dir")"
     if in_array "$c" "${ALWAYS_BUMPED_CRATES[@]}" \
-        || grep -q "^crates/$c/" <<<"$CHANGED_FILES" \
+        || crate_changed "$c" \
         || { [ "$UI_CHANGED" = 1 ] && [ "$c" = cl-api ]; }; then
         BUMP+=("$c")
     else
