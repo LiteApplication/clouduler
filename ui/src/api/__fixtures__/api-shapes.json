@@ -776,8 +776,8 @@
       "fence_timeout": "15s",
       "node_timeout": "1m",
       "probe_interval": "5s",
-      "stop_grace": "30s",
-      "shutdown_push_timeout": "15m"
+      "shutdown_push_timeout": "15m",
+      "stop_grace": "30s"
     },
     "mcp": {
       "enabled": true
@@ -1021,7 +1021,7 @@
       "memory_total_bytes": 0,
       "memory_used_bytes": 0,
       "uptime_seconds": 0,
-      "version": "0.14.0"
+      "version": "0.14.2"
     }
   },
   "nodeMetrics": [
@@ -1044,7 +1044,7 @@
         "memory_total_bytes": 0,
         "memory_used_bytes": 0,
         "uptime_seconds": 0,
-        "version": "0.14.0"
+        "version": "0.14.2"
       }
     }
   ],
@@ -1383,7 +1383,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.14.0",
+    "version": "0.14.2",
     "voters": 1
   },
   "updates": [
