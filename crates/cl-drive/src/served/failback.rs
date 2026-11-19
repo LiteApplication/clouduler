@@ -519,12 +519,17 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
             .host
             .peer_addr(to, &state)
             .ok_or_else(|| Failure::Other(format!("no address for {to}")))?;
-        for id in push {
+        // Copy what the loop needs, then release the snapshot: the syncs take a while.
+        let generations: Vec<u64> = push
+            .iter()
+            .map(|id| state.volumes.get(id).map_or(0, |v| v.generation))
+            .collect();
+        drop(state);
+        for (id, generation) in push.into_iter().zip(generations) {
             let src = self
                 .registry
                 .volume_path(&id)
                 .map_err(|e| Failure::Other(e.to_string()))?;
-            let generation = state.volumes.get(&id).map_or(0, |v| v.generation);
             self.engine
                 .sync(
                     &src,

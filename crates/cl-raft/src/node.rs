@@ -252,11 +252,28 @@ impl ClusterNode {
                 continue;
             }
 
-            let state = self.snapshot().await;
+            // Owned copies of what the probes need: the shared snapshot is not held across
+            // the (possibly seconds-long) pings.
+            let (peers, roster, unreachable): (
+                Vec<_>,
+                std::collections::BTreeSet<_>,
+                std::collections::BTreeSet<_>,
+            ) = {
+                let state = self.snapshot().await;
+                (
+                    state
+                        .nodes
+                        .iter()
+                        .map(|(name, node)| (name.clone(), node.rpc_addr))
+                        .collect(),
+                    state.nodes.keys().cloned().collect(),
+                    state.unreachable.iter().cloned().collect(),
+                )
+            };
             let now = Instant::now();
             let mut alive = Vec::new();
 
-            for (name, node) in &state.nodes {
+            for (name, rpc_addr) in &peers {
                 if name == &self.name {
                     tracker.seen(name, now);
                     // Answering this loop proves the leader is up; without this a previous
@@ -268,7 +285,7 @@ impl ClusterNode {
                 // Bounded: the target failure is a node vanishing without closing sockets,
                 // where an unbounded connect waits minutes for the OS TCP timeout and stalls
                 // the loop. No answer within the probe interval is a miss.
-                let peer = Peer::connect(&node.rpc_addr.to_string(), self.keys.clone());
+                let peer = Peer::connect(&rpc_addr.to_string(), self.keys.clone());
                 if matches!(
                     timeout(probe_interval, network::ping(&peer)).await,
                     Ok(true)
@@ -279,17 +296,17 @@ impl ClusterNode {
             }
 
             // A node removed from the roster must not keep expiring forever.
-            tracker.retain(|name| state.nodes.contains_key(name));
+            tracker.retain(|name| roster.contains(name));
 
             let expired = tracker.expired(now, node_timeout);
             for name in &expired {
-                if !state.unreachable.contains(name) {
+                if !unreachable.contains(name) {
                     warn!(node = %name, "unreachable, rescheduling its containers");
                     self.set_reachable(name, false).await;
                 }
             }
             for name in alive {
-                if state.unreachable.contains(&name) {
+                if unreachable.contains(&name) {
                     info!(node = %name, "reachable again");
                     self.set_reachable(&name, true).await;
                 }

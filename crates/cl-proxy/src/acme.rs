@@ -318,12 +318,20 @@ pub async fn renewal_tick(
     if !node.is_leader() {
         return;
     }
-    let state = node.snapshot().await;
     let now = now_unix();
-    for cert in state.certificates.values() {
-        if !needs_renewal(cert.not_after, now, RENEWAL_WINDOW) {
-            continue;
-        }
+    // Copy out what the loop needs and release the shared snapshot: issuing a
+    // certificate takes a long while, and every apply meanwhile would deep-copy the state.
+    let (due, cert_status) = {
+        let state = node.snapshot().await;
+        let due: Vec<_> = state
+            .certificates
+            .values()
+            .filter(|cert| needs_renewal(cert.not_after, now, RENEWAL_WINDOW))
+            .cloned()
+            .collect();
+        (due, state.cert_status.clone())
+    };
+    for cert in &due {
         info!(fqdn = %cert.fqdn, "renewing certificate");
         let names = vec![cert.fqdn.clone()];
         let issued = match zones.zone_id_for(&cert.fqdn) {
@@ -358,7 +366,7 @@ pub async fn renewal_tick(
                 let message = e.to_string();
                 // Same failure as the last pass: leave the original time.
                 if matches!(
-                    state.cert_status.get(&cert.fqdn),
+                    cert_status.get(&cert.fqdn),
                     Some(ReconcileStatus::Error { message: m, .. }) if *m == message
                 ) {
                     continue;

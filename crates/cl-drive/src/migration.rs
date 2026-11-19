@@ -237,14 +237,17 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
 async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     let volume_count = job.volumes.len() as u64;
     for (idx, volume) in job.volumes.iter().enumerate() {
-        let state = node.snapshot().await;
-        let generation = state
-            .volumes
-            .get(volume)
-            .ok_or_else(|| DriveError::VolumeNotFound {
-                volume: volume.clone(),
-            })?
-            .generation;
+        // Scoped so the shared snapshot is not held across the long sync below.
+        let generation = {
+            let state = node.snapshot().await;
+            state
+                .volumes
+                .get(volume)
+                .ok_or_else(|| DriveError::VolumeNotFound {
+                    volume: volume.clone(),
+                })?
+                .generation
+        };
 
         let src_path = job.require_registry()?.volume_path(volume)?;
         let progress = match &job.sync_progress {

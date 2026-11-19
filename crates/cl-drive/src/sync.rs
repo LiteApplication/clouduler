@@ -175,6 +175,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
             // Everything due, most important stack first (ties by volume id).
             let mut due: Vec<(i32, VolumeId)> = Vec::new();
+            let mut next_interval: std::collections::HashMap<VolumeId, Duration> =
+                std::collections::HashMap::new();
             for (id, volume) in &state.volumes {
                 if !self.registry.implements(&id.drive) {
                     continue;
@@ -206,21 +208,30 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     continue;
                 }
                 due.push((intervals.priority_for(id, &state), id.clone()));
+                next_interval.insert(id.clone(), interval);
             }
             due.sort();
+            // The syncs below can run for minutes: release the shared snapshot first
+            // (each batch takes a fresh one) so applies do not deep-copy the state meanwhile.
+            drop(state);
 
             // Most important due volume plus up to `max_parallel_syncs - 1` more of its
             // drive; the next batch starts when this one finishes.
             while !due.is_empty() {
                 let width = intervals.parallelism_for(&due[0].1.drive).max(1);
                 let batch = take_batch(&mut due, width);
-                let claimed =
-                    futures::future::join_all(batch.iter().map(|id| self.sync_due(id, &state)))
-                        .await;
+                let fresh = self.node.snapshot().await;
+                let pending: Vec<_> = batch
+                    .iter()
+                    .map(|id| self.sync_due(id, fresh.clone()))
+                    .collect();
+                drop(fresh);
+                let claimed = futures::future::join_all(pending).await;
                 for (id, claimed) in batch.into_iter().zip(claimed) {
                     if claimed {
-                        let interval = intervals.interval_for(&id, &state);
-                        next_due.insert(id, now + interval);
+                        if let Some(interval) = next_interval.get(&id) {
+                            next_due.insert(id, now + *interval);
+                        }
                     }
                 }
             }
@@ -228,10 +239,11 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
     }
 
     /// Claims and replicates one due volume; `false` if already in flight.
-    async fn sync_due(&self, id: &VolumeId, state: &cl_raft::ClusterState) -> bool {
+    async fn sync_due(&self, id: &VolumeId, state: Arc<cl_raft::ClusterState>) -> bool {
         let Some(volume) = state.volumes.get(id) else {
             return false;
         };
+        let (looks_empty, generation) = (volume.looks_empty, volume.generation);
         let is_served = self.registry.is_served(&id.drive);
         if !self.guard.try_start(id).await {
             // Previous run still going; wait for the next tick.
@@ -262,13 +274,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 .collect()
         };
 
-        self.check_empty(id, volume.looks_empty).await;
         let authority = is_served
             .then(|| state.served.get(&id.drive).cloned())
             .flatten();
+        // Release the shared snapshot before the (long) sync.
+        drop(state);
+        self.check_empty(id, looks_empty).await;
         self.run_one(
             id.clone(),
-            volume.generation,
+            generation,
             targets,
             is_served.then_some(authority),
         )

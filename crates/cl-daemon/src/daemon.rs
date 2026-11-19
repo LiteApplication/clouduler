@@ -1716,9 +1716,11 @@ async fn report_self(
     loop {
         interval.tick().await;
         let state = cluster.snapshot().await;
-        let Some(current) = state.nodes.get(&node_name) else {
+        let Some(current) = state.nodes.get(&node_name).cloned() else {
             continue;
         };
+        // Owned copy so the shared snapshot is not held across the docker calls below.
+        drop(state);
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
