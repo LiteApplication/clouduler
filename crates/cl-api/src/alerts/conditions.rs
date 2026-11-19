@@ -43,6 +43,7 @@ const DERIVED: &[&str] = &[
     "update.failed",
     "update.stuck",
     "stack.prioritized",
+    "self_update.available",
 ];
 
 pub fn is_derived(event: &str) -> bool {
@@ -165,6 +166,7 @@ pub(crate) fn derive(
         ];
         b.add(o);
     }
+    self_update_available(&mut b, state);
     for (fqdn, status) in &state.cert_status {
         if let ReconcileStatus::Error { message, .. } = status {
             let mut o = base(
@@ -470,6 +472,70 @@ fn restores(b: &mut Builder, state: &ClusterState, now: i64) {
     }
 }
 
+/// Dotted numeric compare of a release tag (`v0.9.4`) against a running version (`0.9.4`): a missing or non-numeric part
+/// counts as 0, like the web UI's `isNewer`.
+fn tag_is_newer(tag: &str, version: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['.', '-'])
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parts(tag), parts(version));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Open while the leader's stored release check names a tag some node does not run yet. The tag is the subject, so the
+/// alert fires once per new release, and it closes by itself when every node has caught up. A node that has not reported
+/// a version is not evidence of anything.
+fn self_update_available(b: &mut Builder, state: &ClusterState) {
+    let Some(check) = state
+        .configs
+        .get(cl_update::plan::CHECK_CONFIG)
+        .and_then(|e| e.decode().ok())
+        .and_then(|raw| serde_json::from_slice::<cl_update::plan::UpdateCheck>(&raw).ok())
+    else {
+        return;
+    };
+    let Some(tag) = check.tag else {
+        return;
+    };
+    let behind: Vec<&str> = state
+        .nodes
+        .iter()
+        .filter(|(_, n)| !n.version.is_empty() && tag_is_newer(&tag, &n.version))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if behind.is_empty() {
+        return;
+    }
+    let running = cl_config::version();
+    let mut o = base(
+        "self_update.available",
+        &tag,
+        format!("Clouduler {tag} is available"),
+        format!(
+            "Running {running}; {} not on {tag} yet. Start the update from the Updates settings page.",
+            if behind.len() == 1 {
+                format!("node {}", behind[0])
+            } else {
+                format!("nodes {}", behind.join(", "))
+            }
+        ),
+    );
+    o.links = vec![link("Open updates", "/settings/self-update".into())];
+    b.add(o);
+}
+
 fn certs(b: &mut Builder, state: &ClusterState, now: i64, settings: &AlertSettings) {
     let t = &settings.thresholds;
     for (fqdn, cert) in &state.certificates {
@@ -532,6 +598,79 @@ mod tests {
         assert_eq!(reset.method.as_deref(), Some("DELETE"));
         assert_eq!(reset.path, "/api/stacks/media/prioritize");
         assert!(is_derived("stack.prioritized"));
+    }
+
+    #[test]
+    fn tags_compare_like_the_web_ui() {
+        assert!(tag_is_newer("v0.14.3", "0.14.2"));
+        assert!(tag_is_newer("v0.15.0", "0.14.9"));
+        assert!(!tag_is_newer("v0.14.2", "0.14.2"));
+        assert!(!tag_is_newer("v0.9.10", "0.14.2"));
+        assert!(tag_is_newer("v1.0", "0.99.9"));
+    }
+
+    #[test]
+    fn a_new_release_raises_one_alert_per_tag_until_nodes_catch_up() {
+        use cl_update::plan::{UpdateCheck, CHECK_CONFIG};
+        let mut st = ClusterState::default();
+        let check = |st: &mut ClusterState, tag: Option<&str>, rev: u64| {
+            let content = cl_raft::base64_encode(
+                &serde_json::to_vec(&UpdateCheck {
+                    checked_at: 0,
+                    tag: tag.map(String::from),
+                    error: None,
+                })
+                .unwrap(),
+            );
+            st.apply(&Request::PutConfigCas {
+                name: CHECK_CONFIG.into(),
+                content,
+                owner: None,
+                expect_revision: rev,
+            });
+        };
+        let open = |st: &ClusterState| -> Vec<String> {
+            derive(st, &[], 0, &AlertSettings::default())
+                .observed
+                .into_iter()
+                .filter(|o| o.event == "self_update.available")
+                .map(|o| o.dedupe)
+                .collect()
+        };
+        st.nodes.insert(
+            "a".into(),
+            cl_raft::NodeState {
+                name: "a".into(),
+                id: uuid::Uuid::nil(),
+                role: Role::Manager,
+                rpc_addr: "127.0.0.1:1".parse().unwrap(),
+                drives: Default::default(),
+                availability: cl_raft::Availability::Active,
+                labels: Default::default(),
+                last_resort: false,
+                egress_networks: Default::default(),
+                networks: Default::default(),
+                open_ports: Default::default(),
+                arch: Default::default(),
+                binary_hash: Default::default(),
+                node_pubkey: Default::default(),
+                memory_total_bytes: 0,
+                version: "0.14.2".into(),
+                gpus: Default::default(),
+                images: Default::default(),
+            },
+        );
+        check(&mut st, Some("v0.14.2"), 0);
+        assert!(open(&st).is_empty(), "up to date");
+        check(&mut st, Some("v0.14.3"), 1);
+        assert_eq!(open(&st), vec!["self_update.available:v0.14.3"]);
+        check(&mut st, Some("v0.15.0"), 2);
+        assert_eq!(open(&st), vec!["self_update.available:v0.15.0"]);
+        st.nodes.get_mut("a").unwrap().version = "0.15.0".into();
+        assert!(open(&st).is_empty(), "closes once every node runs it");
+        check(&mut st, None, 3);
+        assert!(open(&st).is_empty());
+        assert!(is_derived("self_update.available"));
     }
 
     #[test]

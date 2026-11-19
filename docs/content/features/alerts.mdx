@@ -101,6 +101,7 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `network.container_router_missing` | Edge | Warning | The router stack or service of a [container network](/docs/features/networking#container-networks) is not deployed. |
 | `network.container_router_down` | Edge | Warning | The router of a container network is assigned to a node but is not running. |
 | `self_update.rolled_back` | Deployments | Critical | A node went back to its previous binary (see [Updates](/docs/features/updates#self-update)). |
+| `self_update.available` | Deployments | Info | The leader's [release check](/docs/features/updates#self-update) found a Clouduler release newer than the version some node reports. Once per release tag; it resolves by itself when every node runs that version. Needs `self_update` with `check_updates` on. |
 | `self_update.completed` | Deployments | Info | Clouduler updated on a node (sent after the new binary clears probation). |
 | `update.failed` | Deployments | Warning | An image update failed. |
 | `update.stuck` | Deployments | Warning | An image update made no progress for over 15 minutes. |

@@ -370,6 +370,15 @@ pub const EVENTS: &[EventDef] = &[
         false,
     ),
     ev(
+        "self_update.available",
+        Deployments,
+        "A new Clouduler release is available",
+        Info,
+        "",
+        true,
+        false,
+    ),
+    ev(
         "self_update.completed",
         Deployments,
         "Clouduler updated on a node",

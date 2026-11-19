@@ -475,6 +475,20 @@
     {
       "category": "deployments",
       "effective_severity": "info",
+      "key": "self_update.available",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "info",
+      "stack_scoped": false,
+      "stateful": true,
+      "title": "A new Clouduler release is available"
+    },
+    {
+      "category": "deployments",
+      "effective_severity": "info",
       "key": "self_update.completed",
       "note": "",
       "override": null,
