@@ -10,7 +10,7 @@ use clap::{CommandFactory, FromArgMatches};
 use clap_complete::CompleteEnv;
 use tracing_subscriber::EnvFilter;
 
-// mimalloc returns freed heap to the OS, unlike glibc malloc, which kept it across threads.
+// mimalloc purges freed heap back to the OS promptly, unlike glibc malloc, which holds it in per-thread arenas.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
