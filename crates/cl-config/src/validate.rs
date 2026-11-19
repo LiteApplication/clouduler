@@ -65,6 +65,15 @@ impl ClusterConfig {
                 format!("must be at most {:?}", crate::cluster::MAX_STOP_GRACE),
             ));
         }
+        if f.shutdown_push_timeout > crate::cluster::MAX_SHUTDOWN_PUSH_TIMEOUT {
+            return Err(ConfigError::invalid(
+                "failover.shutdown_push_timeout",
+                format!(
+                    "must be at most {:?}",
+                    crate::cluster::MAX_SHUTDOWN_PUSH_TIMEOUT
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -1404,6 +1413,7 @@ cloudflare:
             node_timeout: Duration::from_secs(node),
             probe_interval: Duration::from_secs(5),
             stop_grace: Duration::from_secs(grace),
+            shutdown_push_timeout: Duration::from_secs(900),
         };
         assert!(f(30, 60, 30).fence_margin_warning().is_some());
         assert!(f(29, 60, 30).fence_margin_warning().is_none());
@@ -1420,6 +1430,31 @@ cloudflare:
         assert!(f(10, 60, 10)
             .fence_margin_warning_for(Duration::from_secs(50), "service")
             .is_some());
+    }
+
+    #[test]
+    fn shutdown_push_timeout_defaults_and_is_bounded() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        assert_eq!(
+            cfg.failover.shutdown_push_timeout,
+            std::time::Duration::from_secs(900)
+        );
+        let with = |value: &str| {
+            parse(&[(
+                "web: { address: cloud, network: tailscale }",
+                &format!("failover: {{ shutdown_push_timeout: {value} }}\nweb: {{ address: cloud, network: tailscale }}"),
+            )])
+        };
+        assert_eq!(
+            with("0s")
+                .expect("zero skips the push")
+                .failover
+                .shutdown_push_timeout,
+            std::time::Duration::ZERO
+        );
+        assert!(with("30m").is_ok());
+        let err = with("3h").unwrap_err();
+        assert!(err.to_string().contains("failover.shutdown_push_timeout"));
     }
 
     #[test]

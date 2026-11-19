@@ -290,6 +290,18 @@ pub struct FailoverConfig {
     /// `fence_timeout` and `node_timeout`.
     #[serde(with = "humantime_serde", default = "default_stop_grace")]
     pub stop_grace: Duration,
+
+    /// How long a node that is rebooting or powering off may spend pushing its
+    /// volumes to other nodes before it goes down. `0s` skips the push.
+    #[serde(with = "humantime_serde", default = "default_shutdown_push_timeout")]
+    pub shutdown_push_timeout: Duration,
+}
+
+/// Longest `failover.shutdown_push_timeout` accepted.
+pub const MAX_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+
+fn default_shutdown_push_timeout() -> Duration {
+    Duration::from_secs(15 * 60)
 }
 
 /// Docker's own default is 10 seconds, which is short for a database.
@@ -324,6 +336,7 @@ impl Default for FailoverConfig {
             fence_timeout: default_fence_timeout(),
             probe_interval: default_probe_interval(),
             stop_grace: default_stop_grace(),
+            shutdown_push_timeout: default_shutdown_push_timeout(),
         }
     }
 }

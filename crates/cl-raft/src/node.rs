@@ -549,6 +549,49 @@ impl ClusterNode {
         self.raft.metrics().borrow().state == ServerState::Leader
     }
 
+    /// Gives up leadership ahead of this node going away, so the cluster elects
+    /// a new leader in about an election timeout instead of noticing a dead
+    /// one. openraft 0.9 cannot hand leadership to a chosen node, and voters
+    /// refuse a candidate while they still hear the leader, so the leader goes
+    /// quiet: with its idle heartbeats off the followers' leases run out, one
+    /// of them wins, and this node steps down on seeing the higher term.
+    /// Returns whether this node is no longer leader within `wait`; `true`
+    /// at once when it never was, and `false` at once when no other voter
+    /// exists to take over.
+    pub async fn step_down(&self, wait: Duration) -> bool {
+        if !self.is_leader() {
+            return true;
+        }
+        let others = self
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .membership()
+            .voter_ids()
+            .filter(|id| *id != self.id)
+            .count();
+        if others == 0 {
+            return false;
+        }
+        self.raft.runtime_config().heartbeat(false);
+        let mut metrics = self.raft.metrics();
+        let stepped = timeout(wait, async {
+            while metrics.borrow().state == ServerState::Leader {
+                if metrics.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_ok();
+        // Still leader after all: do not leave it silent.
+        if !stepped {
+            self.raft.runtime_config().heartbeat(true);
+        }
+        stepped && !self.is_leader()
+    }
+
     pub fn raft(&self) -> Arc<Raft> {
         self.raft.clone()
     }

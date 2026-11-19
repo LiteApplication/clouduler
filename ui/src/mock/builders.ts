@@ -382,7 +382,7 @@ export class ScenarioBuilder {
       nodes: nodeCfg,
       web: { address: 'clouduler', backend_port: 8444, network: netNames[0], port: 8443, through_proxy: true },
       data_dir: '/var/lib/clouduler',
-      failover: { fence_timeout: '15s', node_timeout: '30s', probe_interval: '5s', stop_grace: '30s' },
+      failover: { fence_timeout: '15s', node_timeout: '30s', probe_interval: '5s', stop_grace: '30s', shutdown_push_timeout: '15m' },
       secrets: { generate_if_missing: true, key_file: '/etc/clouduler/secrets.key', node_key_file: '/etc/clouduler/node.key' },
       auth: { api_keys: true, session_ttl: '12h' },
       proxy: {

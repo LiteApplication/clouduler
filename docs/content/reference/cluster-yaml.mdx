@@ -202,6 +202,7 @@ failover:
   fence_timeout: 15s
   probe_interval: 5s
   stop_grace: 30s                   # 15s + 30s < 60s, so no margin warning
+  shutdown_push_timeout: 15m        # volume push before a reboot or shutdown; 0s skips it
 
 secrets:
   key_file: /etc/clouduler/secrets.key
@@ -342,6 +343,7 @@ Network names are referenced by nodes, `web.network`, `proxy.auth.networks` and 
   {"key": "failover.fence_timeout", "type": "duration", "default": "15s", "reload": "restart", "description": "How long a node may lack raft quorum before it stops its own containers.", "quirks": "Must be shorter than node_timeout and longer than probe_interval."},
   {"key": "failover.probe_interval", "type": "duration", "default": "5s", "reload": "restart", "description": "How often the leader probes nodes. Also the cadence of the config watcher and the roster pass.", "quirks": "Must be shorter than fence_timeout and not zero."},
   {"key": "failover.stop_grace", "type": "duration", "default": "30s", "reload": "live", "description": "How long a container gets to stop cleanly before it is killed, unless the service sets stop_grace_period. Maximum 600s, not zero.", "quirks": "fence_timeout + stop_grace must stay below node_timeout, otherwise the daemon logs a warning. The defaults trigger it."},
+  {"key": "failover.shutdown_push_timeout", "type": "duration", "default": "15m", "reload": "live", "description": "How long a node whose machine is rebooting or powering off may spend pushing its volumes to other nodes first. 0s skips the push. Maximum 2h.", "quirks": "Read when the shutdown starts. A leader gives up leadership first whatever this is set to. A plain systemctl restart of the daemon does neither."},
 ]} />
 
 
@@ -484,6 +486,7 @@ Validation stops at the first failure, so you see exactly one error, printed as 
 | `failover.fence_timeout: must be shorter than node_timeout (10s), or a container can run on two nodes at once` | Fix the timers. |
 | `failover.probe_interval: must be shorter than fence_timeout (15s), or a node cannot be missed before it fences` | Fix the timers. |
 | `failover.stop_grace: must be at most 600s` | Also rejected: zero. |
+| `failover.shutdown_push_timeout: must be at most 2h` | Zero is allowed and skips the push. |
 | `auth.api_keys: cannot be disabled without an oidc provider, that would lock everyone out` | Configure OIDC first. |
 | `drives.fast.served_by: only a served drive has a serving node, set mode: served` | Add `mode: served`. |
 | `networks.internal.domain: int.example.com is not covered by any configured cloudflare zone` | Add the parent zone to `cloudflare.zones`. |

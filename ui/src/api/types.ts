@@ -1010,6 +1010,7 @@ export interface FailoverConfig {
   fence_timeout: string;
   probe_interval: string;
   stop_grace: string;
+  shutdown_push_timeout: string;
 }
 
 export interface SecretsConfig {

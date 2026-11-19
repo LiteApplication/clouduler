@@ -776,7 +776,8 @@
       "fence_timeout": "15s",
       "node_timeout": "1m",
       "probe_interval": "5s",
-      "stop_grace": "30s"
+      "stop_grace": "30s",
+      "shutdown_push_timeout": "15m"
     },
     "mcp": {
       "enabled": true

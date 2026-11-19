@@ -495,7 +495,8 @@ pub async fn run(
     // Before anything is torn down: the transfer needs the overlay, the
     // drive transport and raft all still up.
     if let Some(kind) = crate::systemd::host_shutdown().await {
-        drain_volumes(&drives, kind).await;
+        let budget = config_rx.borrow().failover.shutdown_push_timeout;
+        prepare_for_host_shutdown(&cluster, &drives, budget, kind).await;
     }
     if let Some(watchdog) = watchdog {
         watchdog.abort();
@@ -550,15 +551,35 @@ pub async fn run(
     Ok(())
 }
 
-/// How long a host shutdown may spend pushing volumes to other nodes. systemd
-/// is told to wait that long (and is re-told as the push goes on), so this is
-/// the only limit, and what a shutdown that hangs on a dead peer costs.
-const DRAIN_BUDGET: Duration = Duration::from_secs(15 * 60);
+/// How long a leader waits for another node to take over before it carries on
+/// with the shutdown anyway. Followers notice a silent leader within an
+/// election timeout (1.5 to 3 seconds); the rest is slack.
+const STEP_DOWN_WAIT: Duration = Duration::from_secs(20);
 
-/// The host is rebooting or powering off: get this node's volumes onto at
-/// least one other node first, most important stack first.
-async fn drain_volumes(drives: &crate::drives::Drives, kind: crate::systemd::HostShutdown) {
-    info!(%kind, "host is going down, pushing volumes to other nodes");
+/// The host is rebooting or powering off. First give up leadership, so the
+/// cluster elects a new leader now rather than after noticing a dead one and
+/// the pushes below are recorded by a leader that stays up. Then get this
+/// node's volumes onto at least one other node, most important stack first,
+/// within `budget` (`failover.shutdown_push_timeout`; zero skips the push).
+async fn prepare_for_host_shutdown(
+    cluster: &Arc<ClusterNode>,
+    drives: &crate::drives::Drives,
+    budget: Duration,
+    kind: crate::systemd::HostShutdown,
+) {
+    info!(%kind, "host is going down");
+    if cluster.is_leader() {
+        crate::systemd::extend_timeout(STEP_DOWN_WAIT + Duration::from_secs(30));
+        if cluster.step_down(STEP_DOWN_WAIT).await {
+            info!("gave up cluster leadership");
+        } else {
+            warn!("could not hand cluster leadership over, shutting down as leader");
+        }
+    }
+    if budget.is_zero() {
+        return;
+    }
+    info!("pushing volumes to other nodes");
     // The unit's own stop timeout is far shorter; keep extending it for as
     // long as the push is making use of the time.
     let extend = tokio::spawn(async {
@@ -569,7 +590,7 @@ async fn drain_volumes(drives: &crate::drives::Drives, kind: crate::systemd::Hos
         }
     });
     crate::systemd::status("pushing volumes to other nodes before the host goes down");
-    let report = drives.drain(DRAIN_BUDGET).await;
+    let report = drives.drain(budget).await;
     extend.abort();
     let Some(report) = report else { return };
     info!(

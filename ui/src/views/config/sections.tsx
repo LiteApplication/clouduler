@@ -1752,6 +1752,16 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
         configKey="failover.stop_grace"
         disabled={disabled}
       />
+      <DurationField
+        id="fo-push"
+        label="Shutdown volume push time limit"
+        value={f.shutdown_push_timeout}
+        onChange={(shutdown_push_timeout) => set({ shutdown_push_timeout })}
+        hint="e.g. 15m. 0s skips the push. At most 2h."
+        help="When a node's machine is rebooting or powering off, the node first pushes the volumes it leads to at least one other node, most important stack first, for up to this long, e.g. 15m. 0s skips the push. A node that is the cluster leader also gives up leadership first, whatever this is set to. Read when the shutdown starts, so a change applies to the next one."
+        configKey="failover.shutdown_push_timeout"
+        disabled={disabled}
+      />
       {marginWarning && (
         <div className="banner banner-warn" role="alert">
           <Icon name="alert-circle" /> {marginWarning}

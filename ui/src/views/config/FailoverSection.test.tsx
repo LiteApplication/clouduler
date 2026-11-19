@@ -11,7 +11,7 @@ function Harness({ failover }: { failover: ClusterConfig['failover'] }) {
 
 describe('FailoverSection fence margin warning', () => {
   it('appears and disappears as the fields are edited', () => {
-    render(<Harness failover={{ node_timeout: '60s', fence_timeout: '15s', probe_interval: '5s', stop_grace: '30s' }} />);
+    render(<Harness failover={{ node_timeout: '60s', fence_timeout: '15s', probe_interval: '5s', stop_grace: '30s', shutdown_push_timeout: '15m' }} />);
     expect(screen.queryByRole('alert')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Container stop grace period'), { target: { value: '45s' } });
