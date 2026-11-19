@@ -150,6 +150,80 @@ pub fn spawn_watchdog() -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
+/// Why the whole machine, not just this service, is going down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostShutdown {
+    Reboot,
+    PowerOff,
+    Halt,
+    Kexec,
+    /// systemd says it is stopping, without saying how.
+    Unknown,
+}
+
+impl std::fmt::Display for HostShutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Reboot => "reboot",
+            Self::PowerOff => "power off",
+            Self::Halt => "halt",
+            Self::Kexec => "kexec reboot",
+            Self::Unknown => "shutdown",
+        })
+    }
+}
+
+/// Whether this stop is part of the host going down (a reboot or shutdown)
+/// rather than `systemctl stop|restart clouduler`, which leaves the machine
+/// and its disks up. Asks the service manager: a reboot or shutdown is a
+/// queued job on `reboot.target` and friends. `None` when not under systemd
+/// or when it cannot be told, which is treated as an ordinary stop.
+pub async fn host_shutdown() -> Option<HostShutdown> {
+    let run = |args: &'static [&'static str]| async move {
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new("systemctl")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    if let Some(jobs) = run(&["list-jobs", "--no-legend", "--no-pager"]).await {
+        if let Some(kind) = shutdown_in_jobs(&jobs) {
+            return Some(kind);
+        }
+    }
+    let state = run(&["is-system-running"]).await?;
+    (state.trim() == "stopping").then_some(HostShutdown::Unknown)
+}
+
+/// The shutdown a `systemctl list-jobs` listing shows, if any. Lines look
+/// like `123 reboot.target start waiting`.
+fn shutdown_in_jobs(listing: &str) -> Option<HostShutdown> {
+    listing.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let unit = fields.nth(1)?;
+        let kind = fields.next()?;
+        if kind != "start" {
+            return None;
+        }
+        match unit {
+            "reboot.target" | "soft-reboot.target" | "systemd-reboot.service" => {
+                Some(HostShutdown::Reboot)
+            }
+            "poweroff.target" | "systemd-poweroff.service" => Some(HostShutdown::PowerOff),
+            "halt.target" | "systemd-halt.service" => Some(HostShutdown::Halt),
+            "kexec.target" | "systemd-kexec.service" => Some(HostShutdown::Kexec),
+            _ => None,
+        }
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     Stop,
@@ -209,6 +283,27 @@ mod tests {
     fn a_watchdog_meant_for_another_process_is_ignored() {
         assert_eq!(interval_from(Some("60000000"), Some("42"), 7), None);
         assert!(interval_from(Some("60000000"), Some("7"), 7).is_some());
+    }
+
+    #[test]
+    fn a_queued_reboot_or_shutdown_job_is_recognised() {
+        let jobs = "  1 graphical.target start waiting\n 42 reboot.target start waiting\n 43 clouduler.service stop running\n";
+        assert_eq!(shutdown_in_jobs(jobs), Some(HostShutdown::Reboot));
+        assert_eq!(
+            shutdown_in_jobs("7 poweroff.target start waiting"),
+            Some(HostShutdown::PowerOff)
+        );
+        assert_eq!(
+            shutdown_in_jobs("9 halt.target start waiting"),
+            Some(HostShutdown::Halt)
+        );
+    }
+
+    #[test]
+    fn restarting_only_this_service_is_not_a_host_shutdown() {
+        let jobs = "43 clouduler.service stop running\n44 clouduler.service start waiting\n";
+        assert_eq!(shutdown_in_jobs(jobs), None);
+        assert_eq!(shutdown_in_jobs(""), None);
     }
 
     #[test]

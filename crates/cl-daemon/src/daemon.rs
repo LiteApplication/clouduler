@@ -492,6 +492,11 @@ pub async fn run(
     }
     crate::systemd::stopping();
     info!("shutting down");
+    // Before anything is torn down: the transfer needs the overlay, the
+    // drive transport and raft all still up.
+    if let Some(kind) = crate::systemd::host_shutdown().await {
+        drain_volumes(&drives, kind).await;
+    }
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
@@ -543,6 +548,42 @@ pub async fn run(
     proxy.shutdown().await;
     stopped?;
     Ok(())
+}
+
+/// How long a host shutdown may spend pushing volumes to other nodes. systemd
+/// is told to wait that long (and is re-told as the push goes on), so this is
+/// the only limit, and what a shutdown that hangs on a dead peer costs.
+const DRAIN_BUDGET: Duration = Duration::from_secs(15 * 60);
+
+/// The host is rebooting or powering off: get this node's volumes onto at
+/// least one other node first, most important stack first.
+async fn drain_volumes(drives: &crate::drives::Drives, kind: crate::systemd::HostShutdown) {
+    info!(%kind, "host is going down, pushing volumes to other nodes");
+    // The unit's own stop timeout is far shorter; keep extending it for as
+    // long as the push is making use of the time.
+    let extend = tokio::spawn(async {
+        let mut ticker = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            ticker.tick().await;
+            crate::systemd::extend_timeout(Duration::from_secs(60));
+        }
+    });
+    crate::systemd::status("pushing volumes to other nodes before the host goes down");
+    let report = drives.drain(DRAIN_BUDGET).await;
+    extend.abort();
+    let Some(report) = report else { return };
+    info!(
+        replicated = report.replicated.len(),
+        failed = report.failed.len(),
+        unreached = report.unreached.len(),
+        "volume push before shutdown finished"
+    );
+    for volume in &report.failed {
+        warn!(%volume, "no other node took this volume before shutdown");
+    }
+    for volume in &report.unreached {
+        warn!(%volume, "ran out of time before pushing this volume");
+    }
 }
 
 /// Every node listens; a node that is not the leader answers with a redirect to

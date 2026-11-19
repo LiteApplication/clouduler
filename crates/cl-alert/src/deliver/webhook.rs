@@ -119,10 +119,7 @@ pub async fn send(
     let mut req = http
         .post(url)
         .timeout(TIMEOUT)
-        .header(
-            USER_AGENT,
-            format!("clouduler/{}", cl_config::version()),
-        )
+        .header(USER_AGENT, format!("clouduler/{}", cl_config::version()))
         .header("X-Clouduler-Event", event)
         .header("X-Clouduler-Severity", severity)
         .json(&payload(n));

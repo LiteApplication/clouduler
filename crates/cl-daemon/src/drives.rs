@@ -115,8 +115,18 @@ impl RegistryHandle {
     }
 }
 
+/// What a host shutdown needs to push this node's volumes out: the live sync
+/// scheduler and the interval source it ranks volumes with.
+struct Drain {
+    scheduler: Arc<SyncScheduler<DeltaEngine>>,
+    intervals: Arc<DriveIntervals>,
+}
+
+type DrainSlot = Arc<parking_lot::Mutex<Option<Arc<Drain>>>>;
+
 pub struct Drives {
     supervisor: JoinHandle<()>,
+    drain: DrainSlot,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// This node's drive-name-to-directory map, kept live so migration can
     /// resolve a volume to a real path even after a topology rebuild.
@@ -129,6 +139,21 @@ impl Drives {
     /// drive added after boot is usable as a migration source or target.
     pub fn registry(&self) -> RegistryHandle {
         self.registry.clone()
+    }
+
+    /// Pushes every volume this node leads to at least one other node, most
+    /// important stack first, within `budget`. For a host going down: the data
+    /// on this disk is unreachable until it is back, and a stale replica is
+    /// what the other nodes would otherwise fail over to. `None` when this node
+    /// replicates no drive.
+    pub async fn drain(&self, budget: Duration) -> Option<cl_drive::DrainReport> {
+        let drain = self.drain.lock().clone()?;
+        Some(
+            drain
+                .scheduler
+                .drain(drain.intervals.as_ref(), budget)
+                .await,
+        )
     }
 
     /// Signal the supervisor to tear everything down and wait for it to
@@ -147,6 +172,8 @@ struct Running {
     /// Served-drive roots this build exported, paired with the client
     /// subnet they were exported to, so `teardown` can un-export them.
     exports: Vec<(PathBuf, String)>,
+    /// How to push this build's volumes out at host shutdown.
+    drain: Option<Arc<Drain>>,
 }
 
 impl Running {
@@ -186,10 +213,12 @@ pub fn start(
     let node_name = node_name.to_string();
     let cluster = cluster.clone();
     let registry = RegistryHandle::default();
+    let drain = DrainSlot::default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let supervisor = {
         let registry = registry.clone();
+        let drain = drain.clone();
         let mut config_rx = config_rx;
         let keys = keys;
         let docker = docker;
@@ -207,6 +236,7 @@ pub fn start(
                     Running::default()
                 }
             };
+            *drain.lock() = running.drain.clone();
 
             let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
             loop {
@@ -245,12 +275,14 @@ pub fn start(
                         Running::default()
                     }
                 };
+                *drain.lock() = running.drain.clone();
             }
         })
     };
 
     Drives {
         supervisor,
+        drain,
         shutdown_tx,
         registry,
     }
@@ -374,9 +406,14 @@ async fn build(
                 node: node_name.to_string(),
                 docker: docker.clone(),
             }));
-            let intervals = DriveIntervals::new(config_rx.clone());
+            let scheduler = Arc::new(scheduler);
+            let intervals = Arc::new(DriveIntervals::new(config_rx.clone()));
+            running.drain = Some(Arc::new(Drain {
+                scheduler: scheduler.clone(),
+                intervals: intervals.clone(),
+            }));
             running.tasks.push(tokio::spawn(async move {
-                scheduler.run(&intervals).await;
+                scheduler.run(intervals.as_ref()).await;
             }));
         }
 

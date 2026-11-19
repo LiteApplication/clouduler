@@ -223,12 +223,12 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 let fresh = self.node.snapshot().await;
                 let pending: Vec<_> = batch
                     .iter()
-                    .map(|id| self.sync_due(id, fresh.clone()))
+                    .map(|id| self.sync_due(id, fresh.clone(), false))
                     .collect();
                 drop(fresh);
                 let claimed = futures::future::join_all(pending).await;
                 for (id, claimed) in batch.into_iter().zip(claimed) {
-                    if claimed {
+                    if claimed.is_some() {
                         if let Some(interval) = next_interval.get(&id) {
                             next_due.insert(id, now + *interval);
                         }
@@ -238,16 +238,21 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    /// Claims and replicates one due volume; `false` if already in flight.
-    async fn sync_due(&self, id: &VolumeId, state: Arc<cl_raft::ClusterState>) -> bool {
-        let Some(volume) = state.volumes.get(id) else {
-            return false;
-        };
+    /// Claims and replicates one due volume. `None` if it is already in flight
+    /// (or gone); otherwise whether at least one other node now holds the copy.
+    /// `first_success_only` stops after the first node that took it.
+    async fn sync_due(
+        &self,
+        id: &VolumeId,
+        state: Arc<cl_raft::ClusterState>,
+        first_success_only: bool,
+    ) -> Option<bool> {
+        let volume = state.volumes.get(id)?;
         let (looks_empty, generation) = (volume.looks_empty, volume.generation);
         let is_served = self.registry.is_served(&id.drive);
         if !self.guard.try_start(id).await {
             // Previous run still going; wait for the next tick.
-            return false;
+            return None;
         }
 
         let targets: Vec<ReplicaTarget> = if is_served {
@@ -280,14 +285,80 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         // Release the shared snapshot before the (long) sync.
         drop(state);
         self.check_empty(id, looks_empty).await;
-        self.run_one(
-            id.clone(),
-            generation,
-            targets,
-            is_served.then_some(authority),
+        Some(
+            self.run_one(
+                id.clone(),
+                generation,
+                targets,
+                is_served.then_some(authority),
+                first_success_only,
+            )
+            .await,
         )
-        .await;
-        true
+    }
+
+    /// Pushes every volume this node is the source of to at least one other
+    /// node, most important stack first, before the host goes away. A volume
+    /// is done at its first node that took it; what is left over when
+    /// `budget` runs out is reported, not waited for. Ignores quorum (the
+    /// transfer is peer to peer) and the volume's interval.
+    pub async fn drain(&self, intervals: &dyn IntervalSource, budget: Duration) -> DrainReport {
+        let deadline = Instant::now() + budget;
+        let state = self.node.snapshot().await;
+        let mut due: Vec<(i32, VolumeId)> = Vec::new();
+        for (id, volume) in &state.volumes {
+            if !self.registry.implements(&id.drive) || volume.frozen.is_some() {
+                continue;
+            }
+            let is_source = if self.registry.is_served(&id.drive) {
+                self.registry.active_server(&id.drive, &state) == Some(self.registry.node())
+            } else {
+                volume.primary == self.registry.node()
+            };
+            if is_source {
+                due.push((intervals.priority_for(id, &state), id.clone()));
+            }
+        }
+        due.sort();
+        drop(state);
+
+        let mut report = DrainReport::default();
+        while !due.is_empty() {
+            let width = intervals.parallelism_for(&due[0].1.drive).max(1);
+            let batch = take_batch(&mut due, width);
+            let run = futures::future::join_all(batch.iter().map(|id| self.drain_one(id)));
+            match tokio::time::timeout_at(deadline, run).await {
+                Ok(results) => {
+                    for (id, pushed) in batch.into_iter().zip(results) {
+                        if pushed {
+                            report.replicated.push(id);
+                        } else {
+                            report.failed.push(id);
+                        }
+                    }
+                }
+                Err(_) => {
+                    report.unreached.extend(batch);
+                    report.unreached.extend(due.drain(..).map(|(_, id)| id));
+                }
+            }
+        }
+        report
+    }
+
+    /// One volume of a drain; waits out a sync already running for it, whose
+    /// push may or may not be recent, and then pushes once more.
+    async fn drain_one(&self, id: &VolumeId) -> bool {
+        loop {
+            let fresh = self.node.snapshot().await;
+            if let Some(pushed) = self.sync_due(id, fresh, true).await {
+                return pushed;
+            }
+            if !self.node.snapshot().await.volumes.contains_key(id) {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// Removes this node's copy of every deliberately deleted volume (the cluster
@@ -452,13 +523,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         generation: u64,
         targets: Vec<ReplicaTarget>,
         served: Option<Option<cl_raft::served::ServedAuthority>>,
-    ) {
+        first_success_only: bool,
+    ) -> bool {
+        let mut pushed = false;
         let src = match self.registry.volume_path(&id) {
             Ok(path) => path,
             Err(e) => {
                 warn!(%id, error = %e, "cannot resolve local volume path");
                 self.guard.finish(&id).await;
-                return;
+                return false;
             }
         };
 
@@ -539,6 +612,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             {
                 Ok(stats) => {
                     debug!(%id, node = %target.node, ?stats, "volume synced");
+                    pushed = true;
                     if let Some(digest) = &synced_digest {
                         self.registry.record_synced(&id, digest);
                         if served
@@ -567,6 +641,9 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     {
                         warn!(%id, node = %target.node, error = %e, "failed to record replica progress");
                     }
+                    if first_success_only {
+                        break;
+                    }
                 }
                 Err(e) => {
                     warn!(%id, node = %target.node, error = %e, "volume sync failed");
@@ -581,7 +658,19 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
         self.hook(&id, SyncPhase::After).await;
         self.guard.finish(&id).await;
+        pushed
     }
+}
+
+/// What a [`SyncScheduler::drain`] managed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DrainReport {
+    /// Now held by at least one other node, in the order they were pushed.
+    pub replicated: Vec<VolumeId>,
+    /// Tried, but no other node took it (none holds the drive, or every push failed).
+    pub failed: Vec<VolumeId>,
+    /// Not finished when the budget ran out.
+    pub unreached: Vec<VolumeId>,
 }
 
 /// Takes the next batch off the sorted `due` list: its first volume and up to

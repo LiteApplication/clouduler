@@ -539,10 +539,10 @@ pub async fn send(
         if let Some(msg_id) = patch_target {
             let base = url.trim_end_matches('/');
             let patch_url = format!("{base}/messages/{msg_id}");
-            let mut req = http.patch(&patch_url).timeout(TIMEOUT).header(
-                USER_AGENT,
-                format!("clouduler/{}", cl_config::version()),
-            );
+            let mut req = http
+                .patch(&patch_url)
+                .timeout(TIMEOUT)
+                .header(USER_AGENT, format!("clouduler/{}", cl_config::version()));
             if message.has_components() {
                 req = req.query(&[("with_components", "true")]);
             }
@@ -582,10 +582,10 @@ pub async fn send(
             }
         }
 
-        let mut req = http.post(url).timeout(TIMEOUT).header(
-            USER_AGENT,
-            format!("clouduler/{}", cl_config::version()),
-        );
+        let mut req = http
+            .post(url)
+            .timeout(TIMEOUT)
+            .header(USER_AGENT, format!("clouduler/{}", cl_config::version()));
         let mut query: Vec<(&str, &str)> = vec![("wait", "true")];
         // Link buttons are only accepted on a webhook when asked for.
         if message.has_components() {
