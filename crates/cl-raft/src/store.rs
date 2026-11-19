@@ -250,6 +250,7 @@ impl Store {
         sm.data_mut().terraform_modules = modules;
         sm.data_mut().terraform_states = states;
         sm.data_mut().terraform_runs.clear();
+        sm.data_mut().terraform_last_apply.clear();
         sm.data_mut().terraform_requests.clear();
         sm.data_mut().terraform_applied.clear();
         sm.data_mut().terraform_outputs.clear();

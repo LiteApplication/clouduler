@@ -532,6 +532,8 @@ export interface ClusterState {
   terraform_runs: Record<string, unknown>;
   terraform_requests: Record<string, 'Plan' | 'Apply'>;
   terraform_applied: Record<string, string>;
+  /** "stack/service" -> latest apply run, without its log. */
+  terraform_last_apply?: Record<string, unknown>;
   /** "stack/service" -> the secrets and configs its module outputs wrote. */
   terraform_outputs?: Record<string, { kind: 'secret' | 'config'; name: string }[]>;
   /** Last docker state each node reported per instance. `secret_revisions`

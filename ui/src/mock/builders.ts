@@ -369,6 +369,7 @@ export class ScenarioBuilder {
       terraform_runs: {},
       terraform_requests: {},
       terraform_applied: {},
+      terraform_last_apply: {},
       terraform_outputs: {},
     };
 

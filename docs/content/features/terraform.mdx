@@ -241,7 +241,7 @@ The fingerprint covers:
 
 It does not cover the `terraform:` settings in cluster.yaml, a container restart, or other services.
 
-**A failed apply is not retried by itself.** After an apply fails, no automatic apply runs again for the same fingerprint. A change to an input, or a manual request, starts a new run. A failed plan (manual only) does not block automatic applies.
+**A failed apply is not retried by itself.** After an apply fails, no automatic apply runs again for the same fingerprint. A change to an input, or a manual request, starts a new run. A plan, failed or successful, never lifts that block: Clouduler remembers the last apply separately from the latest run, so a manual plan after a failed apply does not trigger an automatic apply.
 
 An apply that was interrupted (the daemon restarted or the node stopped responding, see below) is not a real failure: the next pass retries it once, with the trigger `retry-after-interrupt`. If that retry is interrupted too, it blocks like any failed apply.
 

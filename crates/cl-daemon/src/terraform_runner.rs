@@ -156,11 +156,11 @@ fn is_interrupted(run: &TerraformRun) -> bool {
     matches!(&run.outcome, TerraformOutcome::Failed { error } if error.starts_with(INTERRUPTED_PREFIX))
 }
 
-/// Whether a run is due, and why. A pending request always wins; otherwise an Apply is due when
-/// the fingerprint differs from the last successful Apply, unless the latest run for exactly this
-/// fingerprint already failed as an Apply (no retry loop: it retries on change or on request). A failed
-/// Plan never blocks. An apply interrupted by a restart is retried once (trigger
-/// `retry-after-interrupt`); a second interruption blocks like any failure.
+/// Whether a run is due, and why. A pending request always wins. Otherwise an Apply is due when
+/// the fingerprint differs from the last successful Apply, unless the last Apply for this exact
+/// fingerprint failed: no retry loop, and a plan in between never lifts that. A failed Plan never
+/// blocks. An apply interrupted by a restart is retried once (trigger `retry-after-interrupt`);
+/// a second interruption blocks like any failure.
 pub fn due(
     state: &ClusterState,
     key: &str,
@@ -176,7 +176,13 @@ pub fn due(
     if state.terraform_applied.get(key).map(String::as_str) == Some(fingerprint) {
         return None;
     }
-    if let Some(r) = last.filter(|r| {
+    // The last apply, not the latest run: a plan in between must not lift the block. Snapshots
+    // from before `terraform_last_apply` fall back to the latest run.
+    let last_apply = state
+        .terraform_last_apply
+        .get(key)
+        .or(last.filter(|r| r.mode == TerraformMode::Apply));
+    if let Some(r) = last_apply.filter(|r| {
         r.fingerprint == fingerprint
             && r.mode == TerraformMode::Apply
             && matches!(r.outcome, TerraformOutcome::Failed { .. })
@@ -1775,11 +1781,19 @@ mod tests {
         s.terraform_runs.insert(k.into(), run.clone());
         assert_eq!(due(&s, k, "f2"), None, "no retry loop");
 
-        // A failed plan does not block auto-apply.
+        // A plan, failed or not, after the failed apply must not lift the block.
+        s.terraform_last_apply.insert(k.into(), run.clone());
         let mut plan = run.clone();
         plan.mode = TerraformMode::Plan;
+        s.terraform_runs.insert(k.into(), plan.clone());
+        assert_eq!(due(&s, k, "f2"), None, "failed plan keeps the block");
+        plan.outcome = TerraformOutcome::Succeeded {
+            summary: "ok".into(),
+        };
         s.terraform_runs.insert(k.into(), plan);
-        assert_eq!(due(&s, k, "f2"), Some((TerraformMode::Apply, "change")));
+        assert_eq!(due(&s, k, "f2"), None, "successful plan keeps the block");
+        assert_eq!(due(&s, k, "f3"), Some((TerraformMode::Apply, "change")));
+        s.terraform_last_apply.clear();
 
         // An interrupted apply is retried once, then blocks.
         let mut cut = run.clone();

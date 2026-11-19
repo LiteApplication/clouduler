@@ -301,6 +301,7 @@ impl ClusterState {
         self.release_outputs(&key, &BTreeSet::new(), None, None);
         self.terraform_states.remove(&key);
         self.terraform_runs.remove(&key);
+        self.terraform_last_apply.remove(&key);
         self.terraform_requests.remove(&key);
         self.terraform_applied.remove(&key);
     }
@@ -321,6 +322,8 @@ impl ClusterState {
         }
         self.terraform_states.retain(|k, _| !k.starts_with(&prefix));
         self.terraform_runs.retain(|k, _| !k.starts_with(&prefix));
+        self.terraform_last_apply
+            .retain(|k, _| !k.starts_with(&prefix));
         self.terraform_requests
             .retain(|k, _| !k.starts_with(&prefix));
         self.terraform_applied
@@ -615,6 +618,18 @@ impl ClusterState {
                     TerraformOutcome::Failed { error } => {
                         *error = cap_tail(error, MAX_TERRAFORM_LOG_BYTES);
                     }
+                }
+                if run.mode == TerraformMode::Apply {
+                    // Only the verdict is needed; the logs stay in `terraform_runs`.
+                    let mut kept = run.clone();
+                    kept.log_tail.clear();
+                    if let TerraformOutcome::Failed { error } = &mut kept.outcome {
+                        *error = cap_tail(error, 512);
+                    }
+                    if let TerraformOutcome::Succeeded { summary } = &mut kept.outcome {
+                        summary.clear();
+                    }
+                    self.terraform_last_apply.insert(key.clone(), kept);
                 }
                 self.terraform_runs.insert(key, run);
                 Ok(())

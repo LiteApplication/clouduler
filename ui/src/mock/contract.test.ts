@@ -133,7 +133,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
       '.stacks', '.assignments', '.volumes', '.volumes.*.replicas', '.configs', '.secrets',
       '.certificates', '.dns_records', '.cert_status', '.dns_status', '.wrapped_keys',
       '.alert_destinations', '.alerts', '.alert_inbox', '.container_status', '.crash_moves',
-      '.previous_image_digests', '.volume_removals', '.terraform_modules', '.terraform_states', '.terraform_runs', '.terraform_requests', '.terraform_applied', '.terraform_outputs', '.instance_updates', '.auto_updates', '.image_checks',
+      '.previous_image_digests', '.volume_removals', '.terraform_modules', '.terraform_states', '.terraform_runs', '.terraform_requests', '.terraform_applied', '.terraform_last_apply', '.terraform_outputs', '.instance_updates', '.auto_updates', '.image_checks',
       '.restic_destinations', '.restic_targets', '.restic_runs', '.restore_requests',
       '.sessions', '.served', '.proxy_sessions', '.proxy_tokens', '.stacks.*.requirements.allowed',
     ],

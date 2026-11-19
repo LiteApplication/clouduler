@@ -739,6 +739,10 @@ pub struct ClusterState {
     /// Latest run per `terraform_key`.
     #[serde(default)]
     pub terraform_runs: BTreeMap<String, crate::terraform::TerraformRun>,
+    /// Latest Apply run per `terraform_key`, kept apart from `terraform_runs` so a plan
+    /// cannot hide a failed apply from the no-retry rule.
+    #[serde(default)]
+    pub terraform_last_apply: BTreeMap<String, crate::terraform::TerraformRun>,
     /// Pending manual Plan/Apply requests by `terraform_key`.
     #[serde(default)]
     pub terraform_requests: BTreeMap<String, crate::terraform::TerraformMode>,

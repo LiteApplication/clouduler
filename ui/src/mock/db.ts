@@ -49,6 +49,7 @@ export interface ServerOnlyStateFields {
   terraform_runs: Record<string, unknown>;
   terraform_requests: Record<string, string>;
   terraform_applied: Record<string, string>;
+  terraform_last_apply: Record<string, unknown>;
   terraform_outputs: Record<string, { kind: 'secret' | 'config'; name: string }[]>;
 }
 
