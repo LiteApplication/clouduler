@@ -183,9 +183,12 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Actively relocate instances to smooth the number of instances per
-    /// node, unlike the regular scheduler pass, which never moves an
-    /// already validly-placed instance.
+    /// Actively relocate instances to even out load across nodes, unlike the
+    /// regular scheduler pass, which never moves an already validly-placed
+    /// instance. Load is memory pressure first, then CPU, then instance
+    /// count. Memory and CPU are what the nodes and containers use right
+    /// now, asked of a daemon; a node that cannot answer, or a daemon that
+    /// cannot be reached, falls back to the declared memory limits.
     ///
     /// Never touches an instance pinned to a node, published on a proxy
     /// hostname, already mid-migration, or that has nowhere else it could

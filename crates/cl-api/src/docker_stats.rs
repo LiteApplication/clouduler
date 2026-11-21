@@ -20,6 +20,36 @@ pub async fn stream(container_name: String) -> Result<impl Stream<Item = StatSam
     }))
 }
 
+/// One reading with the share of the whole host's CPU, for rebalancing.
+pub struct OneSample {
+    pub memory_used_bytes: u64,
+    /// 0 to 100 across all of the host's CPUs (`StatSample::cpu_percent` is per core).
+    pub host_cpu_percent: f64,
+}
+
+/// A single stats reading (docker waits about a second to fill in the CPU delta).
+pub async fn read_once(container_name: String) -> Result<OneSample, ApiError> {
+    let docker = bollard::Docker::connect_with_socket_defaults().map_err(ApiError::internal)?;
+    let options = StatsOptionsBuilder::default().stream(false).build();
+    let resp = docker
+        .stats(&container_name, Some(options))
+        .next()
+        .await
+        .ok_or_else(|| ApiError::Unavailable(format!("no stats for {container_name}")))?
+        .map_err(ApiError::internal)?;
+    let online_cpus = resp
+        .cpu_stats
+        .as_ref()
+        .and_then(|c| c.online_cpus)
+        .unwrap_or(1)
+        .max(1);
+    let sample = sample_from_response(resp);
+    Ok(OneSample {
+        memory_used_bytes: sample.memory_used_bytes,
+        host_cpu_percent: sample.cpu_percent / f64::from(online_cpus),
+    })
+}
+
 fn sample_from_response(resp: bollard::models::ContainerStatsResponse) -> StatSample {
     let cpu = resp.cpu_stats.unwrap_or_default();
     let precpu = resp.precpu_stats.unwrap_or_default();

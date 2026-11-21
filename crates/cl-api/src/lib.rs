@@ -8,6 +8,7 @@ pub mod container_router;
 pub mod docker_stats;
 pub mod error;
 pub mod internal_peer;
+pub mod live_usage;
 pub mod mcp;
 pub mod migration_problem;
 pub mod node_logs;

@@ -95,6 +95,8 @@ If the node is unreachable, failover reschedules its instances and removal then 
 
 `rebalance` moves already-placed instances to even out load. The normal scheduler never moves a healthy instance, and a returning node gets nothing back on its own, so this is how you spread work out again. It runs only on request.
 
+Load is judged per node, in this order: memory pressure (memory in use as a share of the node's total), then CPU load, then the number of instances. Memory and CPU are what the nodes and containers use right now, read when you start the rebalance (host usage plus one docker stats reading per instance), not only what stacks declare. A node with no reading, because it is unreachable, slow to answer or reports no memory total, is measured by the sum of its instances' `deploy.resources.limits.memory` instead (and has no CPU reading). When the plan simulates a move it shifts the instance's live memory and CPU from one node to the other, or its declared memory limit if it has no live reading, or nothing if it has neither. A memory gap under 1 point does not justify a move; with equal memory pressure a CPU gap of at least 5 points does, and otherwise nodes more than one instance apart do. A move is never made if it would leave the target more loaded than the source was. The web UI and `clouduler rebalance` both use live readings; the CLI asks a daemon for them (the node from `--via`, else the first manager) and, if that fails, plans from declared limits and prints a warning.
+
 <UiCli>
 <UiCli.Ui>
 
@@ -183,7 +185,7 @@ The UI's **Restart** on an instance re-rolls its placement and may put it on a d
 </Quirk>
 
 <Quirk title="Rebalance reads the local config on the CLI">
-The CLI plans from the local config for served drives and NAT networks, the UI from the live config. Right after a config change they can disagree.
+The CLI plans from the local config for served drives and NAT networks, the UI from the live config. Both use live usage readings when the daemon can supply them. Right after a config change they can disagree.
 </Quirk>
 
 <Quirk title="A flapping stateful service can be moved repeatedly">

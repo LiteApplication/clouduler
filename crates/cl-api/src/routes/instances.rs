@@ -53,6 +53,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
+        .route(
+            crate::live_usage::NODE_LIVE_USAGE_PATH,
+            get(internal_live_usage),
+        )
+        .route(
+            "/api/instances/internal/cluster-live-usage",
+            get(internal_cluster_live_usage),
+        )
         .route("/api/instances/internal/{id}/update", post(internal_update))
         .route("/api/instances/internal/{id}/pull", post(internal_pull))
         .route(
@@ -883,11 +891,13 @@ async fn rebalance(
     let everywhere_networks = config.everywhere_networks();
     drop(config);
 
+    let live = crate::live_usage::gather(&state).await;
     let planned = cl_sched::rebalance::plan(
         &cluster_state,
         &desired,
         &served_drives,
         &everywhere_networks,
+        &live,
     );
 
     let mut moves = Vec::new();
@@ -1408,6 +1418,22 @@ async fn internal_stats(
 ) -> Result<Response, ApiError> {
     let instance = parse_id(&id)?;
     serve_stats(&instance).await
+}
+
+/// This node's own live usage for rebalancing; a node only answers for itself.
+async fn internal_live_usage(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Json<crate::live_usage::NodeLiveUsage> {
+    Json(crate::live_usage::local(&state).await)
+}
+
+/// Live usage of every reachable node, gathered by this node, for `clouduler rebalance`.
+async fn internal_cluster_live_usage(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Json<cl_sched::rebalance::LiveUsage> {
+    Json(crate::live_usage::gather(&state).await)
 }
 
 #[derive(Deserialize)]

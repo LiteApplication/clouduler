@@ -201,7 +201,7 @@ If there is no record of a volume yet, any node that implements the drive qualif
 ## Moving things
 
 - Drain a node (`clouduler node set-availability NAME drain`, or the node page) to keep what it runs but place nothing new on it.
-- `clouduler rebalance` moves instances to even out the spread, but never moves pinned instances, ones published on a proxy hostname, ones already migrating, or ones with nowhere else to go.
+- `clouduler rebalance` moves instances to even out load (live memory and CPU, falling back to declared memory limits), but never moves pinned instances, ones published on a proxy hostname, ones already migrating, or ones with nowhere else to go.
 - If a node fails, the scheduler places its instances elsewhere. See [Failover](/docs/features/failover).
 - A service that keeps getting killed is moved to another node instead of restarting forever in the same place.
 

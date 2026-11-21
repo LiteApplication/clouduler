@@ -343,7 +343,7 @@ async fn internal_usage(_auth: InternalAuth, State(state): State<AppState>) -> J
     Json(local_resource_usage(&drives))
 }
 
-fn local_resource_usage(
+pub(crate) fn local_resource_usage(
     drives: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> ResourceUsage {
     let mut sys = System::new();
