@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "cl-api"
-version = "0.14.3"
+version = "0.14.4"
 dependencies = [
  "aho-corasick",
  "async-stream",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "cl-cli"
-version = "0.13.0"
+version = "0.14.4"
 dependencies = [
  "age",
  "anyhow",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "cl-sched"
-version = "0.14.2"
+version = "0.14.4"
 dependencies = [
  "cl-config",
  "cl-docker",
@@ -1280,7 +1280,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clouduler"
-version = "0.14.3"
+version = "0.14.4"
 dependencies = [
  "anyhow",
  "cl-api",
