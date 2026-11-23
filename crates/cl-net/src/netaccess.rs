@@ -136,7 +136,8 @@ pub fn net_access_plan(input: &NetAccessInput) -> NetAccessPlan {
             jumps: vec![
                 Jump::new("filter", &["INPUT"], INPUT_CHAIN, true)
                     .before(crate::egress::CONTAINER_INPUT_CHAIN),
-                Jump::new("filter", &["DOCKER-USER", "FORWARD"], FORWARD_CHAIN, true),
+                Jump::new("filter", &["DOCKER-USER", "FORWARD"], FORWARD_CHAIN, true)
+                    .before(crate::managed::FORWARD_CHAIN),
             ],
         },
         warnings,
@@ -317,5 +318,7 @@ mod tests {
         );
         assert_eq!(plan.jumps[1].parents, vec!["DOCKER-USER", "FORWARD"]);
         assert!(plan.jumps[1].first);
+        // Network access is judged before a managed network's accepts.
+        assert_eq!(plan.jumps[1].before.as_deref(), Some("CLDR-MNG"));
     }
 }

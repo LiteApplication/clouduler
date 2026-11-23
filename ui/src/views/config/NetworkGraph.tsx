@@ -355,7 +355,7 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
                 {n.id}
               </text>
               <text className="cl-ng__kind" y={13} textAnchor="middle">
-                {net.type}
+                {net.type === 'private' && net.managed ? 'private · managed' : net.type}
               </text>
               {unrestricted && (
                 <g className="cl-ng__badge" transform={`translate(0,${NODE_H / 2 + 13})`}>

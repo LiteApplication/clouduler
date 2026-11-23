@@ -46,6 +46,7 @@ import {
   TextField,
 } from '../../components/FormFields';
 import { fenceMarginWarning } from '../../lib/validate';
+import { isManaged, managedNetworkError, managedNodeAddressError, nextFreeNodeAddress } from '../../lib/managedNetwork';
 
 export interface SectionProps {
   draft: ClusterConfig;
@@ -184,6 +185,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
                 />
                 <p className="field-hint">
                   Public networks are always reachable, listed or not.{' '}
+                  {sheetNet.managed === true && 'This is the source side: it decides what this managed network\'s containers may reach, not who may reach them (that is each client network\'s own list). '}
                   {sheetNet.access == null
                     ? 'Unrestricted: no host firewall applies to this network. Ticking a network turns the firewall on.'
                     : sheetNet.access.length === 0
@@ -338,6 +340,7 @@ function NetworkForm({
               const kind = type as NetworkKind;
               if (kind === net.type) return;
               const next = { ...draft.networks[name], type: kind };
+              if (kind !== 'private') delete next.managed;
               if (kind === 'container') next.container = emptyContainer();
               else delete next.container;
               setDraft({ ...draft, networks: { ...draft.networks, [name]: next } });
@@ -367,6 +370,28 @@ function NetworkForm({
               configKey={`networks.${name}.subnet`}
               disabled={disabled}
             />
+          )}
+          {net.type === 'private' && (
+            <>
+              <CheckboxField
+                id={`net-${name}-managed`}
+                label="Managed (VXLAN)"
+                value={net.managed === true}
+                onChange={(v) => updateNetwork(name, { managed: v ? true : undefined })}
+                hint="Clouduler builds the overlay and hands out container addresses. Needs an IPv4 subnet."
+                help="Clouduler builds one cluster-wide VXLAN overlay over the address range, between the nodes that list an address on this network (each node's address is an entry point for outside clients). Containers get addresses from the range; the first host address is the shared gateway and cannot be a node address. Internet access needs a separate nat, egress or wireguard network. Reach it from other networks by routing the whole subnet via any node that implements it (for example advertise it as a Tailscale subnet route); access is decided on the source side, in the source network's 'Can reach' list. The flag and the subnet cannot be changed while a deployed stack uses the network."
+                configKey={`networks.${name}.managed`}
+                disabled={disabled}
+              />
+              {net.managed === true && (() => {
+                const err = managedNetworkError(draft, name);
+                return err ? (
+                  <p className="field-error">
+                    <Icon name="alert-circle" /> {err}
+                  </p>
+                ) : null;
+              })()}
+            </>
           )}
           {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <TextField
@@ -743,6 +768,7 @@ export function NodeCard({
   node,
   networks,
   drives,
+  cluster,
   onChange,
   onRemove,
   disabled,
@@ -750,12 +776,15 @@ export function NodeCard({
   name: string;
   node: NodeConfig;
   networks: ClusterConfig['networks'];
+  /** The whole draft, for managed-network address autofill and checks across nodes. */
+  cluster?: ClusterConfig;
   drives: ClusterConfig['drives'];
   onChange: (patch: Partial<NodeConfig>) => void;
   onRemove: () => void;
   disabled: boolean;
 }) {
   const drivePairs: [string, string][] = Object.entries(node.drives);
+  const fullDraft = (cluster ?? { networks, nodes: { [name]: node } }) as ClusterConfig;
 
   const setAddress = (netName: string, addr: NodeAddress | null) => {
     const nextNetwork = { ...node.network };
@@ -790,7 +819,12 @@ export function NodeCard({
       setPendingWireguard((prev) => (prev.includes(netName) ? prev : [...prev, netName]));
       return;
     }
-    const value: NodeAddress = net.type === 'public' ? { ipv4: null, ipv6: null, domain: null, open_ports: [] } : '';
+    const value: NodeAddress =
+      net.type === 'public'
+        ? { ipv4: null, ipv6: null, domain: null, open_ports: [] }
+        : isManaged(net)
+          ? (nextFreeNodeAddress(fullDraft, netName) ?? '')
+          : '';
     setAddress(netName, value);
   };
 
@@ -1029,11 +1063,19 @@ export function NodeCard({
               <IpField
                 id={`node-${name}-${netName}-ip`}
                 label={`Address on ${netName}`}
-                hint={net.type === 'internal' ? 'Required, inside the subnet.' : 'Inside the subnet.'}
+                hint={
+                  net.type === 'internal'
+                    ? 'Required, inside the subnet.'
+                    : isManaged(net)
+                      ? 'Inside the subnet; not the network, broadcast or gateway address.'
+                      : 'Inside the subnet.'
+                }
                 help={
                   net.type === 'internal'
                     ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
-                    : "This node's fixed address on this network, inside its subnet."
+                    : isManaged(net)
+                      ? "This node's address on the managed network: listing it makes the node implement the network. Prefilled with the next free address. It is an entry point for clients outside the overlay; containers on other nodes cannot reach it and use the gateway (the first host address) instead."
+                      : "This node's fixed address on this network, inside its subnet."
                 }
                 configKey={`nodes.${name}.network.${netName}`}
                 value={ip}
@@ -1051,6 +1093,14 @@ export function NodeCard({
                 <Icon name="close" />
               </button>
             )}
+            {isManaged(net) && (() => {
+              const err = managedNodeAddressError(fullDraft, name, netName);
+              return err ? (
+                <p className="field-error" style={{ flexBasis: '100%' }}>
+                  <Icon name="alert-circle" /> {err}
+                </p>
+              ) : null;
+            })()}
           </div>
         );
       })}

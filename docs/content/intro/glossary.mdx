@@ -173,7 +173,7 @@ A network kind with no per-node address, for outbound access that needs no per-n
 
 ### Network kinds {#network-kinds}
 
-`internal` (exactly one, node-to-node), `private` (extra trusted subnet), `public` (no subnet, reachable from outside), `egress`, `wireguard`, `nat`, `container`. [Read more](/docs/features/networking).
+`internal` (exactly one, node-to-node), `private` (extra trusted subnet, optionally `managed`), `public` (no subnet, reachable from outside), `egress`, `wireguard`, `nat`, `container`. [Read more](/docs/features/networking).
 
 ### Node {#node}
 
@@ -185,9 +185,13 @@ One machine in the cluster running the `clouduler` daemon. [Read more](/docs/fea
 
 OpenID Connect: sign in to the dashboard with an external identity provider such as Authentik or Keycloak. [Read more](/docs/features/access-and-login).
 
+### Managed network {#managed-network}
+
+A `private` network with `managed: true`: Clouduler builds one cluster-wide VXLAN overlay over its subnet on the nodes that list an address on it, and allocates container addresses from it. Other networks reach it by routing. [Read more](/docs/features/networking#managed-private-networks).
+
 ### Overlay network {#overlay-network}
 
-The VXLAN network that lets containers on different nodes reach each other by name. [Read more](/docs/features/networking).
+The VXLAN network that lets containers on different nodes reach each other by name. A stack gets one per hosting network; a [managed network](#managed-network) has one for the whole cluster. [Read more](/docs/features/networking).
 
 ## P
 

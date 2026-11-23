@@ -16,6 +16,20 @@ const HOST_ALIASES: [&str; 2] = ["host.docker.internal", "host-gateway"];
 use crate::materialize::Materialized;
 use crate::reconcile::LABEL_REVISION;
 
+/// An extra, post-create attachment of a container to a managed cluster
+/// network (see `cl_net::ipam::managed_key`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedAttachment {
+    /// The cluster network name (as in `networks:`).
+    pub network: String,
+    /// Docker network to attach to: `cl_net::managed_docker_name(network)`.
+    pub docker_network: String,
+    /// The leader-allocated address of the instance on the network.
+    pub ip: std::net::Ipv4Addr,
+    /// The network's anycast gateway (first host address).
+    pub gateway: std::net::Ipv4Addr,
+}
+
 /// Where a container sits on the overlay: its own address, the resolver that
 /// answers `service.stack` for it, and the zone that resolver is authoritative
 /// for. Empty for a container on no stack network, which keeps docker's own
@@ -35,6 +49,11 @@ pub struct Placement {
     pub proxy_addresses: Vec<std::net::Ipv4Addr>,
     /// Attachments to container-kind networks (client or router side).
     pub container_networks: Vec<ContainerAttachment>,
+    /// Extra attachments to managed networks the service lists. When the
+    /// stack has no per-stack overlay, the service's alphabetically first
+    /// managed network is the primary one instead (`network`, `ip` and
+    /// `resolver` describe it) and is NOT repeated here.
+    pub managed_networks: Vec<ManagedAttachment>,
     /// This service is a container network's router: turn on IPv4 forwarding
     /// (unless the service sets the sysctl itself).
     pub ip_forward: bool,
@@ -272,7 +291,24 @@ pub fn build(
             Vec::new()
         },
         egress_network: placement.egress_network,
-        container_networks: placement.container_networks,
+        // A managed network the service lists beside its primary one is attached like a
+        // container network (after create, at its allocated address) but has no routes.
+        container_networks: placement
+            .container_networks
+            .into_iter()
+            .chain(
+                placement
+                    .managed_networks
+                    .into_iter()
+                    .map(|m| ContainerAttachment {
+                        docker_network: m.docker_network,
+                        ip: m.ip,
+                        routes: Vec::new(),
+                        ifname: None,
+                        default_route: false,
+                    }),
+            )
+            .collect(),
         oneoff: false,
         no_new_privileges: false,
     })
@@ -506,6 +542,7 @@ mod tests {
             egress_network: None,
             proxy_addresses: Vec::new(),
             container_networks: Vec::new(),
+            managed_networks: Vec::new(),
             ip_forward: false,
             published_hosts: vec!["mail.example.org".into()],
         };
@@ -616,6 +653,43 @@ mod tests {
             None,
             1,
         )
+    }
+
+    #[test]
+    fn managed_attachments_become_routeless_container_attachments_after_the_others() {
+        let managed = |net: &str, last: u8| ManagedAttachment {
+            network: net.into(),
+            docker_network: cl_net::managed_docker_name(net),
+            ip: std::net::Ipv4Addr::new(192, 168, 32, last),
+            gateway: std::net::Ipv4Addr::new(192, 168, 32, 1),
+        };
+        let spec = build_placed(
+            "services:\n  web:\n    image: nginx\n",
+            Placement {
+                container_networks: vec![attachment(true)],
+                managed_networks: vec![managed("media", 4), managed("tv", 5)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(spec.container_networks.len(), 3);
+        assert_eq!(spec.container_networks[0].docker_network, "CTN_tailnet");
+        let media = &spec.container_networks[1];
+        assert_eq!(media.docker_network, cl_net::managed_docker_name("media"));
+        assert_eq!(media.ip, std::net::Ipv4Addr::new(192, 168, 32, 4));
+        assert!(media.routes.is_empty());
+        assert!(media.ifname.is_none());
+        assert!(!media.default_route);
+        assert_eq!(
+            spec.container_networks[2].docker_network,
+            cl_net::managed_docker_name("tv")
+        );
+
+        // Without managed networks nothing is added.
+        let none = build_placed(
+            "services:\n  web:\n    image: nginx\n",
+            Placement::default(),
+        );
+        assert!(none.container_networks.is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use cl_config::{ClusterConfig, ServiceExtensions, StackFile};
 use cl_net::relay::relay_port;
-use cl_net::Allocations;
+use cl_net::{managed_key, Allocations};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{ClusterState, DesiredState};
 use cl_sched::run::{overlay_name, overlay_network_name};
@@ -45,7 +45,70 @@ pub fn instance_addresses(
             out.insert(instance.clone(), ip);
         }
     }
+    // A service on managed networks only has no stack overlay: its address is
+    // the one it holds on its first managed network.
+    if !cfg.managed_networks().is_empty() {
+        for (name, stack) in &state.stacks {
+            let Ok(file) = StackFile::parse(&stack.spec) else {
+                continue;
+            };
+            if overlay_network_name(&file, cfg).is_some() {
+                continue;
+            }
+            for assignment in state.assignments.values() {
+                let instance = &assignment.instance;
+                if instance.stack != *name || !wants_running(state, instance) {
+                    continue;
+                }
+                let Some(network) = file
+                    .managed_attachments(cfg, &instance.service)
+                    .first()
+                    .map(|n| managed_key(n))
+                else {
+                    continue;
+                };
+                if let Some(ip) = allocations.instance_ip(&network, instance) {
+                    out.insert(instance.clone(), ip);
+                }
+            }
+        }
+    }
     out.into_iter().collect()
+}
+
+/// Every address an instance holds on a managed network it lists, with the
+/// network's name: the primary one (when the stack has no overlay) and the
+/// extra attachments. Empty for an instance on no managed network.
+pub fn managed_addresses(
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+) -> BTreeMap<InstanceId, Vec<(String, Ipv4Addr)>> {
+    let mut out: BTreeMap<InstanceId, Vec<(String, Ipv4Addr)>> = BTreeMap::new();
+    if cfg.managed_networks().is_empty() {
+        return out;
+    }
+    let Some(allocations) = Allocations::decode(state.overlay.as_deref()) else {
+        return out;
+    };
+    for (name, stack) in &state.stacks {
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        for assignment in state.assignments.values() {
+            let instance = &assignment.instance;
+            if instance.stack != *name || !wants_running(state, instance) {
+                continue;
+            }
+            for network in file.managed_attachments(cfg, &instance.service) {
+                if let Some(ip) = allocations.instance_ip(&managed_key(network), instance) {
+                    out.entry(instance.clone())
+                        .or_default()
+                        .push((network.to_string(), ip));
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn service_placements(state: &ClusterState, cfg: &ClusterConfig) -> Vec<ServicePlacement> {
@@ -219,6 +282,95 @@ web: { address: cloud, network: default }
         .expect("valid cluster config")
     }
 
+    /// A cluster with one managed network `mgd` (n1 holds .2) and three stacks:
+    /// `blog/web` on the overlay `default` and `mgd`, `media/solo` on `mgd` only
+    /// (so `mgd` is its primary network) and `plain/client` on `default` only.
+    /// Each has one running instance on n1.
+    pub fn managed_cluster() -> (ClusterConfig, ClusterState) {
+        let mut cfg = cluster_config();
+        cfg.networks.insert(
+            "mgd".into(),
+            serde_yaml::from_str("{ type: private, subnet: 192.168.32.0/24, managed: true }")
+                .expect("network parses"),
+        );
+        cfg.nodes.get_mut("n1").expect("n1").network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip("192.168.32.2".parse().expect("ip")),
+        );
+        let stacks = [
+            (
+                "blog",
+                "networks:\n  default: {}\n  mgd: {}\nservices:\n  web:\n    image: nginx\n    networks: [default, mgd]\n",
+            ),
+            (
+                "media",
+                "networks:\n  mgd: {}\nservices:\n  solo:\n    image: nginx\n    networks: [mgd]\n",
+            ),
+            (
+                "plain",
+                "networks:\n  default: {}\nservices:\n  client:\n    image: nginx\n    networks: [default]\n",
+            ),
+        ];
+        let mut state = ClusterState::default();
+        let mut allocations = Allocations::new(
+            DEFAULT_OVERLAY_POOL.parse().expect("pool parses"),
+            DEFAULT_SUBNET_PREFIX,
+        );
+        allocations.sync_managed_network(
+            &managed_key("mgd"),
+            "192.168.32.0/24".parse().expect("subnet"),
+            &cfg.managed_reserved("mgd"),
+        );
+        for (stack, spec) in stacks {
+            state.stacks.insert(
+                stack.to_string(),
+                StackState {
+                    name: stack.to_string(),
+                    spec: spec.to_string(),
+                    revision: 1,
+                    configs: Default::default(),
+                    secrets: Default::default(),
+                    used_configs: Default::default(),
+                    used_secrets: Default::default(),
+                    deployed_at: 0,
+                    previous_spec: None,
+                },
+            );
+            let service = match stack {
+                "blog" => "web",
+                "media" => "solo",
+                _ => "client",
+            };
+            let instance = InstanceId::new(stack, service, 0);
+            if stack != "media" {
+                let overlay = overlay_name(stack, "default");
+                allocations
+                    .allocate_network(&overlay, &[])
+                    .expect("allocates");
+                allocations
+                    .allocate_ip(&overlay, &instance)
+                    .expect("allocates");
+            }
+            if stack != "plain" {
+                allocations
+                    .allocate_ip(&managed_key("mgd"), &instance)
+                    .expect("allocates");
+            }
+            state.assignments.insert(
+                instance.clone(),
+                Assignment {
+                    instance,
+                    node: "n1".into(),
+                    desired: DesiredState::Running,
+                    image_digest: None,
+                    migration: None,
+                },
+            );
+        }
+        state.overlay = Some(serde_json::to_string(&allocations).expect("encodes"));
+        (cfg, state)
+    }
+
     pub const SPEC: &str = "\
 networks:
   default: {}
@@ -242,6 +394,44 @@ services:
 mod tests {
     use super::fixtures::*;
     use super::*;
+
+    #[test]
+    fn managed_addresses_list_every_managed_network_an_instance_holds() {
+        let (cfg, state) = managed_cluster();
+        let held = managed_addresses(&state, &cfg);
+        let web = InstanceId::new("blog", "web", 0);
+        let solo = InstanceId::new("media", "solo", 0);
+        assert_eq!(held.len(), 2, "plain/client is on no managed network");
+        assert_eq!(held[&web].len(), 1);
+        assert_eq!(held[&web][0].0, "mgd");
+        assert_eq!(held[&solo][0].0, "mgd");
+        assert_ne!(held[&web][0].1, held[&solo][0].1);
+        assert!("192.168.32.0/24"
+            .parse::<ipnet::Ipv4Net>()
+            .unwrap()
+            .contains(&held[&web][0].1));
+
+        // A stopped instance holds nothing; a cluster without managed networks lists none.
+        let mut stopped = state.clone();
+        stopped.assignments.get_mut(&web).unwrap().desired = DesiredState::Stopped;
+        assert!(!managed_addresses(&stopped, &cfg).contains_key(&web));
+        assert!(managed_addresses(&state, &cluster_config()).is_empty());
+    }
+
+    #[test]
+    fn a_service_on_a_managed_network_only_is_addressed_there() {
+        let (cfg, state) = managed_cluster();
+        let by_id: BTreeMap<InstanceId, Ipv4Addr> =
+            instance_addresses(&state, &cfg).into_iter().collect();
+        let held = managed_addresses(&state, &cfg);
+        let solo = InstanceId::new("media", "solo", 0);
+        let web = InstanceId::new("blog", "web", 0);
+        // media/solo has no overlay: its address is the managed one.
+        assert_eq!(by_id[&solo], held[&solo][0].1);
+        // blog/web keeps its overlay address as its primary one.
+        assert_ne!(by_id[&web], held[&web][0].1);
+        assert_eq!(by_id.len(), 3);
+    }
 
     #[test]
     fn every_running_instance_gets_an_address() {
@@ -318,6 +508,7 @@ services:
                 domain: None,
                 publish_dns: true,
                 access: None,
+                managed: false,
                 container: None,
             },
         );

@@ -1,0 +1,89 @@
+# Four services on the managed network `media`.
+#
+# `app` is on media and the stack overlay `cluster`, pinned to n1 (media is an
+# extra attachment there). `solo` is only on media, so media is its primary
+# network, pinned to n2. Each answers every request with its own name.
+#
+# `echo` (n2) is published by the proxy as echo.media.test on `media` and answers
+# with the X-Forwarded-For it received. `pp` (n2) is exposed on tcp 9100 of
+# `media` with a PROXY protocol header and answers with the first 28 bytes it
+# received (the v2 signature, the family and the client address) in hex.
+version: "3.8"
+
+networks:
+  media: {}
+  cluster: {}
+
+services:
+  app:
+    image: alpine:3.20
+    restart: always
+    networks: [media, cluster]
+    x-clouduler:
+      node: n1
+    command:
+      - sh
+      - -c
+      - |
+        printf '#!/bin/sh\nwhile read -r h; do [ "$h" = "$(printf "\r")" ] && break; done\nprintf "HTTP/1.1 200 OK\\r\\nContent-Length: 6\\r\\nConnection: close\\r\\n\\r\\napp-ok"\n' > /h.sh
+        chmod +x /h.sh
+        while true; do nc -l -p 80 -e /h.sh >/dev/null 2>&1; done
+
+  solo:
+    image: alpine:3.20
+    restart: always
+    networks: [media]
+    x-clouduler:
+      node: n2
+    command:
+      - sh
+      - -c
+      - |
+        printf '#!/bin/sh\nwhile read -r h; do [ "$h" = "$(printf "\r")" ] && break; done\nprintf "HTTP/1.1 200 OK\\r\\nContent-Length: 7\\r\\nConnection: close\\r\\n\\r\\nsolo-ok"\n' > /h.sh
+        chmod +x /h.sh
+        while true; do nc -l -p 80 -e /h.sh >/dev/null 2>&1; done
+
+  echo:
+    image: alpine:3.20
+    restart: always
+    networks: [media]
+    x-clouduler:
+      node: n2
+      proxy:
+        - { host: echo, network: media, port: 80, tls: false }
+    command:
+      - sh
+      - -c
+      - |
+        cat > /h.sh <<'EOF'
+        #!/bin/sh
+        x=""
+        while read -r l; do
+          [ "$l" = "$(printf '\r')" ] && break
+          case "$l" in X-Forwarded-For:*|x-forwarded-for:*) x=$(echo "$l" | cut -d: -f2 | tr -d ' \r');; esac
+        done
+        b="xff=[$x]"
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "$(printf %s "$b" | wc -c)" "$b"
+        EOF
+        chmod +x /h.sh
+        while true; do nc -l -p 80 -e /h.sh >/dev/null 2>&1; done
+
+  pp:
+    image: alpine:3.20
+    restart: always
+    networks: [media]
+    x-clouduler:
+      node: n2
+      expose:
+        - { port: 9000, published: 9100, network: media, proxy_protocol: true }
+    command:
+      - sh
+      - -c
+      - |
+        cat > /p.sh <<'EOF'
+        #!/bin/sh
+        h=$(head -c 28 | od -An -tx1 | tr -d ' \n')
+        echo "pp=$h"
+        EOF
+        chmod +x /p.sh
+        while true; do nc -l -p 9000 -e /p.sh >/dev/null 2>&1; done

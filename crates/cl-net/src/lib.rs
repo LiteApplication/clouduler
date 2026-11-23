@@ -17,6 +17,7 @@ pub mod error;
 pub mod expose;
 pub mod ipam;
 pub mod iptables;
+pub mod managed;
 pub mod netaccess;
 pub mod relay;
 pub mod restrict;
@@ -24,5 +25,5 @@ pub mod vxlan;
 pub mod wireguard;
 
 pub use error::{NetError, Result};
-pub use ipam::Allocations;
+pub use ipam::{is_managed_key, managed_docker_name, managed_key, Allocations, ManagedSync};
 pub use vxlan::{ethtool_available, Overlay, Underlay};

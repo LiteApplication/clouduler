@@ -73,6 +73,7 @@ def main():
 
     extra_networks = scenario.get("networks") or {}
 
+    nodes_by_name = {n["name"]: n for n in nodes}
     node_summaries = []
     # Built for every node, including ones that `join: true` marks as joining
     # after the cluster is already up - `cluster_nodes`/`control_nodes` below
@@ -116,6 +117,10 @@ def main():
         aliases = []
         for net_name, addr in (n.get("addresses") or {}).items():
             node_network[net_name] = addr
+            # A managed network's node address lives on the network's own bridge,
+            # which clouduler creates; aliasing it onto eth0 as well would clash.
+            if extra_networks[net_name].get("managed"):
+                continue
             prefix = extra_networks[net_name]["subnet"].split("/")[1]
             aliases.append(f"{addr}/{prefix}")
         if scenario.get("wan_on_mesh"):
@@ -172,6 +177,11 @@ def main():
         if ns["join"]:
             continue
         control_network = {"cluster": ns["control_ip"]}
+        # The cli validates stacks against this config: a managed network a
+        # service lists must have an implementing node in it.
+        for net_name, addr in (nodes_by_name[ns["name"]].get("addresses") or {}).items():
+            if extra_networks[net_name].get("managed"):
+                control_network[net_name] = addr
         if vpn and ns["name"] == vpn["egress_node"]:
             control_network[vpn["network"]] = "eth2"
         control_nodes[ns["name"]] = {

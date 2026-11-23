@@ -33,7 +33,7 @@ flowchart LR
 | Kind | In one sentence | Subnet | Domain | Per-node setting |
 |---|---|---|---|---|
 | `internal` | The one trusted network nodes use for raft, drive sync and the container overlay. Exactly one is required. | required | optional | an IP, on every node |
-| `private` | An extra trusted LAN-style network with a subnet. | required | optional | an IP, on nodes that use it |
+| `private` | An extra trusted LAN-style network with a subnet. With `managed: true` Clouduler builds its own overlay over the subnet, see [Managed private networks](#managed-private-networks). | required | optional | an IP, on nodes that use it |
 | `public` | Reachable from the internet. No subnet. Hostnames resolve to each node's public address. | none | needed for web routes and DNS | an `ipv4` / `ipv6` / `domain` block and optional `open_ports` |
 | `egress` | Forces a service's outbound traffic out of one named host interface (for example a VPN), with a kill-switch. | none | not allowed | the host interface name |
 | `wireguard` | Like egress, but Clouduler creates the WireGuard tunnel from a config you import. **Pending deprecation**, see [WireGuard networks](#wireguard-networks). | none | not allowed | set by importing a config |
@@ -42,7 +42,7 @@ flowchart LR
 
 ### The container overlay
 
-Containers on different machines reach each other through an **overlay**: a virtual network built on VXLAN (a tunnel that carries ethernet frames over UDP port 4789). You do not set it up. For each stack and each internal, private or public network it uses, every node builds a bridge plus a VXLAN device, with a static list of peers (no multicast). Containers get addresses from a cluster-wide pool, `10.244.0.0/16`, carved into one `/24` per overlay. The gateway is `.1` and is the same on every node.
+Containers on different machines reach each other through an **overlay**: a virtual network built on VXLAN (a tunnel that carries ethernet frames over UDP port 4789). You do not set it up. For each stack, on the one network that hosts it (see [Use a network from a stack](#use-a-network-from-a-stack)), every node builds a bridge plus a VXLAN device, with a static list of peers (no multicast). Containers get addresses from a cluster-wide pool, `10.244.0.0/16`, carved into one `/24` per overlay. The gateway is `.1` and is the same on every node.
 
 To choose the subnet yourself, set `subnet` in the stack's top-level `x-clouduler` block. It applies to the stack's overlay, whichever cluster network hosts it:
 
@@ -81,7 +81,7 @@ Networks live in the cluster config, not in a stack. Each node says how it is at
 <UiCli>
 <UiCli.Ui>
 
-Open **Settings**, tab **Network**, page **Networks**, and click **Add network**. Rename the card with the pencil button, then choose **Network type**: Internal, Private, Public, Egress, WireGuard, NAT or Container. Depending on the type you also fill in **Address range** (CIDR), **DNS domain**, and **Publish to DNS provider (Cloudflare)**. Save the page; risky changes ask for confirmation.
+Open **Settings**, tab **Network**, page **Networks**, and click **Add network**. Rename the card with the pencil button, then choose **Network type**: Internal, Private, Public, Egress, WireGuard, NAT or Container. Depending on the type you also fill in **Address range** (CIDR), a **Managed (VXLAN)** toggle for a private network, **DNS domain**, and **Publish to DNS provider (Cloudflare)**. Save the page; risky changes ask for confirmation.
 
 Then, in the node settings, a **Network addresses** section has a field for each network the node is on: **Address on NETWORK** for internal and private, **Public IPv4**, **Public IPv6**, **Alias hostname** and **Open ports** for public, and **Interface**, **Use a backup interface**, **Fallback interface**, **Health check address** and **Open ports** for egress. A nat or container network shows no field at all.
 
@@ -166,6 +166,7 @@ There is no CLI command for networks themselves.
   {"key": "networks.NAME.domain", "type": "DNS name", "reload": "live", "description": "Names under it resolve to node addresses on this network. Required for proxy routes and DNS on a public network. Forbidden for egress, wireguard, nat and container.", "quirks": "No leading or trailing dot, unique across networks. When Cloudflare is configured the domain must be inside a configured zone: DOMAIN is not covered by any configured cloudflare zone."},
   {"key": "networks.NAME.publish_dns", "type": "bool", "default": "true", "reload": "live", "description": "false keeps the network's hostnames out of Cloudflare; only the cluster DNS server answers them.", "quirks": "Only internal and private networks may set false. A public network always publishes."},
   {"key": "networks.NAME.access", "type": "list of network names", "reload": "live", "description": "Networks this one may reach. Only on internal, private and container networks. See [Network access](#network-access).", "quirks": "A network always reaches itself and every public network. Absent means no host firewall for this source; `[]` or a list turns enforcement on."},
+  {"key": "networks.NAME.managed", "type": "bool", "default": "false", "reload": "live", "description": "Private networks only: Clouduler builds a cluster-wide VXLAN overlay over the subnet and allocates container addresses. See [Managed private networks](#managed-private-networks).", "quirks": "Needs an IPv4 subnet of /16 to /29 that overlaps nothing else. Flipping it, or changing the subnet, is refused while a deployed stack lists the network."},
   {"key": "networks.NAME.container", "type": "map", "reload": "live", "description": "The router, the routed range and what the router side may reach. Required for, and only allowed on, a container network. Options in [Container networks](#container-networks).", "quirks": "A container network takes the routed range in its own `subnet`, and may not declare a node address."}
 ]} />
 
@@ -203,7 +204,7 @@ services:
     # a container network can be listed as well (see Container networks)
 ```
 
-Clouduler picks the stack's **overlay network** (the one that provides DNS and an overlay address) as the first `internal` or `private` network **in alphabetical order of network name** (not declaration order), otherwise the first `public` network, otherwise none. A stack that only uses egress, wireguard, nat and container networks has no overlay: no internal DNS, no proxy gating, and Docker's default resolver.
+Clouduler picks the stack's **overlay network** (the one that provides DNS and an overlay address) as the first `internal` or non-managed `private` network **in alphabetical order of network name** (not declaration order), otherwise the first `public` network, otherwise none. [Managed private networks](#managed-private-networks) are never picked: each one is a cluster-wide overlay of its own, and a service that lists it is attached to it in addition. A stack that only uses egress, wireguard, nat and container networks has no overlay: no internal DNS, no proxy gating, and Docker's default resolver. If it lists a managed network, the alphabetically first one is the service's primary network and provides the resolver.
 
 <OptionTable rows={[
   {"key": "networks.NAME", "type": "map or empty", "reload": "n/a", "description": "Declares a cluster network the stack's services may use.", "quirks": "Must exist in the cluster."},
@@ -423,6 +424,132 @@ Replies to allowed connections always flow: established and related packets, loo
 
 In **Settings**, tab **Network**, the access lists are edited as a graph. Each network is a floating node you can drag around. Drag from a node's handle, or shift-drag, onto another node to add an edge (the source may now reach the target). Click an edge to remove it. Click a node to open its settings sheet, which has a **Can reach** picker for the same list and an **Unrestricted host firewall** button that clears `access` (absent: no host firewall for that source).
 
+## Managed private networks
+
+A normal `private` network is only an address range: the LAN already exists and Clouduler just records which address each node has on it. Set `managed: true` on a private network and Clouduler builds the network itself. It creates **one cluster-wide VXLAN overlay over the subnet** and hands out container addresses from it, so containers get a stable address on your own range (for example `192.168.32.0/24`) that other networks, such as a tailnet, can route to.
+
+```yaml title="cluster.yaml (excerpt)"
+networks:
+  media:
+    type: private
+    subnet: 192.168.32.0/24
+    managed: true
+  tailscale:
+    type: internal
+    subnet: 100.64.0.0/10
+    access: [media]        # tailscale clients may reach media
+
+nodes:
+  atlas:
+    network:
+      tailscale: 100.64.0.1
+      media: 192.168.32.2  # atlas implements media
+  boreas:
+    network:
+      tailscale: 100.64.0.2
+      media: 192.168.32.3  # so does boreas
+```
+
+### Declare it
+
+<OptionTable rows={[
+  {"key": "networks.NAME.managed", "type": "bool", "default": "false", "reload": "live", "description": "Clouduler builds a cluster-wide VXLAN overlay over the subnet and allocates container addresses from it.", "quirks": "Only on a private network with an IPv4 subnet. Errors: only a private network can be managed, this one is KIND; a managed network needs an IPv4 subnet. Prefix length /16 to /29. No host bits. The subnet may not overlap any other network's subnet, the overlay pool 10.244.0.0/16, the egress pool 10.245.0.0/16 or the nat pool 10.246.0.0/16."},
+  {"key": "nodes.N.network.NET (managed)", "type": "IPv4", "reload": "live", "description": "The node's address on the managed network. Listing one makes the node implement the network: only these nodes build the overlay and may run services that list it.", "quirks": "Errors: ADDRESS is outside the NET subnet SUBNET; ADDRESS is the network or broadcast address of SUBNET; ADDRESS is the gateway of the managed network NET, pick another address; ADDRESS is used by another node on NET; node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel. The gateway is the first host address."}
+]} />
+
+In **Settings > Network**, a private network has a **Managed (VXLAN)** toggle. Adding the network to a node prefills the next free address (the lowest host address that is not the network, broadcast or gateway address or another node's address). The CLI has no command for it: edit `cluster.yaml`, and `clouduler check` reports the errors.
+
+### Addresses
+
+| Address | Meaning |
+|---|---|
+| network and broadcast address | Never used. |
+| first host (`.1` in a /24) | The **gateway**, the same address and MAC on every node (like the stack overlays). Containers use it as their resolver. It cannot be a node address. A container whose primary network this is uses it as its resolver. |
+| each node's address | Added as a secondary address on that node's bridge. It is an **entry point for clients outside the overlay**, and what proxy routes and DNS records on the network's `domain` point at. |
+| everything else | The container pool. The leader allocates an address per instance and records it in raft; it is released when the instance is removed. |
+
+Every node address is reserved, so a container never gets one.
+
+### Overlay, gateway and MTU
+
+- The overlay exists only on the nodes that list an address on the network. Its VXLAN peers are the internal addresses of those nodes, not of every node, over the internal network as underlay.
+- It belongs to the network, not to a stack, so it is not removed when stacks are. It is torn down on a node when that node stops implementing the network, and everywhere when the network is deleted.
+- The MTU is the underlay MTU minus 50, like every overlay.
+- The peer list is rebuilt from the live config every 10 seconds, so removing a node's address (or the node) takes it out of the overlay.
+- The overlay is created with masquerade off. Internet access needs a separate `nat`, `egress` or `wireguard` network on the service.
+
+<Quirk title="Containers on other nodes cannot reach a node address" severity="info">
+Every node answers for the gateway with the same MAC, so a container on node B that talks to node A's address on the network does not arrive at A. Containers use the gateway (or other containers' addresses). Node addresses are for clients outside the overlay.
+</Quirk>
+
+### Attaching containers
+
+A managed network is **not** a stack's overlay network. Managed networks are skipped when Clouduler [picks the stack's overlay](#use-a-network-from-a-stack), and every service that lists one gets an extra attachment to it after the container is created. A service can therefore be on its stack overlay, any number of managed networks, and one egress, wireguard or nat network at once.
+
+```yaml title="stack.yaml"
+networks:
+  media: {}
+  home: {}                    # nat, so the service can reach the internet
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10
+    networks: [media, home]
+```
+
+If a stack lists no non-managed overlay candidate (no internal or private network that is not managed, and no public network), the service's **primary** network is the alphabetically first managed network it lists: its gateway is the resolver and the container gets DNS from it. Otherwise the stack overlay stays primary.
+
+A service on a managed network can only be placed on nodes that list an address on it (`does not implement network NET` otherwise), like any other private network. The internal DNS answers `SERVICE.STACK` and the bare service name on a managed network too, with the address on a network the asking container shares (its primary network first); when it shares none, the target's primary address.
+
+### Reaching it from other networks
+
+Clouduler does not advertise the subnet anywhere. A client reaches a managed network by **routing the whole subnet via any node that implements it**:
+
+- On Tailscale, run `tailscale up --advertise-routes=192.168.32.0/24` on **each** implementing node and approve the routes in the admin console (or your Headscale). Advertising from several nodes gives high availability, because Tailscale fails over between subnet routers.
+- On a LAN, add a static route for the subnet whose next hop is a node address.
+
+Whichever node receives the traffic delivers it: to a local container directly, or, for a container on another node, over the internal network. Each entry node keeps a `/32` route for every remote container (routing protocol `201`, via the hosting node's internal address), refreshed from raft and placement every 5 seconds. If a node dies, clients use another one and the routes of the survivors adapt.
+
+<Quirk title="The container sees the gateway, not the client" severity="warn">
+Forwarded-in connections are source-NATed, twice when they cross nodes: the entry node rewrites the source to its own internal address when forwarding to another node (so replies come back through it), and the node that hosts the container rewrites any source outside the subnet to the network's gateway, so the container answers through its managed interface whatever its default route is. The cost is that the container's own logs show the gateway as the client. Clients that go through the Clouduler proxy keep their address: HTTP routes through `X-Forwarded-For`, TCP routes (`proxy_protocol`) through the PROXY protocol header.
+</Quirk>
+
+### Who may reach it
+
+Access is decided on the **source side**, with the normal [`access`](#network-access) list of the network the client comes from. "Clients on my tailnet may reach media" is `networks.tailscale.access: [media]`. A source network with no `access` list reaches everything; one with a list reaches only itself, public networks and what it lists.
+
+`CLDR-MNG` enforces this for traffic routed into a managed subnet from outside its bridge:
+
+- replies to connections already open are accepted;
+- the internal addresses of the implementing nodes are accepted (that is the hop between nodes);
+- sources inside an internal or private cluster network that reaches the managed network are accepted;
+- everything else is **dropped**, including sources that belong to no cluster network, such as the public internet or an unlisted LAN.
+
+- sources in a `container` network are accepted through its routed range under the same rule (no `access` list, or one that names the managed network). A range such as `0.0.0.0/0` therefore admits everything, so give such a network an `access` list.
+
+A stack's [`allowed` list](#allowed-hosts-and-ports) is checked **before** `CLDR-MNG` (`CLDR-ALLOW` and `CLDR-NETF` are hooked ahead of it): a stack with an `allowed` list can only reach destinations in a managed subnet that the list names, and the managed network's own rules then still apply. Stacks without a list are unaffected. The list does not filter what a container sends directly out of its own managed interface.
+
+Traffic to a node's own address on the network keeps the normal [network access](#network-access) rules. Containers on a managed network are subject to the same host-input restrictions as every container (`CLDR-IN`): DNS to the gateway, the proxy and `expose` ports.
+
+A proxy route (`x-clouduler.proxy`) on a managed network with a `domain` publishes the node addresses on the network, and the proxy's [network gate](/docs/features/proxy-and-tls) applies as for any private network.
+
+### Changes Clouduler refuses
+
+A config update (UI or `clouduler config reload`) is refused when:
+
+- a newly managed network, or one whose subnet changed, overlaps an overlay subnet already allocated to a stack or pinned by a stack's `x-clouduler.subnet`;
+- `managed` is turned on or off, or a managed network's subnet is changed, while a deployed stack lists the network (`changing whether it is managed for network NET would break the stacks that list it (...): remove the network from those stacks (or undeploy them) first`);
+- a node drops its address on a managed network while it runs instances attached to it (`node N still runs ... attached to managed network NET: move or stop it before removing the node's address on NET`);
+- a node takes an address that an instance already holds (`ADDRESS is held by instance ID on managed network NET, pick another address for node N`).
+
+If the subnet or the node addresses of a managed network change, each node recreates its Docker network `MNG_NET` to match, but only while no container is attached to it; with containers attached it is left as it is and a warning is logged (the config update itself is refused while a deployed stack lists the network).
+
+**Rolling upgrade.** Every node must run a release with managed network support **before** you set `managed: true`. An older daemon rejects a config that has the field, and an older leader drops the managed address allocations from the replicated state. Upgrade all nodes first, then enable it.
+
+A node that lists an address on a managed network also needs an IPv4 address on the internal network (the tunnel and the forwarding NAT use it), otherwise the config is refused: `node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel`.
+
+Renaming a managed network works live: the overlay is rebuilt under the new name, its containers are recreated on it, and **they keep their addresses**. Expect a short outage for those containers. The same checks as for a config update run first.
+
 ## Container networks
 
 A `container` network sends traffic for an address range through a **router container**, a container that you run yourself as an ordinary stack service. The classic router is a VPN client such as WireGuard, Tailscale or a gluetun-style container: it holds the tunnel, and Clouduler makes the right traffic go through it. The routed range can be a tailnet (`100.64.0.0/10`) or everything (`0.0.0.0/0`).
@@ -603,6 +730,8 @@ Clouduler manages host firewall rules with iptables. It only touches chains with
 | `CLDR-ALLOW-NAT` (nat, `PREROUTING`) | Sends a restricted stack's proxy traffic to this node's own proxy so the proxy can tell stacks apart. |
 | `CLDR-NET` (filter, `INPUT`, before `CLDR-IN`) | [Network access](#network-access): drops traffic from a restricted network's subnet to this node's own address on a network it may not reach. Replies, loopback and the dashboard port are exempt. |
 | `CLDR-NETF` (filter, `DOCKER-USER`, else `FORWARD`) | The same for traffic routed between the two subnets. |
+| `CLDR-MNG` (filter, first in `DOCKER-USER`, else `FORWARD`) | [Managed private networks](#managed-private-networks): for traffic routed into a managed subnet from outside its bridge, accepts replies, the internal addresses of the implementing nodes and sources in a network that reaches it, and drops the rest. Accepts rather than returns, because Docker drops traffic routed into a bridge it owns. |
+| `CLDR-MNG-NAT` (nat, `POSTROUTING`) | Source NAT for forwarded-in connections to a managed network: to the node's own internal address when handing off to another node, to the network's gateway when entering the bridge. |
 | `CLDR-CTN-NET` (filter, `INPUT`, before `CLDR-IN`) | [Container network](#container-networks), traffic from the router to this node: accepts replies, `open_ports`, and 80/443 with `proxy: true`; drops the rest. |
 | `CLDR-CTNF-NET` (filter, `DOCKER-USER`, else `FORWARD`) | The same for traffic the router forwards through the node, plus forwarding to the allowed subnets. |
 | `CLDR-CTNL2-BRIDGE` (filter, `DOCKER-USER`, else `FORWARD`) | Client isolation on a container network's segment: bridged frames are accepted only to or from the router and the node addresses. |
@@ -623,7 +752,7 @@ For a host process to reach a container on another node, Clouduler uses a relay 
 Renaming rewrites the network everywhere: the cluster config, node address maps, `web.network`, every deployed stack, redirects, static routes, WireGuard ingress rules, sealed WireGuard secrets and the `access` lists of every network. Use the pencil button on the network card in Settings (it calls `POST /api/config/networks/NAME/rename` with `{"new_name": "..."}`). There is no CLI command.
 
 <Quirk title="Rename is not atomic" severity="warn">
-The config changes first, then each stack is redeployed, then redirects, routes and ingress rules. If a later step fails, earlier ones are already committed. The error says which stack failed (`renaming network in stack STACK: ...`). Fix it and retry. A rename is refused if the new name exists, if the result does not validate, or if two stacks would end up sharing an overlay name.
+The config changes first, then each stack is redeployed, then redirects, routes and ingress rules. If a later step fails, earlier ones are already committed. The error says which stack failed (`renaming network in stack STACK: ...`). Fix it and retry. A managed network is renamed live: its overlay is rebuilt under the new name and its containers are recreated on it, keeping their addresses (see [Managed private networks](#managed-private-networks)). A rename is refused if the new name exists, if the result does not validate, or if two stacks would end up sharing an overlay name.
 </Quirk>
 
 ## Quirks and gotchas

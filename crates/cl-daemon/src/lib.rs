@@ -17,6 +17,7 @@ pub mod expose;
 pub mod gpu;
 pub mod internal_dns;
 pub mod log_alerts;
+pub mod managed;
 pub mod migration;
 pub mod netaccess;
 pub mod overlay;

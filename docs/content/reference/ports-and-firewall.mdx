@@ -21,7 +21,7 @@ Clouduler does not open ports on your host firewall. If you run `ufw`, `firewall
 | 7373 (`rpc_port`) | TCP | Raft, forwarded writes, CLI traffic | The node's internal IP | Other nodes, and the CLI on a manager | Other nodes only |
 | 7374 (`rpc_port` + 1) | TCP | Drive transport: volume sync, served-drive handoff, folder import | Internal IP | Other nodes | Other nodes only |
 | 7375 (`rpc_port` + 2) | TCP | Relay: connections to containers that run on another node | Internal IP | Other nodes | Other nodes only |
-| 4789 | UDP | VXLAN overlay for stack networks | Internal IP | Other nodes | Other nodes only |
+| 4789 | UDP | VXLAN overlay for stack networks and managed private networks | Internal IP | Other nodes | Other nodes only |
 | 8443 (`web.port`) | TCP, HTTPS | Dashboard and API | All addresses | Admin browsers, `clouduler init --join`, MCP clients | Your admin networks |
 | 8444 (`web.backend_port`) | TCP, HTTP | Proxy to dashboard (bound only when the dashboard is served through the proxy) | 127.0.0.1 only | The local proxy | Nobody (loopback) |
 | 80 (`proxy.http_port`) | TCP, HTTP | Reverse proxy: redirects, ACME HTTP-01, `tls: false` routes | All addresses | Clients of published hostnames | Clients, and the internet for public apps |
@@ -168,10 +168,12 @@ Clouduler keeps its own iptables chains for container traffic. They are applied 
 |---|---|---|
 | `CLDR-IN` | filter, `INPUT` position 1 | Stops containers from reaching the host's own listeners (dashboard API, raft, drive and relay ports). For packets from the overlay, egress and nat address pools it accepts: established and related traffic, DNS (port 53) to the overlay pool, the proxy's HTTP and HTTPS ports, every `x-clouduler.expose` port published on this node, and ICMP echo. Everything else is dropped. Docker `-p` publishes are not affected. |
 | `CLDR-OVL-SNAT` | nat, `POSTROUTING` | Masquerades overlay traffic going to another node, only for TCP to the proxy ports and ICMP echo, so the remote proxy sees a node address and the [network gate](/docs/features/proxy-and-tls) passes. |
+| `CLDR-MNG` | filter, first in `DOCKER-USER`, else `FORWARD` | [Managed private networks](/docs/features/networking#managed-private-networks): traffic routed into a managed subnet from outside its bridge is accepted for replies, the implementing nodes' internal addresses and sources in a network that reaches it; everything else is dropped. |
+| `CLDR-MNG-NAT` | nat, `POSTROUTING` | Source NAT for forwarded-in connections: to the node's internal address when handing over to another node, to the managed network's gateway when entering its bridge. |
 | `CLDR-NAT-<bridge>` | nat, `POSTROUTING` | Masquerades an egress or nat network's bridge out of its host interface. |
 | `CLDR-FWD-<bridge>` | filter, `DOCKER-USER` (else `FORWARD`) | Egress kill-switch: accept bridge to interface, drop the rest from the bridge. |
 | `CLDR-WGIN-<iface>` | filter and nat | WireGuard ingress: default deny for new packets from the tunnel, accept only the opened ports. Ports that differ from their target get a DNAT to the node's internal address. |
-| `CLDR-ALLOW` | filter, `DOCKER-USER` first | Per-stack `allowed` enforcement for routed packets. Exists only when some stack has an `allowed` list. |
+| `CLDR-ALLOW` | filter, `DOCKER-USER` first | Per-stack `allowed` enforcement for routed packets. Exists only when some stack has an `allowed` list. Jumped ahead of `CLDR-MNG`, so it also limits what a restricted stack sends into a managed subnet. |
 | `CLDR-ALLOW-NAT` | nat, `PREROUTING` first | Redirects proxy traffic from a restricted stack to another node to this node's own proxy, so the proxy can tell the stack apart by source address. |
 | `CLDR-NET` | filter, `INPUT` before `CLDR-IN` | [Network access](/docs/features/networking#network-access): drops traffic from a network with an `access` list to this node's own address on a network it may not reach. Replies, loopback and `web.port` are exempt. Removed when nothing is restricted. |
 | `CLDR-NETF` | filter, `DOCKER-USER` (else `FORWARD`) first | The same for traffic routed between two subnets. |
@@ -188,6 +190,7 @@ What this means for you:
 
 - A container can reach the proxy (80/443) on any node, DNS on its overlay gateway, and `expose` ports on any node. It cannot reach 8443, 7373 to 7375 or any other host listener.
 - A container reaching another node's address is only NATed for TCP to the proxy ports and ICMP echo. Its other traffic there is dropped.
+- Managed networks add routes too: one `/32` per container on another node, routing protocol `201` (`ip route show proto 201`). Containers on managed subnets get the same host-input restrictions as the overlay (`CLDR-IN`), and DNS to the managed gateway is allowed. Clients outside the subnet need a route for it via an implementing node (for example a Tailscale subnet route).
 - A container network also uses policy routing rules (priority 5050 for replies, 5200 and above for the router-bound routes) and two routing tables per network. Inspect them with `ip rule` and `ip route show table N`. The segment uses the same VXLAN port (4789) as every overlay, and a veth `clch-<net>` on each node.
 - You can inspect the rules with `sudo iptables -S CLDR-IN` and `sudo iptables -t nat -S CLDR-OVL-SNAT`. Do not edit them.
 

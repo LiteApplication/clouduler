@@ -954,6 +954,10 @@ export interface NetworkConfig {
    *  enforcement on. A network always reaches itself and public networks are
    *  implicitly reachable. */
   access?: string[] | null;
+  /** Private networks only. Clouduler builds one cluster-wide VXLAN overlay
+   *  over `subnet` between the nodes that list an address on it. Absent =
+   *  false. */
+  managed?: boolean;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';

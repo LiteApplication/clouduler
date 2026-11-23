@@ -235,6 +235,86 @@ with a warning; container-network targets are not handled; an empty plan
 removes both chains. The settings graph (`ui/src/views/config/NetworkGraph.tsx`)
 edits the lists.
 
+## Managed private networks
+
+`networks.<n>.managed: true` on a `private` network with an IPv4 subnet
+(/16 to /29, host bits clear, no overlap with any other network subnet or with
+`10.244.0.0/16`, `10.245.0.0/16`, `10.246.0.0/16`) makes clouduler build the
+network. Validation in `cl_config::validate` (`validate_managed_network`).
+
+* One cluster-wide VXLAN overlay per managed network (not per stack), internal
+  key `@NET` (`cl_net::managed_key`) for ipam, VNI and device names, docker
+  network `MNG_NET`. It exists only on nodes that list an address on the
+  network (`nodes.N.network.NET`: a bare IPv4 inside the subnet, not the
+  network, broadcast or gateway address, unique per node). Peers are those
+  nodes' internal addresses; MTU is the underlay's minus 50. Built by
+  `cl_daemon::overlay` (`ensure_managed`), never swept as a stack orphan,
+  torn down when a node stops implementing it or the network goes away.
+* Anycast gateway: first host address, same IP and MAC on every node. Each
+  node's own address is a secondary address on its bridge: an entry point for
+  outside clients and the proxy/DNS target for the network's `domain`.
+  Containers on other nodes cannot reach a node address (anycast MAC); they
+  use the gateway.
+* Container pool: the subnet minus network, broadcast, gateway and every node
+  address (`ClusterConfig::managed_reserved`). The leader allocates in raft
+  under the `@NET` key and releases on instance removal.
+* Not a stack overlay: `StackFile::overlay_network` skips managed networks.
+  Each service that lists one gets an extra post-create attachment (a
+  `ContainerAttachment`, like container networks), next to the stack overlay
+  and one egress, wireguard or nat network. With no non-managed overlay
+  candidate the alphabetically first managed network is the primary
+  (`StackFile::primary_network`) and its gateway the resolver. Placement:
+  the node must list an address on it (`does not implement network NET`).
+  Internal DNS answers `SERVICE.STACK` and bare names on a managed network too,
+  with the address on a network the asker shares (primary first), else the
+  target's primary address.
+* Masquerade is off: the internet needs a nat, egress or wireguard network.
+
+Access is by routing. Clouduler advertises nothing: clients route the whole
+subnet via any implementing node (for example `tailscale up
+--advertise-routes=SUBNET` on every implementing node, approved, which also
+gives HA; or a static LAN route). `cl_daemon::managed` runs a loop that applies
+`cl_net::managed`: a `/32` route per container on another node via that node's
+internal address (`proto 201`, so only clouduler's routes are listed or
+removed), and two chains:
+
+* `CLDR-MNG` (filter, first in `DOCKER-USER`, else `FORWARD`): for `-d SUBNET !
+  -i BRIDGE`: ACCEPT established/related, ACCEPT from the internal address of
+  every implementing node, ACCEPT from the subnets of networks that reach it
+  (`ClusterConfig::reaches`), DROP the rest (public internet and unlisted
+  networks included). It ends in ACCEPT, not RETURN, because docker drops
+  routed traffic into its bridges.
+* `CLDR-MNG-NAT` (nat, `POSTROUTING`): forwarding to another node SNATs to this
+  node's internal address; entering the bridge SNATs any source outside the
+  subnet to the gateway so the container replies through its managed
+  interface. Containers therefore see the gateway, not the client. The proxy
+  keeps real clients via `X-Forwarded-For` and the PROXY protocol.
+
+The direction is the existing one: `networks.SRC.access: [media]` says SRC may
+reach `media`; an absent list reaches everything. `container` networks count as
+sources through their routed range. Per-stack `allowed` lists (`CLDR-ALLOW`)
+and `CLDR-NETF` are jumped before `CLDR-MNG` (`Jump::before`), so a restricted
+stack only reaches managed destinations its list names. Managed subnets are CLDR-IN
+container sources (DNS to the gateway allowed) and are excluded from the
+proxy's internal peer subnets, since outside clients arrive from the gateway.
+Peers are recomputed from live config every 10 s (overlay pass), routes and
+firewall every 5 s (`cl_daemon::managed`); both also use raft placement.
+
+Config updates (`managed_network_conflict` in `routes/config.rs`) are refused
+when a new or moved managed subnet overlaps an allocated or pinned stack
+overlay subnet, when `managed` or the subnet changes while a deployed stack
+lists the network, when a node drops its address while it runs instances
+attached to it, or when a node takes an address an instance holds. Renaming a
+managed network is live: the overlay is rebuilt under the new key and the
+`@old` allocations move to `@new`, so containers are recreated with the same
+addresses. `Docker::ensure_managed_network` recreates `MNG_NET` when its subnet,
+gateway or reserved addresses drift, only with nothing attached (else it logs).
+Validation refuses a managed address on a node whose internal address is not
+IPv4. Rolling upgrade: every node must run a managed-capable release before
+`managed: true` is set; an older daemon rejects the config and an older leader
+drops managed allocations. The UI prefills new node addresses with
+`ClusterConfig::next_free_node_address`.
+
 ## Host firewall
 
 All rules are installed with `iptables -w`, re-checked every reconcile tick (so

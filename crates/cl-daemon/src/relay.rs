@@ -79,7 +79,7 @@ pub fn start(
         // The listener follows the live config, so a node moved onto another
         // network is reachable at its new address without a restart. Dropped
         // with this task, which is what `Relay::abort` stops.
-        let mut listener: Option<(SocketAddr, StopOnDrop)> = None;
+        let mut listener: Option<(SocketAddr, Vec<IpNet>, StopOnDrop)> = None;
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         loop {
             ticker.tick().await;
@@ -87,11 +87,21 @@ pub fn start(
             let live = crate::daemon::live_config(&state, &boot_cfg);
             refreshed.set_relays(crate::placement::relay_routes(&state, &live, &node_name));
 
+            // The overlay pool, plus the subnet of every managed network (a container
+            // there is as much a relay target as one on a stack overlay).
+            let allowed = relay_pools(&live);
             let wanted = relay_addr(&live, &node_name);
-            if listener.as_ref().map(|(addr, _)| *addr) != wanted {
+            let current = listener
+                .as_ref()
+                .map(|(addr, pools, _)| (*addr, pools.clone()));
+            if current != wanted.map(|addr| (addr, allowed.clone())) {
                 listener = wanted.map(|addr| {
                     info!(%addr, "container relay address set");
-                    (addr, StopOnDrop(tokio::spawn(listen(addr, keys.clone()))))
+                    (
+                        addr,
+                        allowed.clone(),
+                        StopOnDrop(tokio::spawn(listen(addr, keys.clone(), allowed.clone()))),
+                    )
                 });
             }
         }
@@ -100,10 +110,21 @@ pub fn start(
     Relay { dialer, tasks }
 }
 
-async fn listen(addr: SocketAddr, keys: KeyWatch) {
+/// The ranges the relay may dial into: the overlay pool, plus the subnet of every managed
+/// network (a container there is as much a relay target as one on a stack overlay).
+fn relay_pools(cfg: &ClusterConfig) -> Vec<IpNet> {
+    let mut allowed = vec![IpNet::V4(cl_net::egress::overlay_pool())];
+    allowed.extend(
+        cfg.managed_networks()
+            .into_iter()
+            .map(|(_, _, s)| IpNet::V4(s)),
+    );
+    allowed
+}
+
+async fn listen(addr: SocketAddr, keys: KeyWatch, allowed: Vec<IpNet>) {
     // Only container addresses are ever dialed for a peer: the relay is a
     // way to the containers this node runs, not into the host or onward.
-    let allowed = vec![IpNet::V4(cl_net::egress::overlay_pool())];
     loop {
         match TcpListener::bind(addr).await {
             Ok(listener) => {
@@ -137,6 +158,30 @@ web: {{ address: cloud, network: internal }}
 "#
         ))
         .expect("valid config")
+    }
+
+    #[test]
+    fn the_relay_pools_add_every_managed_subnet_to_the_overlay_pool() {
+        let plain = cfg("10.10.0.0/24", "10.10.0.1");
+        assert_eq!(
+            relay_pools(&plain),
+            vec![IpNet::V4(cl_net::egress::overlay_pool())]
+        );
+        let mut live = plain;
+        live.networks.insert(
+            "mgd".into(),
+            serde_yaml::from_str("{ type: private, subnet: 192.168.32.0/24, managed: true }")
+                .unwrap(),
+        );
+        // A private network that is not managed is not a relay target.
+        live.networks.insert(
+            "lan".into(),
+            serde_yaml::from_str("{ type: private, subnet: 192.168.50.0/24 }").unwrap(),
+        );
+        let pools = relay_pools(&live);
+        assert_eq!(pools.len(), 2);
+        assert!(pools.contains(&"192.168.32.0/24".parse().unwrap()));
+        assert!(!pools.contains(&"192.168.50.0/24".parse().unwrap()));
     }
 
     #[test]

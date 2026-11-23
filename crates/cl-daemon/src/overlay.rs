@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::NetworkSpec;
 use cl_net::container_net::container_docker_name;
-use cl_net::ipam::{DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX};
+use cl_net::ipam::{is_managed_key, managed_key, DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
@@ -89,6 +89,182 @@ fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
         .filter(|n| n.kind != NetworkKind::Container)
         .filter_map(|n| n.subnet)
         .collect()
+}
+
+/// One managed network this node implements: what its bridge, tunnel and
+/// docker network are built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLocal {
+    pub name: String,
+    pub subnet: ipnet::Ipv4Net,
+    /// This node's own address on the network, a secondary address of its bridge.
+    pub node_addr: Ipv4Addr,
+    /// Every node address on the network, for docker's IPAM to leave alone.
+    pub reserved: Vec<Ipv4Addr>,
+    /// Internal addresses of the other nodes implementing the network: its tunnel peers.
+    pub peers: BTreeSet<Ipv4Addr>,
+}
+
+/// The managed networks `node` implements (it lists an address on them).
+pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
+    let Some(me) = cfg.node(node) else {
+        return Vec::new();
+    };
+    cfg.managed_networks()
+        .into_iter()
+        .filter_map(|(name, _, subnet)| {
+            let IpAddr::V4(node_addr) = me.ip_on(name)? else {
+                return None;
+            };
+            let gateway = cl_config::managed_gateway(subnet);
+            let mut reserved: Vec<Ipv4Addr> = cfg
+                .nodes
+                .values()
+                .filter_map(|n| match n.ip_on(name) {
+                    Some(IpAddr::V4(ip)) => Some(ip),
+                    _ => None,
+                })
+                .filter(|ip| *ip != gateway && subnet.contains(ip))
+                .collect();
+            reserved.sort();
+            let peers = cfg
+                .nodes
+                .iter()
+                .filter(|(other, n)| other.as_str() != node && n.ip_on(name).is_some())
+                .filter_map(|(_, n)| match cfg.internal_ip(n) {
+                    Some(IpAddr::V4(ip)) => Some(ip),
+                    _ => None,
+                })
+                .collect();
+            Some(ManagedLocal {
+                name: name.to_string(),
+                subnet,
+                node_addr,
+                reserved,
+                peers,
+            })
+        })
+        .collect()
+}
+
+/// What the leader must hold in the address book for one managed network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWant {
+    pub subnet: ipnet::Ipv4Net,
+    /// Addresses no instance may take: network, broadcast, gateway, node addresses.
+    pub excluded: BTreeSet<Ipv4Addr>,
+    /// Every instance whose service lists the network.
+    pub instances: BTreeSet<InstanceId>,
+}
+
+/// The managed networks of the live config with the instances that need an
+/// address on each, keyed by allocation key (`cl_net::managed_key`). Every
+/// managed network is present, instances or not.
+pub fn managed_wants(
+    state: &cl_raft::state::ClusterState,
+    cfg: &ClusterConfig,
+) -> BTreeMap<String, ManagedWant> {
+    let mut out: BTreeMap<String, ManagedWant> = cfg
+        .managed_networks()
+        .into_iter()
+        .map(|(name, _, subnet)| {
+            (
+                managed_key(name),
+                ManagedWant {
+                    subnet,
+                    excluded: cfg.managed_reserved(name),
+                    instances: BTreeSet::new(),
+                },
+            )
+        })
+        .collect();
+    if out.is_empty() {
+        return out;
+    }
+    for (name, stack) in &state.stacks {
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        for assignment in state.assignments.values() {
+            if assignment.instance.stack != *name {
+                continue;
+            }
+            for net in file.managed_attachments(cfg, &assignment.instance.service) {
+                if let Some(want) = out.get_mut(&managed_key(net)) {
+                    want.instances.insert(assignment.instance.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Bring the managed entries of the address book in line with `wants`: drop
+/// networks no longer managed, keep subnet and excluded addresses current,
+/// release instances that are gone and allocate for new ones. Returns whether
+/// the book changed.
+fn apply_managed(allocations: &mut Allocations, wants: &BTreeMap<String, ManagedWant>) -> bool {
+    let mut changed = false;
+    let mut gone: Vec<String> = allocations
+        .network_names()
+        .filter(|key| is_managed_key(key) && !wants.contains_key(*key))
+        .map(str::to_string)
+        .collect();
+    // A managed network that was renamed shows up as a new key over the very
+    // subnet of one that vanished (subnets of managed networks never overlap):
+    // it keeps the old one's addresses, so running containers keep theirs.
+    for (key, want) in wants {
+        if allocations.subnet(key).is_some() {
+            continue;
+        }
+        let Some(position) = gone
+            .iter()
+            .position(|old| allocations.subnet(old) == Some(want.subnet))
+        else {
+            continue;
+        };
+        let old = gone.remove(position);
+        if allocations.rename_managed_network(&old, key) {
+            changed = true;
+            info!(from = %old, to = %key, "moved a renamed managed network's addresses");
+        }
+    }
+    for key in gone {
+        allocations.release_network(&key);
+        changed = true;
+        info!(network = %key, "released a managed network that is no longer managed");
+    }
+    for (key, want) in wants {
+        let sync = allocations.sync_managed_network(key, want.subnet, &want.excluded);
+        changed |= sync.changed;
+        for instance in &sync.evicted {
+            warn!(network = %key, %instance, "an instance lost its managed network address");
+        }
+        let stale: Vec<InstanceId> = allocations
+            .instances(key)
+            .filter(|(id, _)| !want.instances.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for instance in stale {
+            allocations.release_ip(key, &instance);
+            changed = true;
+        }
+        for instance in &want.instances {
+            if allocations.instance_ip(key, instance).is_some() {
+                continue;
+            }
+            match allocations.allocate_ip(key, instance) {
+                Ok(ip) => {
+                    changed = true;
+                    info!(network = %key, %instance, %ip, "allocated a managed network address");
+                }
+                Err(e) => {
+                    warn!(network = %key, %instance, error = %e, "cannot allocate a managed network address")
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// The instances that sit on each container network's segment, keyed by the
@@ -211,6 +387,7 @@ impl Context_ {
         };
         let peers = peers_of(&cfg, &self.node);
         let cluster_subnets = cluster_subnets_of(&cfg);
+        let managed_local = managed_local(&cfg, &self.node);
 
         // Every stack network the cluster knows about, with the instances on
         // it, and separately the ones with a container on this node. The
@@ -260,17 +437,19 @@ impl Context_ {
 
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
+            let managed = managed_wants(&state, &cfg);
             self.allocate_missing(
                 &mut allocations,
                 &all,
                 &requested,
                 &cluster_subnets,
                 &node_names,
+                &managed,
             )
             .await?;
         }
 
-        if let Err(e) = self.sweep_orphans(netlink, &all).await {
+        if let Err(e) = self.sweep_orphans(netlink, &all, &managed_local).await {
             // A leftover network is a slow-burn problem (it only bites the
             // next stack unlucky enough to be handed its subnet), not a
             // reason to skip bringing up the networks that are wanted now.
@@ -296,6 +475,21 @@ impl Context_ {
             {
                 // One broken network must not stop the others being built.
                 warn!(network = %overlay, error = %e, "cannot bring up the overlay network");
+            }
+        }
+
+        // Managed networks live on the nodes that list an address on them,
+        // whether or not a container runs here yet.
+        for local in &managed_local {
+            let Some(internal_ip) = internal_ip else {
+                debug!(network = %local.name, "this node has no address on the internal network yet, skipping this pass");
+                continue;
+            };
+            if let Err(e) = self
+                .ensure_managed(netlink, &allocations, local, internal_ip)
+                .await
+            {
+                warn!(network = %local.name, error = %e, "cannot bring up the managed network");
             }
         }
 
@@ -332,14 +526,40 @@ impl Context_ {
         &self,
         netlink: Option<&Overlay>,
         wanted: &BTreeMap<String, BTreeSet<InstanceId>>,
+        managed: &[ManagedLocal],
     ) -> Result<()> {
         let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
+        let implemented: BTreeSet<String> = managed
+            .iter()
+            .map(|m| cl_net::managed_docker_name(&m.name))
+            .collect();
         for name in docker
             .list_managed_networks(&[crate::egress::OWNER])
             .await?
         {
+            if let Some(network) = name.strip_prefix(cl_net::ipam::MANAGED_DOCKER_PREFIX) {
+                // A managed network lives as long as this node implements it;
+                // one it no longer does (the node dropped its address, the
+                // network was deleted or renamed) goes, bridge and tunnel
+                // too, once nothing is attached to it.
+                if implemented.contains(&name) {
+                    continue;
+                }
+                if let Err(e) = docker.remove_network(&name).await {
+                    debug!(network = %name, error = %e, "managed network not removed yet");
+                    continue;
+                }
+                if let Some(netlink) = netlink {
+                    let key = managed_key(network);
+                    netlink
+                        .teardown(&bridge_name(&key), &vxlan_name(&key))
+                        .await?;
+                }
+                info!(network = %name, "removed a managed network this node no longer implements");
+                continue;
+            }
             if wanted.contains_key(&name) {
                 continue;
             }
@@ -371,6 +591,7 @@ impl Context_ {
         requested: &BTreeMap<String, ipnet::Ipv4Net>,
         cluster_subnets: &[IpNet],
         node_names: &BTreeMap<String, BTreeSet<String>>,
+        managed: &BTreeMap<String, ManagedWant>,
     ) -> Result<()> {
         let mut changed = false;
 
@@ -380,7 +601,7 @@ impl Context_ {
         // again.
         let stale_networks: Vec<String> = allocations
             .network_names()
-            .filter(|name| !networks.contains_key(*name))
+            .filter(|name| !networks.contains_key(*name) && !is_managed_key(name))
             .map(str::to_string)
             .collect();
         for network in stale_networks {
@@ -465,6 +686,10 @@ impl Context_ {
             }
         }
 
+        // Managed networks have their own subnet and are never swept with the
+        // stack overlays; their pass releases the instances that went away.
+        changed |= apply_managed(allocations, managed);
+
         if !changed {
             return Ok(());
         }
@@ -479,6 +704,92 @@ impl Context_ {
             .await?;
         if let Some(error) = response.error {
             warn!(%error, "could not publish the overlay allocations");
+        }
+        Ok(())
+    }
+
+    /// Bring one managed network up: bridge with the anycast gateway and this
+    /// node's own address, the tunnel to the other implementing nodes, then
+    /// the docker network (named `MNG_<network>`, which the orphan sweep keeps).
+    async fn ensure_managed(
+        &self,
+        netlink: Option<&Overlay>,
+        allocations: &Allocations,
+        local: &ManagedLocal,
+        internal_ip: Ipv4Addr,
+    ) -> Result<()> {
+        let key = managed_key(&local.name);
+        let (Some(subnet), Some(gateway)) = (allocations.subnet(&key), allocations.gateway(&key))
+        else {
+            debug!(network = %local.name, "no managed subnet allocated yet");
+            return Ok(());
+        };
+        let Some(netlink) = netlink else {
+            return Ok(());
+        };
+        if let Some(other) = cl_net::vxlan::vni_collides(&key, allocations.network_names()) {
+            anyhow::bail!(
+                "managed network {} derives the same VXLAN VNI as {other}, and two networks on \
+                 one VNI would share a layer 2 segment; not bringing it up, rename one",
+                local.name
+            );
+        }
+        let vni = allocate_vni(&key, &BTreeSet::new());
+        let underlay = netlink
+            .underlay_for(internal_ip)
+            .await?
+            .with_context(|| format!("no interface holds the internal address {internal_ip}"))?;
+        let mtu = overlay_mtu(underlay.mtu, false);
+        let bridge = bridge_name(&key);
+        let vxlan = vxlan_name(&key);
+
+        let bridge_index = netlink
+            .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
+            .await?;
+        netlink
+            .reconcile_bridge_addresses(
+                &bridge,
+                gateway,
+                &BTreeSet::from([local.node_addr]),
+                subnet.prefix_len(),
+            )
+            .await?;
+        let vxlan_index = netlink
+            .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
+            .await?;
+        netlink
+            .reconcile_fdb(&vxlan, vxlan_index, &local.peers)
+            .await?;
+        if let Err(e) = netlink.keep_gateway_frames_local(&bridge, &vxlan).await {
+            warn!(network = %local.name, error = %e, "cannot keep the gateway's own frames off the vxlan tunnel");
+        }
+        // Loose reverse path filtering: a forwarded connection's reply comes
+        // back from the hosting node on the underlay while the client's own
+        // route may point elsewhere.
+        for iface in [&bridge, &underlay.name] {
+            if let Err(e) =
+                std::fs::write(format!("/proc/sys/net/ipv4/conf/{iface}/rp_filter"), b"2")
+            {
+                debug!(%iface, error = %e, "cannot loosen rp_filter");
+            }
+        }
+
+        let Some(docker) = self.docker.get().await else {
+            return Ok(());
+        };
+        let created = docker
+            .ensure_managed_network(&NetworkSpec {
+                name: cl_net::managed_docker_name(&local.name),
+                bridge,
+                subnet: subnet.to_string(),
+                gateway,
+                mtu,
+                stack: "managed".to_string(),
+                excluded: local.reserved.clone(),
+            })
+            .await?;
+        if created {
+            info!(network = %local.name, %subnet, vni, mtu, peers = local.peers.len(), "managed network up");
         }
         Ok(())
     }
@@ -573,6 +884,7 @@ impl Context_ {
                 gateway,
                 mtu,
                 stack,
+                excluded: Vec::new(),
             })
             .await?;
         if created {
@@ -774,5 +1086,141 @@ mod tests {
             members.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
             vec!["tailscale-router.tailscale.0", "web.app.0"]
         );
+    }
+
+    fn managed_cfg() -> ClusterConfig {
+        let mut cfg = cfg();
+        cfg.networks.insert(
+            "mgd".into(),
+            serde_yaml::from_str("{ type: private, subnet: 192.168.32.0/24, managed: true }")
+                .unwrap(),
+        );
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip("192.168.32.2".parse().unwrap()),
+        );
+        cfg
+    }
+
+    fn managed_state(cfg: &ClusterConfig, replicas: u32) -> cl_raft::state::ClusterState {
+        let spec =
+            "networks:\n  mgd: {}\nservices:\n  web:\n    image: nginx\n    networks: [mgd]\n";
+        let mut state = cl_raft::state::ClusterState::default();
+        state.stacks.insert(
+            "blog".into(),
+            cl_raft::state::StackState {
+                name: "blog".into(),
+                spec: spec.into(),
+                revision: 1,
+                configs: Default::default(),
+                secrets: Default::default(),
+                used_configs: Default::default(),
+                used_secrets: Default::default(),
+                deployed_at: 0,
+                previous_spec: None,
+            },
+        );
+        for index in 0..replicas {
+            let instance = InstanceId::new("blog", "web", index);
+            state.assignments.insert(
+                instance.clone(),
+                cl_raft::state::Assignment {
+                    instance,
+                    node: "n1".into(),
+                    desired: cl_raft::state::DesiredState::Running,
+                    image_digest: None,
+                    migration: None,
+                },
+            );
+        }
+        let _ = cfg;
+        state
+    }
+
+    #[test]
+    fn managed_local_lists_only_networks_the_node_has_an_address_on() {
+        let mut cfg = managed_cfg();
+        let n2 = cfg.nodes.get_mut("n2").expect("n2");
+        n2.network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip("192.168.32.3".parse().unwrap()),
+        );
+        let local = managed_local(&cfg, "n1");
+        assert_eq!(local.len(), 1);
+        let m = &local[0];
+        assert_eq!(m.name, "mgd");
+        assert_eq!(m.subnet.to_string(), "192.168.32.0/24");
+        assert_eq!(m.node_addr, Ipv4Addr::new(192, 168, 32, 2));
+        assert_eq!(
+            m.reserved,
+            vec![
+                Ipv4Addr::new(192, 168, 32, 2),
+                Ipv4Addr::new(192, 168, 32, 3)
+            ]
+        );
+        // The tunnel peers are the other implementing node's internal address only.
+        let n2_internal = match cfg.internal_ip(cfg.node("n2").unwrap()) {
+            Some(IpAddr::V4(ip)) => ip,
+            other => panic!("n2 has no internal address: {other:?}"),
+        };
+        assert_eq!(m.peers, BTreeSet::from([n2_internal]));
+        // A node with no address on it, and an unknown node, implement nothing.
+        let mut bare = cfg.clone();
+        bare.nodes.get_mut("n1").unwrap().network.remove("mgd");
+        assert!(managed_local(&bare, "n1").is_empty());
+        assert!(managed_local(&cfg, "gone").is_empty());
+        // An unmanaged cluster implements nothing.
+        let plain = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).unwrap();
+        assert!(managed_local(&plain, "n1").is_empty());
+    }
+
+    #[test]
+    fn managed_wants_lists_every_managed_network_and_its_instances() {
+        let cfg = managed_cfg();
+        let wants = managed_wants(&managed_state(&cfg, 2), &cfg);
+        let want = &wants["@mgd"];
+        assert_eq!(want.subnet.to_string(), "192.168.32.0/24");
+        assert_eq!(want.instances.len(), 2);
+        assert!(want.excluded.contains(&Ipv4Addr::new(192, 168, 32, 1)));
+        assert!(want.excluded.contains(&Ipv4Addr::new(192, 168, 32, 2)));
+        // No instances still lists the network, so its subnet is kept.
+        assert!(managed_wants(&managed_state(&cfg, 0), &cfg)["@mgd"]
+            .instances
+            .is_empty());
+        // An unmanaged cluster wants nothing.
+        let plain = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).unwrap();
+        assert!(managed_wants(&managed_state(&cfg, 2), &plain).is_empty());
+    }
+
+    #[test]
+    fn managed_allocation_follows_instances_and_is_never_swept_as_a_stack_overlay() {
+        let cfg = managed_cfg();
+        let mut book = Allocations::new(DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX);
+        let wants = managed_wants(&managed_state(&cfg, 2), &cfg);
+        assert!(apply_managed(&mut book, &wants));
+        let a = book
+            .instance_ip("@mgd", &InstanceId::new("blog", "web", 0))
+            .unwrap();
+        let b = book
+            .instance_ip("@mgd", &InstanceId::new("blog", "web", 1))
+            .unwrap();
+        assert_eq!(a, Ipv4Addr::new(192, 168, 32, 3));
+        assert_eq!(b, Ipv4Addr::new(192, 168, 32, 4));
+        assert!(!apply_managed(&mut book, &wants), "idempotent");
+
+        // A scaled-in instance gives its address back.
+        let fewer = managed_wants(&managed_state(&cfg, 1), &cfg);
+        assert!(apply_managed(&mut book, &fewer));
+        assert!(book
+            .instance_ip("@mgd", &InstanceId::new("blog", "web", 1))
+            .is_none());
+        assert_eq!(
+            book.instance_ip("@mgd", &InstanceId::new("blog", "web", 0)),
+            Some(a)
+        );
+
+        // Unmanaging the network drops its entry.
+        assert!(apply_managed(&mut book, &BTreeMap::new()));
+        assert!(book.subnet("@mgd").is_none());
     }
 }

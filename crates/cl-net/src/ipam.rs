@@ -21,6 +21,44 @@ pub const DEFAULT_OVERLAY_NET: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(10, 2
 
 pub const DEFAULT_SUBNET_PREFIX: u8 = 24;
 
+/// Prefix of the allocation key of a managed cluster network: `@<network>`.
+/// Stack overlays are `<stack>_<network>` and container segments `CTN_...`, so
+/// the three key spaces never collide, and a managed network's subnet is its
+/// own rather than a slice of the pool.
+pub const MANAGED_KEY_PREFIX: char = '@';
+
+/// The allocation key of managed cluster network `network`.
+pub fn managed_key(network: &str) -> String {
+    format!("{MANAGED_KEY_PREFIX}{network}")
+}
+
+/// The docker network name of managed cluster network `network` (docker names
+/// cannot start with `@`). Never starts like a stack overlay (`<stack>_..`
+/// is lowercase), so it cannot collide with one, and is exempt from the
+/// orphan sweep.
+pub fn managed_docker_name(network: &str) -> String {
+    format!("{MANAGED_DOCKER_PREFIX}{network}")
+}
+
+/// Prefix of [`managed_docker_name`].
+pub const MANAGED_DOCKER_PREFIX: &str = "MNG_";
+
+/// Whether an allocation key names a managed cluster network.
+pub fn is_managed_key(key: &str) -> bool {
+    key.starts_with(MANAGED_KEY_PREFIX)
+}
+
+/// What [`Allocations::sync_managed_network`] changed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ManagedSync {
+    /// Whether the book changed at all (so it needs publishing).
+    pub changed: bool,
+    /// Instances that lost their address because it is no longer usable (the
+    /// subnet changed or a node took the address); they get a new one on the
+    /// next `allocate_ip`.
+    pub evicted: Vec<InstanceId>,
+}
+
 /// Address book for the container overlay: one subnet per stack network, one
 /// IP per instance within it. Replicated through raft so two nodes can never
 /// hand out the same address.
@@ -47,6 +85,10 @@ struct NetworkAllocation {
     /// before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     nodes: BTreeMap<String, Ipv4Addr>,
+    /// Addresses that are never handed out (a managed network's node
+    /// addresses). Absent in books written before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    excluded: BTreeSet<Ipv4Addr>,
 }
 
 impl Allocations {
@@ -166,6 +208,7 @@ impl Allocations {
                     reserved: BTreeSet::new(),
                     cooldown: VecDeque::new(),
                     nodes: BTreeMap::new(),
+                    excluded: BTreeSet::new(),
                 },
             );
             return Ok(want);
@@ -198,6 +241,7 @@ impl Allocations {
                     reserved: BTreeSet::new(),
                     cooldown: VecDeque::new(),
                     nodes: BTreeMap::new(),
+                    excluded: BTreeSet::new(),
                 },
             );
             return Ok(candidate);
@@ -206,6 +250,71 @@ impl Allocations {
         Err(NetError::SubnetExhausted {
             pool: self.pool.to_string(),
         })
+    }
+
+    /// Make the book hold managed network `key` (see [`managed_key`]) over its
+    /// own `subnet`, never handing out any of `excluded` (node addresses; the
+    /// network, broadcast and gateway addresses are always excluded). Creates the
+    /// entry, or when the subnet changed replaces it, or when `excluded`
+    /// changed updates it and evicts any instance sitting on a now excluded
+    /// address. Idempotent.
+    pub fn sync_managed_network(
+        &mut self,
+        key: &str,
+        subnet: Ipv4Net,
+        excluded: &BTreeSet<Ipv4Addr>,
+    ) -> ManagedSync {
+        let mut out = ManagedSync::default();
+        let fresh = |excluded: &BTreeSet<Ipv4Addr>| NetworkAllocation {
+            subnet,
+            instances: BTreeMap::new(),
+            reserved: BTreeSet::new(),
+            cooldown: VecDeque::new(),
+            nodes: BTreeMap::new(),
+            excluded: excluded.clone(),
+        };
+        match self.networks.get_mut(key) {
+            None => {
+                self.networks.insert(key.to_string(), fresh(excluded));
+                out.changed = true;
+            }
+            Some(net) if net.subnet != subnet => {
+                out.evicted = net.instances.keys().cloned().collect();
+                *net = fresh(excluded);
+                out.changed = true;
+            }
+            Some(net) if net.excluded != *excluded => {
+                net.excluded = excluded.clone();
+                let hit: Vec<InstanceId> = net
+                    .instances
+                    .iter()
+                    .filter(|(_, ip)| excluded.contains(ip))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in hit {
+                    if let Some(ip) = net.instances.remove(&id) {
+                        net.reserved.remove(&ip);
+                    }
+                    out.evicted.push(id);
+                }
+                net.cooldown.retain(|ip| !excluded.contains(ip));
+                out.changed = true;
+            }
+            Some(_) => {}
+        }
+        out
+    }
+
+    /// Move a managed network's allocation to a new key (the network was
+    /// renamed), keeping its subnet and every instance address. False, and
+    /// nothing changed, when `from` is unknown or `to` already exists.
+    pub fn rename_managed_network(&mut self, from: &str, to: &str) -> bool {
+        if from == to || self.networks.contains_key(to) || !self.networks.contains_key(from) {
+            return false;
+        }
+        let allocation = self.networks.remove(from).expect("checked above");
+        self.networks.insert(to.to_string(), allocation);
+        true
     }
 
     /// Drop a network's allocation, freeing its subnet and every instance address.
@@ -288,7 +397,10 @@ impl NetworkAllocation {
         // order, skipping the gateway, anything reserved right now, and
         // anything sitting in the cooldown queue.
         let fresh = subnet.hosts().find(|ip| {
-            *ip != gateway && !self.reserved.contains(ip) && !self.cooldown.contains(ip)
+            *ip != gateway
+                && !self.excluded.contains(ip)
+                && !self.reserved.contains(ip)
+                && !self.cooldown.contains(ip)
         });
         let chosen = if let Some(ip) = fresh {
             ip
@@ -667,5 +779,116 @@ mod tests {
         let encoded = serde_json::to_string(&a).unwrap();
         assert!(encoded.contains("nodes"));
         assert_eq!(Allocations::decode(Some(&encoded)), Some(a));
+    }
+
+    fn managed_excluded(ips: &[&str]) -> BTreeSet<Ipv4Addr> {
+        ips.iter().map(|ip| ip.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn managed_keys_stay_out_of_the_other_key_spaces() {
+        assert_eq!(managed_key("lan"), "@lan");
+        assert!(is_managed_key("@lan"));
+        assert!(!is_managed_key("stack_lan"));
+        assert!(!is_managed_key("CTN_x"));
+    }
+
+    #[test]
+    fn managed_addresses_come_from_the_networks_own_subnet() {
+        let mut a = Allocations::default();
+        let subnet: Ipv4Net = "192.168.32.0/29".parse().unwrap();
+        let key = managed_key("mgd");
+        let excluded = managed_excluded(&["192.168.32.2", "192.168.32.3"]);
+        let sync = a.sync_managed_network(&key, subnet, &excluded);
+        assert!(sync.changed && sync.evicted.is_empty());
+        assert_eq!(a.subnet(&key), Some(subnet));
+        assert_eq!(a.gateway(&key), Some("192.168.32.1".parse().unwrap()));
+        // Hosts are .1-.6: gateway .1 and nodes .2 .3 are excluded, leaving .4 .5 .6.
+        let got: Vec<Ipv4Addr> = (0..3)
+            .map(|i| a.allocate_ip(&key, &instance(i)).unwrap())
+            .collect();
+        let want: Vec<Ipv4Addr> = ["192.168.32.4", "192.168.32.5", "192.168.32.6"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(got, want);
+        let err = a.allocate_ip(&key, &instance(3)).unwrap_err();
+        assert!(matches!(err, NetError::AddressExhausted { .. }));
+        // Idempotent.
+        assert_eq!(a.allocate_ip(&key, &instance(1)).unwrap(), want[1]);
+        assert_eq!(
+            a.sync_managed_network(&key, subnet, &excluded),
+            ManagedSync::default()
+        );
+    }
+
+    #[test]
+    fn a_node_taking_an_instance_address_evicts_that_instance() {
+        let mut a = Allocations::default();
+        let subnet: Ipv4Net = "192.168.32.0/24".parse().unwrap();
+        let key = managed_key("mgd");
+        a.sync_managed_network(&key, subnet, &managed_excluded(&["192.168.32.2"]));
+        let ip = a.allocate_ip(&key, &instance(0)).unwrap();
+        assert_eq!(ip, "192.168.32.3".parse::<Ipv4Addr>().unwrap());
+        let sync = a.sync_managed_network(
+            &key,
+            subnet,
+            &managed_excluded(&["192.168.32.2", "192.168.32.3"]),
+        );
+        assert_eq!(sync.evicted, vec![instance(0)]);
+        assert_eq!(a.instance_ip(&key, &instance(0)), None);
+        assert_eq!(
+            a.allocate_ip(&key, &instance(0)).unwrap(),
+            "192.168.32.4".parse::<Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn changing_a_managed_subnet_replaces_the_allocation() {
+        let mut a = Allocations::default();
+        let key = managed_key("mgd");
+        let none = BTreeSet::new();
+        a.sync_managed_network(&key, "192.168.32.0/24".parse().unwrap(), &none);
+        a.allocate_ip(&key, &instance(0)).unwrap();
+        let sync = a.sync_managed_network(&key, "192.168.40.0/24".parse().unwrap(), &none);
+        assert!(sync.changed);
+        assert_eq!(sync.evicted, vec![instance(0)]);
+        assert_eq!(
+            a.allocate_ip(&key, &instance(0)).unwrap(),
+            "192.168.40.2".parse::<Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_released_managed_address_is_not_reused_while_fresh_ones_remain() {
+        let mut a = Allocations::default();
+        let key = managed_key("mgd");
+        a.sync_managed_network(&key, "192.168.32.0/24".parse().unwrap(), &BTreeSet::new());
+        let first = a.allocate_ip(&key, &instance(0)).unwrap();
+        a.release_ip(&key, &instance(0));
+        assert_ne!(a.allocate_ip(&key, &instance(1)).unwrap(), first);
+    }
+
+    #[test]
+    fn a_book_without_excluded_addresses_decodes_and_encodes_unchanged() {
+        let old = r#"{"pool":"10.244.0.0/16","subnet_prefix":24,"networks":{"gitlab":{"subnet":"10.244.0.0/24","instances":{},"reserved":[],"cooldown":[]}}}"#;
+        let a = Allocations::decode(Some(old)).expect("old book decodes");
+        assert!(!serde_json::to_string(&a).unwrap().contains("excluded"));
+    }
+
+    #[test]
+    fn renaming_a_managed_network_keeps_its_subnet_and_addresses() {
+        let mut a = Allocations::default();
+        let (old, new) = (managed_key("old"), managed_key("new"));
+        a.sync_managed_network(&old, "192.168.32.0/24".parse().unwrap(), &BTreeSet::new());
+        let ip = a.allocate_ip(&old, &instance(0)).unwrap();
+        assert!(a.rename_managed_network(&old, &new));
+        assert!(a.subnet(&old).is_none());
+        assert_eq!(a.instance_ip(&new, &instance(0)), Some(ip));
+        assert_eq!(a.subnet(&new).unwrap().to_string(), "192.168.32.0/24");
+        // Unknown source and taken target change nothing.
+        assert!(!a.rename_managed_network(&old, &new));
+        a.sync_managed_network(&old, "192.168.40.0/24".parse().unwrap(), &BTreeSet::new());
+        assert!(!a.rename_managed_network(&old, &new));
     }
 }

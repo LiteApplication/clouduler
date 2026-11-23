@@ -205,12 +205,12 @@ pub fn forward_plan_with_wan(restrictions: &[Restriction], wan: &[WanRestriction
     }
     IptablesPlan {
         chains: vec![chain],
-        jumps: vec![Jump::new(
-            "filter",
-            &["DOCKER-USER", "FORWARD"],
-            FORWARD_CHAIN,
-            true,
-        )],
+        jumps: vec![
+            Jump::new("filter", &["DOCKER-USER", "FORWARD"], FORWARD_CHAIN, true)
+                // A managed network's accepts (CLDR-MNG) would end evaluation for
+                // traffic into its subnet before the stack's list is consulted.
+                .before(crate::managed::FORWARD_CHAIN),
+        ],
     }
 }
 
@@ -732,6 +732,62 @@ mod tests {
         assert_eq!(plan.jumps[0].table, "filter");
     }
 
+    #[test]
+    fn the_filter_is_evaluated_before_the_managed_network_accepts() {
+        use crate::iptables::jump_commands;
+        let plan = forward_plan(&[blog()]);
+        let jump = &plan.jumps[0];
+        assert_eq!(jump.before.as_deref(), Some(crate::managed::FORWARD_CHAIN));
+        // CLDR-MNG on top of CLDR-ALLOW: the latter is moved ahead of it.
+        let listing = |parent: &str| {
+            (parent == "DOCKER-USER")
+                .then(|| "-A DOCKER-USER -j CLDR-MNG\n-A DOCKER-USER -j CLDR-ALLOW\n".to_string())
+        };
+        assert_eq!(
+            jump_commands(jump, &listing),
+            vec![
+                vec!["-D", "DOCKER-USER", "-j", "CLDR-ALLOW"],
+                vec!["-I", "DOCKER-USER", "1", "-j", "CLDR-ALLOW"]
+            ]
+        );
+        let ok = |parent: &str| {
+            (parent == "DOCKER-USER")
+                .then(|| "-A DOCKER-USER -j CLDR-ALLOW\n-A DOCKER-USER -j CLDR-MNG\n".to_string())
+        };
+        assert!(jump_commands(jump, &ok).is_empty());
+    }
+
+    #[test]
+    fn a_restricted_stack_is_dropped_before_the_managed_accepts_unless_listed() {
+        // A managed subnet is just another destination for the list: only a
+        // grant lets a packet through to CLDR-MNG, which then judges the source.
+        let mut r = blog();
+        r.grants.push(grant(Protocol::Tcp, "192.168.32.5", 80, 80));
+        let rules = chain_rules(&forward_plan(&[r]), FORWARD_CHAIN);
+        assert_eq!(
+            eval(
+                &rules,
+                &pkt("10.244.1.4", "192.168.32.5", Protocol::Tcp, 80)
+            ),
+            Verdict::Return
+        );
+        for (dst, port) in [("192.168.32.5", 22), ("192.168.32.6", 80)] {
+            assert_eq!(
+                eval(&rules, &pkt("10.244.1.4", dst, Protocol::Tcp, port)),
+                Verdict::Drop,
+                "{dst}:{port}"
+            );
+        }
+        // An unrestricted stack never reaches this chain's drop.
+        assert_eq!(
+            eval(
+                &rules,
+                &pkt("10.244.2.4", "192.168.32.6", Protocol::Tcp, 80)
+            ),
+            Verdict::Fallthrough
+        );
+    }
+
     // ---- proxy redirect ----
 
     fn redirect() -> Vec<String> {
@@ -813,6 +869,7 @@ mod tests {
                 proxy_ports: vec![80, 443],
                 published: vec![(Protocol::Tcp, 2222), (Protocol::Udp, 51413)],
                 restricted: restrictions,
+                ..HostServices::default()
             },
         );
         chain_rules(&plan, crate::egress::CONTAINER_INPUT_CHAIN)
@@ -920,6 +977,7 @@ mod tests {
                 proxy_ports: vec![80, 443],
                 published: vec![(Protocol::Tcp, 2222)],
                 restricted: vec![r.clone()],
+                ..HostServices::default()
             },
         );
         let plans = [

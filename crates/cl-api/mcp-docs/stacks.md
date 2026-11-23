@@ -96,6 +96,14 @@ networks:
   sit on any of the stack's networks and limit the routes published on that
   network. See "Per-stack restrictions" in `docs/networking.md` for exactly what
   the firewall does and does not grant.
+* A managed private network (`managed: true` in the cluster config) is never the
+  stack's overlay: a service that lists it is attached to it in addition. If the
+  stack has no other internal, private or public network, that managed network is
+  the container's primary network. A stack's `allowed` list applies to what its
+  overlay sends into a managed subnet like any other destination (the firewall
+  evaluates it before the managed network's own accept rules, so only the
+  listed `host:port` entries get through); it does not filter traffic a
+  container sends directly out of its own managed interface.
 * `egress`, `wireguard` and `nat` networks take a list too, which works
   differently: see "Restricting the outside" below.
 * A `container` network takes no list: the router container decides what is

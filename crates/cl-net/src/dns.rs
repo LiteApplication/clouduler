@@ -134,6 +134,9 @@ fn build_authority(origin: &Name, records: &[ZoneRecord]) -> Result<InMemoryZone
 struct SwappableZone {
     origin: LowerName,
     current: RwLock<Arc<InMemoryZoneHandler>>,
+    /// Per asking container, for the few that need different answers than
+    /// everyone else (see `InternalDns::reload_views`).
+    views: RwLock<Arc<BTreeMap<IpAddr, Arc<InMemoryZoneHandler>>>>,
 }
 
 impl SwappableZone {
@@ -141,11 +144,24 @@ impl SwappableZone {
         Self {
             origin: handler.origin().clone(),
             current: RwLock::new(Arc::new(handler)),
+            views: RwLock::new(Arc::default()),
         }
     }
 
     async fn swap(&self, handler: InMemoryZoneHandler) {
         *self.current.write().await = Arc::new(handler);
+    }
+
+    async fn swap_views(&self, views: BTreeMap<IpAddr, Arc<InMemoryZoneHandler>>) {
+        *self.views.write().await = Arc::new(views);
+    }
+
+    /// The zone `client` is answered from: its own view, else the shared one.
+    async fn zone_for(&self, client: IpAddr) -> Arc<InMemoryZoneHandler> {
+        if let Some(view) = self.views.read().await.get(&client) {
+            return view.clone();
+        }
+        self.current.read().await.clone()
     }
 }
 
@@ -170,7 +186,10 @@ impl ZoneHandler for SwappableZone {
         request_info: Option<&RequestInfo<'_>>,
         lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        let zone = self.current.read().await.clone();
+        let zone = match request_info {
+            Some(info) => self.zone_for(info.src.ip()).await,
+            None => self.current.read().await.clone(),
+        };
         zone.lookup(name, rtype, request_info, lookup_options).await
     }
 
@@ -179,7 +198,7 @@ impl ZoneHandler for SwappableZone {
         request: &Request,
         lookup_options: LookupOptions,
     ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
-        let zone = self.current.read().await.clone();
+        let zone = self.zone_for(request.src().ip()).await;
         zone.search(request, lookup_options).await
     }
 
@@ -488,6 +507,20 @@ impl InternalDns {
     pub async fn reload(&self, records: &[ZoneRecord]) -> Result<()> {
         let handler = build_authority(&self.origin, records)?;
         self.zone.swap(handler).await;
+        Ok(())
+    }
+
+    /// Give some containers their own answers: `views` maps an asking
+    /// container's address to the full record set it is answered from, in
+    /// place of the shared zone. A container on a managed network that
+    /// shares a service's managed network, and not its stack overlay, needs
+    /// the service's address on that network.
+    pub async fn reload_views(&self, views: &BTreeMap<IpAddr, Vec<ZoneRecord>>) -> Result<()> {
+        let mut built = BTreeMap::new();
+        for (client, records) in views {
+            built.insert(*client, Arc::new(build_authority(&self.origin, records)?));
+        }
+        self.zone.swap_views(built).await;
         Ok(())
     }
 

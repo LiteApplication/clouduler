@@ -227,6 +227,7 @@ export function NodeDetail() {
                 node={configNode}
                 networks={draft.networks}
                 drives={draft.drives}
+                cluster={draft}
                 onChange={(patch) => setDraft({ ...draft, nodes: { ...draft.nodes, [name]: { ...configNode, ...patch } } })}
                 onRemove={async () => {
                   if (!(await confirm({ title: `Remove ${name} from the cluster config?`, body: 'This does not remove the node itself.', confirmLabel: 'Remove from config', confirmVariant: 'danger' }))) return;

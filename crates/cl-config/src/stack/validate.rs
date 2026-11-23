@@ -581,7 +581,8 @@ impl StackFile {
         for (name, svc) in &self.services {
             for net in &svc.networks {
                 // Nat and container networks are implemented by every node; no per-node
-                // address to check.
+                // address to check. A managed network is checked like any other: a
+                // node must list an address on it.
                 if matches!(
                     cluster.networks.get(net).map(|n| n.kind),
                     Some(NetworkKind::Nat | NetworkKind::Container)
@@ -849,22 +850,64 @@ impl StackFile {
         Ok(())
     }
 
-    /// The one declared network this stack's containers get an overlay on, if
-    /// any: internal or private wins (its domain is what containers resolve on),
-    /// else public. All egress, wireguard or nat needs no overlay.
+    /// The one declared network this stack's containers get a per-stack overlay
+    /// on, if any: internal or non managed private wins (its domain is what
+    /// containers resolve on), else public. Managed networks never get a
+    /// per-stack overlay (see [`StackFile::managed_attachments`]); egress,
+    /// wireguard or nat need none either.
     pub fn overlay_network<'a>(&'a self, cluster: &ClusterConfig) -> Option<&'a str> {
         use crate::cluster::NetworkKind;
 
         let kind_of = |n: &str| cluster.networks.get(n).map(|net| net.kind);
         self.networks
             .keys()
-            .find(|n| kind_of(n).is_some_and(NetworkKind::is_subnetted))
+            .find(|n| {
+                kind_of(n).is_some_and(NetworkKind::is_subnetted) && !cluster.is_managed_network(n)
+            })
             .or_else(|| {
                 self.networks
                     .keys()
                     .find(|n| kind_of(n) == Some(NetworkKind::Public))
             })
             .map(String::as_str)
+    }
+
+    /// The stack's managed networks (declared top-level), alphabetical.
+    pub fn managed_networks<'a>(&'a self, cluster: &ClusterConfig) -> Vec<&'a str> {
+        self.networks
+            .keys()
+            .filter(|n| cluster.is_managed_network(n))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The managed networks `service` lists, alphabetical. Each one is an extra
+    /// attachment of the container beside its stack overlay.
+    pub fn managed_attachments<'a>(
+        &'a self,
+        cluster: &ClusterConfig,
+        service: &str,
+    ) -> Vec<&'a str> {
+        let Some(svc) = self.services.get(service) else {
+            return Vec::new();
+        };
+        let mut out: Vec<&str> = svc
+            .networks
+            .iter()
+            .map(String::as_str)
+            .filter(|n| cluster.is_managed_network(n))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The network that is the container's primary one (its resolver is that
+    /// network's gateway): the stack overlay, or when the stack has none its
+    /// alphabetically first managed network.
+    pub fn primary_network<'a>(&'a self, cluster: &ClusterConfig) -> Option<&'a str> {
+        self.overlay_network(cluster)
+            .or_else(|| self.managed_networks(cluster).into_iter().next())
     }
 
     /// A pinned `x-clouduler.subnet` needs an overlay network, must be a real
@@ -2007,6 +2050,68 @@ services:
         assert_eq!(f.overlay_network(&cluster()), Some("wan"));
         let f = stack("services:\n  web:\n    image: x\nnetworks:\n  vpn: {}\n");
         assert_eq!(f.overlay_network(&cluster()), None);
+    }
+
+    fn managed_cluster() -> ClusterConfig {
+        let mut cluster = cluster();
+        for name in ["mgd2", "mgd1"] {
+            cluster.networks.insert(
+                name.into(),
+                serde_yaml::from_str("{ type: private, subnet: 192.168.32.0/24, managed: true }")
+                    .unwrap(),
+            );
+        }
+        cluster.networks.get_mut("mgd2").unwrap().subnet = Some("192.168.33.0/24".parse().unwrap());
+        let node = cluster.nodes.values_mut().next().unwrap();
+        node.network.insert(
+            "mgd1".into(),
+            crate::cluster::NodeAddress::Ip("192.168.32.2".parse().unwrap()),
+        );
+        node.network.insert(
+            "mgd2".into(),
+            crate::cluster::NodeAddress::Ip("192.168.33.2".parse().unwrap()),
+        );
+        cluster
+    }
+
+    #[test]
+    fn managed_networks_are_never_the_stack_overlay() {
+        let cluster = managed_cluster();
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [mgd2, lan, mgd1]\nnetworks:\n  mgd1: {}\n  mgd2: {}\n  lan: {}\n",
+        );
+        f.validate(&cluster).unwrap();
+        assert_eq!(f.overlay_network(&cluster), Some("lan"));
+        assert_eq!(f.primary_network(&cluster), Some("lan"));
+        assert_eq!(f.managed_attachments(&cluster, "web"), vec!["mgd1", "mgd2"]);
+        assert_eq!(f.managed_networks(&cluster), vec!["mgd1", "mgd2"]);
+        assert!(f.managed_attachments(&cluster, "nope").is_empty());
+    }
+
+    #[test]
+    fn a_managed_only_stack_uses_its_first_managed_network_as_primary() {
+        let cluster = managed_cluster();
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [mgd2, mgd1]\nnetworks:\n  mgd1: {}\n  mgd2: {}\n",
+        );
+        f.validate(&cluster).unwrap();
+        assert_eq!(f.overlay_network(&cluster), None);
+        assert_eq!(f.primary_network(&cluster), Some("mgd1"));
+        // Public wins over nothing but a managed network still is not an overlay.
+        let f = stack("services:\n  web:\n    image: x\nnetworks:\n  mgd1: {}\n  wan: {}\n");
+        assert_eq!(f.overlay_network(&cluster), Some("wan"));
+    }
+
+    #[test]
+    fn a_managed_network_nobody_implements_is_refused() {
+        let mut cluster = managed_cluster();
+        for node in cluster.nodes.values_mut() {
+            node.network.remove("mgd1");
+        }
+        let f =
+            stack("services:\n  web:\n    image: x\n    networks: [mgd1]\nnetworks:\n  mgd1: {}\n");
+        let err = f.validate(&cluster).unwrap_err().to_string();
+        assert!(err.contains("no node implements network mgd1"), "{err}");
     }
 
     fn container_cluster(subnet: &str) -> ClusterConfig {

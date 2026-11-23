@@ -714,6 +714,20 @@ step_remove_networks() {
   log "removed networks $names from the cluster config"
 }
 
+# rename_network: { from: media, to: films } - the cross-store rename endpoint.
+step_rename_network() {
+  local from to mgr status
+  from="$(echo "$1" | jq -r '.from')"
+  to="$(echo "$1" | jq -r '.to')"
+  mgr="$(any_manager)"
+  status="$(curl -sk -o "$RUN_DIR/rename_network.out" -w '%{http_code}' -m 20 -X POST \
+    -H "Authorization: Bearer $(api_key)" -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg n "$to" '{new_name: $n}')" \
+    "https://$(cat "$RUN_DIR/$mgr.host_ip"):$(cat "$RUN_DIR/$mgr.web_port")/api/config/networks/$from/rename")"
+  [[ "$status" == "200" ]] || die "renaming network $from failed (http $status): $(cat "$RUN_DIR/rename_network.out")"
+  log "renamed network $from to $to"
+}
+
 # set_network_access: { lan: [dmz], dmz: [] } / { lan: null } - sets (or, with
 # null, removes) the `access` list of those networks in the live cluster config.
 step_set_network_access() {

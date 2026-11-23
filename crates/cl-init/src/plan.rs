@@ -100,6 +100,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         subnet: Some(plan.subnet),
         publish_dns: true,
         access: None,
+        managed: false,
         container: None,
         domain: plan.internal_domain.clone(),
     };

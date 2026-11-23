@@ -868,8 +868,21 @@ impl Scheduler {
                 };
             config_edits.extend(objects.config_edits.clone());
 
-            let network =
+            let managed_attached = file.managed_attachments(&live, &instance.service);
+            let overlay =
                 overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
+            // With no per-stack overlay the service's first managed network is its primary one.
+            let primary_managed = match (&overlay, managed_attached.first()) {
+                (None, Some(first)) => Some(*first),
+                _ => None,
+            };
+            let network = overlay
+                .clone()
+                .or_else(|| primary_managed.map(cl_net::managed_docker_name));
+            // The address book key of the primary network (a managed one is keyed `@NET`).
+            let primary_key = overlay
+                .clone()
+                .or_else(|| primary_managed.map(cl_net::managed_key));
 
             // Containers on a stack network use the leader-allocated address (other nodes build DNS and
             // proxy backends from it). Nothing to run until allocated.
@@ -877,16 +890,16 @@ impl Scheduler {
                 network: network.clone(),
                 ..Default::default()
             };
-            if let Some(network) = &network {
+            if let (Some(network), Some(key)) = (&network, &primary_key) {
                 let Some(ip) = allocations
                     .as_ref()
-                    .and_then(|a| a.instance_ip(network, instance))
+                    .and_then(|a| a.instance_ip(key, instance))
                 else {
                     debug!(instance = %instance, network = %network, "no overlay address yet");
                     continue;
                 };
                 placement.ip = Some(ip);
-                placement.resolver = allocations.as_ref().and_then(|a| a.gateway(network));
+                placement.resolver = allocations.as_ref().and_then(|a| a.gateway(key));
                 placement.zone = self.zone.clone();
                 placement.published_hosts =
                     exposed_allowed_hosts(state, &file).into_iter().collect();
@@ -921,6 +934,34 @@ impl Scheduler {
                 }
             }
 
+            // Managed networks beyond the primary one: the instance's allocated address on each.
+            let mut managed_pending = false;
+            for net in managed_attached
+                .iter()
+                .filter(|n| Some(**n) != primary_managed)
+            {
+                let key = cl_net::managed_key(net);
+                let (Some(ip), Some(gateway)) = (
+                    allocations
+                        .as_ref()
+                        .and_then(|a| a.instance_ip(&key, instance)),
+                    allocations.as_ref().and_then(|a| a.gateway(&key)),
+                ) else {
+                    debug!(instance = %instance, network = %net, "no managed network address yet");
+                    managed_pending = true;
+                    break;
+                };
+                placement.managed_networks.push(spec::ManagedAttachment {
+                    network: (*net).to_string(),
+                    docker_network: cl_net::managed_docker_name(net),
+                    ip,
+                    gateway,
+                });
+            }
+            if managed_pending {
+                continue;
+            }
+
             // Internal-network node addresses where the proxy answers; only member services get them
             // kept off the egress default route.
             let on_internal = live
@@ -950,14 +991,33 @@ impl Scheduler {
                 assignment.desired = DesiredState::Stopped;
             }
 
-            let container_ips: Vec<std::net::Ipv4Addr> =
-                placement.container_networks.iter().map(|a| a.ip).collect();
-            let revision = revision_with_mounts(
-                stack.revision,
-                service,
-                &dynamic_mounts,
-                placement.ip,
-                &container_ips,
+            let container_ips: Vec<std::net::Ipv4Addr> = placement
+                .container_networks
+                .iter()
+                .map(|a| a.ip)
+                .chain(placement.managed_networks.iter().map(|m| m.ip))
+                .collect();
+            // Which docker networks the managed attachments sit on, so renaming a managed
+            // network (same addresses, new docker network) recreates the container.
+            let managed_names: Vec<String> = primary_managed
+                .map(cl_net::managed_docker_name)
+                .into_iter()
+                .chain(
+                    placement
+                        .managed_networks
+                        .iter()
+                        .map(|m| m.docker_network.clone()),
+                )
+                .collect();
+            let revision = with_managed_networks(
+                revision_with_mounts(
+                    stack.revision,
+                    service,
+                    &dynamic_mounts,
+                    placement.ip,
+                    &container_ips,
+                ),
+                &managed_names,
             );
 
             let mut spec = match spec::build(
@@ -1047,6 +1107,19 @@ impl Scheduler {
 
         (roots, dynamic)
     }
+}
+
+/// Folds the docker networks of a service's managed attachments into its revision. Unchanged
+/// when there are none, so a cluster without managed networks keeps its revisions.
+fn with_managed_networks(revision: u64, names: &[String]) -> u64 {
+    if names.is_empty() {
+        return revision;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = cl_config::stable_hasher();
+    revision.hash(&mut hasher);
+    names.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Folds the FUSE-mounted state of a service's drives and the instance's overlay address into
@@ -2388,6 +2461,29 @@ web: { address: cloud, network: tailscale }
             base + CRASH_LOOP_WINDOW + Duration::from_secs(2)
         ));
         assert_eq!(deque.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod managed_revision_tests {
+    use super::with_managed_networks;
+
+    #[test]
+    fn no_managed_network_keeps_the_revision() {
+        assert_eq!(with_managed_networks(7, &[]), 7);
+    }
+
+    #[test]
+    fn the_docker_network_names_change_the_revision() {
+        let media = vec!["MNG_media".to_string()];
+        let renamed = vec!["MNG_films".to_string()];
+        let both = vec!["MNG_media".to_string(), "MNG_tv".to_string()];
+        let a = with_managed_networks(7, &media);
+        assert_ne!(a, 7);
+        assert_eq!(a, with_managed_networks(7, &media), "stable");
+        assert_ne!(a, with_managed_networks(7, &renamed), "a rename recreates");
+        assert_ne!(a, with_managed_networks(7, &both));
+        assert_ne!(a, with_managed_networks(8, &media));
     }
 }
 

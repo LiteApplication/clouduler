@@ -162,14 +162,14 @@ fn internal_peer_subnets(cfg: &ClusterConfig, state: &ClusterState) -> Vec<IpNet
         // A container network's segment is left out: its router forwards
         // outside traffic and masquerades it to an address inside the segment,
         // so trusting the segment would let that traffic skip authentication.
-        // Its client containers are covered by their own stack overlay.
+        // Its client containers are covered by their own stack overlay. A
+        // managed network is left out too: outside clients are routed in and
+        // arrive from its gateway address, so it cannot vouch for its source.
         subnets.extend(
             allocations
-                .subnets_of_overlays(
-                    allocations
-                        .network_names()
-                        .filter(|name| !name.starts_with("CTN_")),
-                )
+                .subnets_of_overlays(allocations.network_names().filter(|name| {
+                    !name.starts_with("CTN_") && !cl_net::ipam::is_managed_key(name)
+                }))
                 .map(IpNet::V4),
         );
     }
@@ -2123,6 +2123,7 @@ services:
                 domain: None,
                 publish_dns: true,
                 access: None,
+                managed: false,
                 container: None,
             },
         );

@@ -31,6 +31,9 @@ pub struct NetworkSpec {
     /// packets between nodes.
     pub mtu: u16,
     pub stack: String,
+    /// Addresses docker's own IPAM must never hand out (a managed network's
+    /// node addresses), reserved as auxiliary addresses.
+    pub excluded: Vec<Ipv4Addr>,
 }
 
 impl Docker {
@@ -75,6 +78,13 @@ impl Docker {
                 config: Some(vec![IpamConfig {
                     subnet: Some(spec.subnet.clone()),
                     gateway: Some(spec.gateway.to_string()),
+                    auxiliary_addresses: (!spec.excluded.is_empty()).then(|| {
+                        spec.excluded
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ip)| (format!("reserved{i}"), ip.to_string()))
+                            .collect()
+                    }),
                     ..Default::default()
                 }]),
                 options: None,
@@ -88,6 +98,37 @@ impl Docker {
             Err(e) if already_exists(&e) => Ok(false),
             Err(e) => Err(classify(e)),
         }
+    }
+
+    /// [`Docker::ensure_network`] for a managed private network, whose subnet and
+    /// reserved addresses can change in the cluster config. Docker cannot alter
+    /// them in place, so a network whose IPAM no longer matches the spec is
+    /// removed and created anew, but only while no container is attached; with
+    /// containers on it, it is left alone and the drift logged (the config PUT
+    /// refuses a subnet change in that case, so this is a stale or hand edited
+    /// network).
+    pub async fn ensure_managed_network(&self, spec: &NetworkSpec) -> Result<bool> {
+        if let Some(existing) = self.inspect_network_opt(&spec.name).await? {
+            if ipam_drifted(&existing, spec) {
+                if network_in_use(&existing) {
+                    tracing::warn!(
+                        network = %spec.name,
+                        expected_subnet = %spec.subnet,
+                        "the docker network of a managed network no longer matches its subnet or \
+                         reserved addresses, but containers are attached; recreate it once they \
+                         are stopped"
+                    );
+                    return Ok(false);
+                }
+                tracing::info!(
+                    network = %spec.name,
+                    subnet = %spec.subnet,
+                    "recreating the docker network of a managed network whose subnet changed"
+                );
+                self.remove_network(&spec.name).await?;
+            }
+        }
+        self.ensure_network(spec).await
     }
 
     /// Create a nat-kind cluster network if missing. Idempotent, but unlike
@@ -442,6 +483,33 @@ fn warn_on_nat_subnet_drift(
     }
 }
 
+/// Whether the live IPAM (subnet, gateway, auxiliary addresses) differs from
+/// what `spec` would create.
+fn ipam_drifted(existing: &bollard::models::NetworkInspect, spec: &NetworkSpec) -> bool {
+    let config = existing
+        .ipam
+        .as_ref()
+        .and_then(|ipam| ipam.config.as_ref())
+        .and_then(|configs| configs.first());
+    let Some(config) = config else {
+        return true;
+    };
+    let reserved: std::collections::BTreeSet<String> = config
+        .auxiliary_addresses
+        .iter()
+        .flat_map(|aux| aux.values().cloned())
+        .collect();
+    let wanted: std::collections::BTreeSet<String> =
+        spec.excluded.iter().map(|ip| ip.to_string()).collect();
+    config.subnet.as_deref() != Some(spec.subnet.as_str())
+        || config.gateway.as_deref() != Some(spec.gateway.to_string().as_str())
+        || reserved != wanted
+}
+
+fn network_in_use(existing: &bollard::models::NetworkInspect) -> bool {
+    existing.containers.as_ref().is_some_and(|c| !c.is_empty())
+}
+
 /// Docker answers a duplicate create with a 409 and an untyped message.
 fn already_exists(err: &bollard::errors::Error) -> bool {
     match err {
@@ -476,7 +544,84 @@ mod tests {
             gateway: Ipv4Addr::new(10, 244, 1, 1),
             mtu: 1450,
             stack: "blog".into(),
+            excluded: Vec::new(),
         }
+    }
+
+    fn inspected(
+        subnet: &str,
+        gateway: &str,
+        aux: &[&str],
+        attached: usize,
+    ) -> bollard::models::NetworkInspect {
+        bollard::models::NetworkInspect {
+            ipam: Some(Ipam {
+                config: Some(vec![IpamConfig {
+                    subnet: Some(subnet.into()),
+                    gateway: Some(gateway.into()),
+                    auxiliary_addresses: Some(
+                        aux.iter()
+                            .enumerate()
+                            .map(|(i, a)| (format!("reserved{i}"), a.to_string()))
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            containers: Some(
+                (0..attached)
+                    .map(|i| (format!("c{i}"), Default::default()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_managed_network_drifts_when_its_subnet_gateway_or_reserved_addresses_change() {
+        let mut s = spec();
+        s.excluded = vec![Ipv4Addr::new(10, 244, 1, 2)];
+        assert!(!ipam_drifted(
+            &inspected("10.244.1.0/24", "10.244.1.1", &["10.244.1.2"], 0),
+            &s
+        ));
+        assert!(ipam_drifted(
+            &inspected("10.244.2.0/24", "10.244.1.1", &["10.244.1.2"], 0),
+            &s
+        ));
+        assert!(ipam_drifted(
+            &inspected("10.244.1.0/24", "10.244.1.9", &["10.244.1.2"], 0),
+            &s
+        ));
+        assert!(ipam_drifted(
+            &inspected("10.244.1.0/24", "10.244.1.1", &["10.244.1.3"], 0),
+            &s
+        ));
+        assert!(ipam_drifted(
+            &inspected("10.244.1.0/24", "10.244.1.1", &[], 0),
+            &s
+        ));
+        assert!(ipam_drifted(
+            &bollard::models::NetworkInspect::default(),
+            &s
+        ));
+    }
+
+    #[test]
+    fn a_network_with_containers_attached_is_in_use() {
+        assert!(!network_in_use(&inspected(
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &[],
+            0
+        )));
+        assert!(network_in_use(&inspected(
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &[],
+            1
+        )));
     }
 
     #[test]

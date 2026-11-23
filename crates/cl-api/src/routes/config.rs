@@ -82,9 +82,147 @@ async fn put_config(
             )));
         }
     }
+    if let Some(why) = managed_network_conflict(&previous, &body.config, &cluster_state) {
+        return Err(ApiError::Conflict(why));
+    }
     apply_config(&state, &body.config).await?;
 
     Ok(StatusCode::OK)
+}
+
+/// Whether a stack (deployed spec) names `network` at the top level or in a service.
+fn stack_lists_network(file: &StackFile, network: &str) -> bool {
+    file.networks.contains_key(network)
+        || file
+            .services
+            .values()
+            .any(|svc| svc.networks.iter().any(|n| n == network))
+}
+
+/// Why this edit must not land because of managed networks, if it must not.
+/// Only what the edit itself introduces blocks it, so a cluster that already
+/// has a problem can be edited to fix it.
+///
+/// * a newly managed network, or one whose subnet changed, may not overlap an
+///   allocated or pinned stack overlay subnet;
+/// * flipping `managed` either way or changing a managed subnet needs every
+///   deployed stack off the network first;
+/// * a node may not drop its address on a managed network while it runs
+///   instances attached to it, nor take an address an instance holds.
+pub(crate) fn managed_network_conflict(
+    previous: &ClusterConfig,
+    new: &ClusterConfig,
+    cluster_state: &cl_raft::ClusterState,
+) -> Option<String> {
+    let files: Vec<(&str, StackFile)> = cluster_state
+        .stacks
+        .iter()
+        .filter_map(|(name, s)| Some((name.as_str(), StackFile::parse(&s.spec).ok()?)))
+        .collect();
+    let book = cl_net::Allocations::decode(cluster_state.overlay.as_deref());
+
+    for (name, net) in &new.networks {
+        let was = previous.networks.get(name);
+        let now_managed = net.is_managed();
+        let was_managed = was.is_some_and(|w| w.is_managed());
+        let subnet_changed = was.is_some_and(|w| w.subnet != net.subnet);
+
+        // A brand new network cannot be attached to anything yet.
+        if was.is_some() && (now_managed != was_managed || (now_managed && subnet_changed)) {
+            let users: Vec<&str> = files
+                .iter()
+                .filter(|(_, f)| stack_lists_network(f, name))
+                .map(|(s, _)| *s)
+                .collect();
+            if !users.is_empty() {
+                let what = if now_managed != was_managed {
+                    "changing whether it is managed"
+                } else {
+                    "changing its subnet"
+                };
+                return Some(format!(
+                    "{what} for network {name} would break the stacks that list it ({}): \
+                     remove the network from those stacks (or undeploy them) first",
+                    users.join(", ")
+                ));
+            }
+        }
+
+        let Some(subnet) = net.managed_subnet() else {
+            continue;
+        };
+        if !(was_managed && !subnet_changed) {
+            if let Some(book) = &book {
+                for other in book.network_names().filter(|k| !cl_net::is_managed_key(k)) {
+                    if let Some(taken) = book.subnet(other) {
+                        if subnet.contains(&taken.network()) || taken.contains(&subnet.network()) {
+                            return Some(format!(
+                                "managed network {name} ({subnet}) overlaps the overlay subnet {taken} allocated to {other}"
+                            ));
+                        }
+                    }
+                }
+            }
+            for (stack, file) in &files {
+                if let Some(pinned) = cl_sched::run::overlay_subnet_of(file, new) {
+                    if subnet.contains(&pinned.network()) || pinned.contains(&subnet.network()) {
+                        return Some(format!(
+                            "managed network {name} ({subnet}) overlaps the subnet {pinned} stack {stack} pins in x-clouduler.subnet"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Node addresses against the instances using the network.
+        let key = cl_net::managed_key(name);
+        for (node, spec) in &new.nodes {
+            let had = previous
+                .nodes
+                .get(node)
+                .is_some_and(|n| n.network.contains_key(name));
+            let has = spec.network.contains_key(name);
+            if had && !has {
+                for assignment in cluster_state.assignments.values() {
+                    if assignment.node != *node {
+                        continue;
+                    }
+                    let attached = files.iter().any(|(s, f)| {
+                        *s == assignment.instance.stack
+                            && f.managed_attachments(new, &assignment.instance.service)
+                                .contains(&name.as_str())
+                    });
+                    if attached
+                        || (was_managed && {
+                            files.iter().any(|(s, f)| {
+                                *s == assignment.instance.stack
+                                    && f.managed_attachments(previous, &assignment.instance.service)
+                                        .contains(&name.as_str())
+                            })
+                        })
+                    {
+                        return Some(format!(
+                            "node {node} still runs {} attached to managed network {name}: \
+                             move or stop it before removing the node's address on {name}",
+                            assignment.instance
+                        ));
+                    }
+                }
+            }
+            // Taking an address, or moving to another one, that an instance holds.
+            let before = previous.nodes.get(node).and_then(|n| n.ip_on(name));
+            if before != spec.ip_on(name) {
+                if let (Some(std::net::IpAddr::V4(ip)), Some(book)) = (spec.ip_on(name), &book) {
+                    if let Some((id, _)) = book.instances(&key).find(|(_, held)| *held == ip) {
+                        return Some(format!(
+                            "{ip} is held by instance {id} on managed network {name}, pick another address for node {node}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn deployed_overlay_collision(
@@ -165,6 +303,7 @@ async fn rename_network(
     }
 
     let is_wireguard = net.kind == cl_config::NetworkKind::Wireguard;
+    let is_managed = net.is_managed();
     config.networks.insert(new_name.clone(), net);
     let node_names: Vec<String> = config.nodes.keys().cloned().collect();
     for node in config.nodes.values_mut() {
@@ -181,6 +320,14 @@ async fn rename_network(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let cluster_state = state.cluster.snapshot().await;
+    if is_managed {
+        // The same checks a config edit gets: the new name is a new managed
+        // network as far as overlap and node address rules go.
+        let previous = state.cluster_config.read().await.clone();
+        if let Some(why) = managed_network_conflict(&previous, &config, &cluster_state) {
+            return Err(ApiError::Conflict(why));
+        }
+    }
     let renamed: Vec<(&str, StackFile)> = cluster_state
         .stacks
         .iter()
@@ -199,6 +346,14 @@ async fn rename_network(
         )));
     }
     apply_config(&state, &config).await?;
+
+    // A managed network's overlay is rebuilt under the new name (new key, VNI, devices and
+    // docker network) and its containers are recreated on it, so its addresses move to the new
+    // key first and every container keeps its address. The leader's overlay pass would adopt
+    // them by subnet anyway (`apply_managed`); doing it here just shortens the gap.
+    if is_managed {
+        move_managed_allocations(&state, &old_name, &new_name).await?;
+    }
 
     // The sealed wireguard config is keyed by network name, so it must move too.
     if is_wireguard {
@@ -235,6 +390,29 @@ async fn rename_network(
     rename_in_wireguard_ingress(&state, &old_name, &new_name).await?;
 
     Ok(StatusCode::OK)
+}
+
+/// Re-key a renamed managed network's address book entry. A no-op when it is already moved.
+async fn move_managed_allocations(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
+    let snapshot = state.cluster.snapshot().await;
+    let Some(mut book) = cl_net::Allocations::decode(snapshot.overlay.as_deref()) else {
+        return Ok(());
+    };
+    if !book.rename_managed_network(&cl_net::managed_key(old), &cl_net::managed_key(new)) {
+        return Ok(());
+    }
+    let allocations = serde_json::to_string(&book).map_err(ApiError::internal)?;
+    let response = state
+        .cluster
+        .submit(cl_raft::Request::SetOverlayAllocations { allocations })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(format!(
+            "moving the addresses of managed network {old}: {msg}"
+        )));
+    }
+    Ok(())
 }
 
 fn rename_in_access(config: &mut cl_config::ClusterConfig, old: &str, new: &str) {
@@ -654,5 +832,176 @@ networks:
 
         let reparsed = StackFile::parse(&yaml).expect("round trips");
         assert_eq!(reparsed, file);
+    }
+
+    const MANAGED_YAML: &str = "
+cluster: { name: t }
+networks:
+  int: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  mgd: { type: private, subnet: 192.168.32.0/24, managed: true }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: { int: 10.10.0.1, mgd: 192.168.32.2 }
+  n2:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f02
+    role: worker
+    network: { int: 10.10.0.2, mgd: 192.168.32.3 }
+web: { address: cloud, network: int }
+";
+
+    fn managed_cluster_state(spec: &str) -> cl_raft::ClusterState {
+        let mut state = cl_raft::ClusterState::default();
+        state.stacks.insert(
+            "blog".into(),
+            cl_raft::state::StackState {
+                name: "blog".into(),
+                spec: spec.into(),
+                revision: 1,
+                configs: Default::default(),
+                secrets: Default::default(),
+                used_configs: Default::default(),
+                used_secrets: Default::default(),
+                deployed_at: 0,
+                previous_spec: None,
+            },
+        );
+        let instance = cl_raft::ids::InstanceId::new("blog", "web", 0);
+        state.assignments.insert(
+            instance.clone(),
+            cl_raft::state::Assignment {
+                instance,
+                node: "n2".into(),
+                desired: cl_raft::state::DesiredState::Running,
+                image_digest: None,
+                migration: None,
+            },
+        );
+        state
+    }
+
+    const ATTACHED: &str =
+        "networks:\n  mgd: {}\nservices:\n  web:\n    image: x\n    networks: [mgd]\n";
+
+    fn edited(from: &str, to: &str) -> ClusterConfig {
+        ClusterConfig::parse(&MANAGED_YAML.replace(from, to)).expect("edited config parses")
+    }
+
+    #[test]
+    fn flipping_or_moving_a_managed_network_needs_its_stacks_gone() {
+        let base = ClusterConfig::parse(MANAGED_YAML).unwrap();
+        let state = managed_cluster_state(ATTACHED);
+
+        let mut moved = base.clone();
+        moved.networks.get_mut("mgd").unwrap().subnet = Some("192.168.40.0/24".parse().unwrap());
+        let why = managed_network_conflict(&base, &moved, &state).expect("refused");
+        assert!(
+            why.contains("changing its subnet") && why.contains("blog"),
+            "{why}"
+        );
+
+        let unmanaged = edited(", managed: true", "");
+        let why = managed_network_conflict(&base, &unmanaged, &state).expect("refused");
+        assert!(why.contains("whether it is managed"), "{why}");
+        // Nothing lists the network, so both edits are fine.
+        let idle = managed_cluster_state("services:\n  web:\n    image: x\n");
+        assert_eq!(managed_network_conflict(&base, &unmanaged, &idle), None);
+        assert_eq!(managed_network_conflict(&base, &base, &state), None);
+    }
+
+    #[test]
+    fn a_node_cannot_drop_its_managed_address_while_it_runs_attached_instances() {
+        let base = ClusterConfig::parse(MANAGED_YAML).unwrap();
+        let state = managed_cluster_state(ATTACHED);
+        let mut dropped = base.clone();
+        dropped.nodes.get_mut("n2").unwrap().network.remove("mgd");
+        let why = managed_network_conflict(&base, &dropped, &state).expect("refused");
+        assert!(
+            why.contains("node n2") && why.contains("blog.web.0"),
+            "{why}"
+        );
+        // n1 runs nothing, so it may drop it.
+        let mut other = base.clone();
+        other.nodes.get_mut("n1").unwrap().network.remove("mgd");
+        assert_eq!(managed_network_conflict(&base, &other, &state), None);
+    }
+
+    #[test]
+    fn a_new_managed_network_may_not_overlap_an_allocated_or_pinned_overlay() {
+        let plain = edited(", managed: true", "");
+        let base = ClusterConfig::parse(MANAGED_YAML).unwrap();
+
+        let mut book = cl_net::Allocations::default();
+        book.allocate_network_in("blog_int", Some("192.168.32.0/25".parse().unwrap()), &[])
+            .unwrap();
+        let state = cl_raft::ClusterState {
+            overlay: Some(serde_json::to_string(&book).unwrap()),
+            ..Default::default()
+        };
+        let why = managed_network_conflict(&plain, &base, &state).expect("refused");
+        assert!(why.contains("allocated to blog_int"), "{why}");
+
+        let pinned = managed_cluster_state(
+            "x-clouduler: { subnet: 192.168.32.0/26 }\nnetworks:\n  int: {}\nservices:\n  web:\n    image: x\n",
+        );
+        let why = managed_network_conflict(&plain, &base, &pinned).expect("refused");
+        assert!(why.contains("pins"), "{why}");
+    }
+
+    #[test]
+    fn a_node_may_not_move_onto_an_address_an_instance_holds() {
+        let base = ClusterConfig::parse(MANAGED_YAML).unwrap();
+        let mut book = cl_net::Allocations::default();
+        book.sync_managed_network(
+            "@mgd",
+            "192.168.32.0/24".parse().unwrap(),
+            &base.managed_reserved("mgd"),
+        );
+        let id = cl_raft::ids::InstanceId::new("blog", "web", 0);
+        let held = book.allocate_ip("@mgd", &id).unwrap();
+        let state = cl_raft::ClusterState {
+            overlay: Some(serde_json::to_string(&book).unwrap()),
+            ..Default::default()
+        };
+        let mut moved = base.clone();
+        moved.nodes.get_mut("n2").unwrap().network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip(std::net::IpAddr::V4(held)),
+        );
+        let why = managed_network_conflict(&base, &moved, &state).expect("refused");
+        assert!(why.contains("is held by instance"), "{why}");
+        assert_eq!(managed_network_conflict(&base, &base, &state), None);
+    }
+
+    #[test]
+    fn a_node_may_not_take_an_address_an_instance_holds() {
+        let mut base = ClusterConfig::parse(MANAGED_YAML).unwrap();
+        base.nodes.get_mut("n2").unwrap().network.remove("mgd");
+        let full = ClusterConfig::parse(MANAGED_YAML).unwrap();
+        let mut book = cl_net::Allocations::default();
+        book.sync_managed_network(
+            "@mgd",
+            "192.168.32.0/24".parse().unwrap(),
+            &std::collections::BTreeSet::new(),
+        );
+        let id = cl_raft::ids::InstanceId::new("blog", "web", 0);
+        // .2 is n1's, so the first instance holds .3: exactly n2's new address.
+        let _ = book.allocate_ip("@mgd", &id).unwrap();
+        let _ = book.allocate_ip("@mgd", &cl_raft::ids::InstanceId::new("blog", "web", 1));
+        let state = cl_raft::ClusterState {
+            overlay: Some(serde_json::to_string(&book).unwrap()),
+            ..Default::default()
+        };
+        let held = book.instance_ip("@mgd", &id).unwrap();
+        let mut taking = full.clone();
+        taking.nodes.get_mut("n2").unwrap().network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip(std::net::IpAddr::V4(held)),
+        );
+        if taking.validate().is_ok() {
+            let why = managed_network_conflict(&base, &taking, &state).expect("refused");
+            assert!(why.contains("is held by instance"), "{why}");
+        }
     }
 }

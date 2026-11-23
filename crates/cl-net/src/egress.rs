@@ -295,6 +295,10 @@ pub struct HostServices {
     /// Stacks whose containers are held to an `allowed` list; their rules come
     /// ahead of the pool-wide ones below. See `crate::restrict`.
     pub restricted: Vec<crate::restrict::Restriction>,
+    /// Managed private networks this node implements, as `(subnet, gateway)`:
+    /// their containers are held to the same rules as the overlay's, with DNS
+    /// answered on the network's own gateway.
+    pub managed: Vec<(Ipv4Net, Ipv4Addr)>,
 }
 
 /// The `INPUT` filter that keeps containers away from the host's own listeners.
@@ -356,11 +360,23 @@ pub fn container_input_plan(
         chain.rules.push(rule.join(" "));
     }
 
-    for pool in pools {
+    // Every source pool with where its DNS is answered: the overlay gateways
+    // for the node-local pools, a managed network's own gateway for its subnet.
+    let managed: BTreeSet<(Ipv4Net, Ipv4Addr)> = services.managed.iter().copied().collect();
+    let sources: Vec<(Ipv4Net, String)> = pools
+        .iter()
+        .map(|pool| (*pool, overlay.clone()))
+        .chain(
+            managed
+                .iter()
+                .map(|(subnet, gateway)| (*subnet, format!("{gateway}/32"))),
+        )
+        .collect();
+    for (pool, dns_dst) in &sources {
         let src = pool.to_string();
         for proto in ["udp", "tcp"] {
             chain.push(&[
-                "-s", &src, "-d", &overlay, "-p", proto, "--dport", "53", "-j", "ACCEPT",
+                "-s", &src, "-d", dns_dst, "-p", proto, "--dport", "53", "-j", "ACCEPT",
             ]);
         }
         if !proxy_ports.is_empty() {
@@ -405,7 +421,7 @@ pub fn container_input_plan(
             "ACCEPT",
         ]);
     }
-    for pool in pools {
+    for (pool, _) in &sources {
         chain.push(&["-s", &pool.to_string(), "-j", "DROP"]);
     }
 
@@ -944,6 +960,31 @@ mod tests {
                 ..HostServices::default()
             },
         )
+    }
+
+    #[test]
+    fn a_managed_subnet_is_a_container_source_with_dns_at_its_gateway() {
+        let plan = container_input_plan(
+            overlay_pool(),
+            &container_pools(),
+            &HostServices {
+                managed: vec![(
+                    "192.168.70.0/24".parse().unwrap(),
+                    "192.168.70.1".parse().unwrap(),
+                )],
+                ..HostServices::default()
+            },
+        );
+        let rules = rules(&plan, CONTAINER_INPUT_CHAIN);
+        assert!(
+            rules.iter().any(|r| r.contains("-s 192.168.70.0/24")
+                && r.contains("-d 192.168.70.1/32")
+                && r.contains("--dport 53")),
+            "{rules:#?}"
+        );
+        assert!(rules
+            .iter()
+            .any(|r| r.contains("-s 192.168.70.0/24") && r.contains("DROP")));
     }
 
     #[test]

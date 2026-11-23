@@ -435,6 +435,12 @@ pub struct Network {
     /// [`ClusterConfig::reaches`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Vec<String>>,
+    /// A cluster managed private network: clouduler builds one cluster-wide
+    /// VXLAN overlay over `subnet` between the nodes that list an address on
+    /// it, and allocates container addresses from it. Only valid on a
+    /// `private` network with an IPv4 subnet.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub managed: bool,
 }
 
 /// A `container` network: the router and what its side may reach. The routed
@@ -518,7 +524,30 @@ where
     Ok(networks)
 }
 
+/// Smallest and largest prefix a managed network's subnet may have.
+pub const MANAGED_MIN_PREFIX: u8 = 16;
+pub const MANAGED_MAX_PREFIX: u8 = 29;
+
+/// The anycast gateway of a managed subnet: its first host address.
+pub fn managed_gateway(subnet: Ipv4Net) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(subnet.network()).saturating_add(1))
+}
+
 impl Network {
+    /// Whether clouduler manages this network's overlay (a validated managed
+    /// network is always private with an IPv4 subnet).
+    pub fn is_managed(&self) -> bool {
+        self.managed && self.kind == NetworkKind::Private
+    }
+
+    /// The IPv4 subnet of a managed network.
+    pub fn managed_subnet(&self) -> Option<Ipv4Net> {
+        match (self.is_managed(), self.subnet) {
+            (true, Some(IpNet::V4(v4))) => Some(v4),
+            _ => None,
+        }
+    }
+
     /// The address space a container network routes through its router, when
     /// this is a container network with an IPv4 subnet.
     pub fn routed_subnet(&self) -> Option<Ipv4Net> {
@@ -1426,6 +1455,47 @@ impl ClusterConfig {
             .filter(|(_, net)| matches!(net.kind, NetworkKind::Nat | NetworkKind::Container))
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// Every managed network with its IPv4 subnet, in name order.
+    pub fn managed_networks(&self) -> Vec<(&str, &Network, Ipv4Net)> {
+        self.networks
+            .iter()
+            .filter_map(|(name, net)| Some((name.as_str(), net, net.managed_subnet()?)))
+            .collect()
+    }
+
+    /// Whether `network` is a managed network.
+    pub fn is_managed_network(&self, network: &str) -> bool {
+        self.networks.get(network).is_some_and(Network::is_managed)
+    }
+
+    /// The addresses of managed network `network` no instance may take: the
+    /// network and broadcast addresses, the gateway and every node address.
+    pub fn managed_reserved(&self, network: &str) -> BTreeSet<Ipv4Addr> {
+        let mut out = BTreeSet::new();
+        let Some(subnet) = self.networks.get(network).and_then(Network::managed_subnet) else {
+            return out;
+        };
+        out.insert(subnet.network());
+        out.insert(subnet.broadcast());
+        out.insert(managed_gateway(subnet));
+        for node in self.nodes.values() {
+            if let Some(IpAddr::V4(ip)) = node.ip_on(network) {
+                out.insert(ip);
+            }
+        }
+        out
+    }
+
+    /// The lowest host address of managed network `network` that is not the
+    /// network, broadcast or gateway address nor held by any node, for
+    /// autofilling a new node's address. `None` for a non managed network or
+    /// a full subnet.
+    pub fn next_free_node_address(&self, network: &str) -> Option<Ipv4Addr> {
+        let subnet = self.networks.get(network)?.managed_subnet()?;
+        let used = self.managed_reserved(network);
+        subnet.hosts().find(|ip| !used.contains(ip))
     }
 
     /// Names of every public or wireguard network, whose outside reachability

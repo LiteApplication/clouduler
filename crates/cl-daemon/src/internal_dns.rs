@@ -104,6 +104,10 @@ async fn run(
             warn!(error = %e, "could not rebuild the internal zone");
             continue;
         }
+        let views = zone_views(&state, &live, &records);
+        if let Err(e) = dns.reload_views(&views).await {
+            warn!(error = %e, "could not rebuild the per-container dns views");
+        }
         let overrides = proxy_overrides(&state, &live, &node_name);
         let skip = nat_clients(&state, &live);
         if let Err(e) = dns.reload_overrides(&overrides, skip).await {
@@ -196,6 +200,93 @@ fn zone_for(
 
     records.sort_by(|a, b| a.name.cmp(&b.name));
     records
+}
+
+/// Answers for the containers on managed networks that differ from the shared
+/// zone. A service listed on a managed network has an address there beside the
+/// one on its stack overlay, and an asker can only reach the one on a network it
+/// shares: its own stack overlay first (the primary network), then its managed
+/// networks. Each such asker, by every address it holds, gets the whole zone with
+/// those service names answered accordingly. Empty without managed networks.
+fn zone_views(
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+    shared: &[ZoneRecord],
+) -> BTreeMap<IpAddr, Vec<ZoneRecord>> {
+    use cl_raft::ids::InstanceId;
+    let managed = crate::placement::managed_addresses(state, cfg);
+    if managed.is_empty() {
+        return BTreeMap::new();
+    }
+    let primary: BTreeMap<InstanceId, Ipv4Addr> = crate::placement::instance_addresses(state, cfg)
+        .into_iter()
+        .collect();
+
+    // Every network an instance sits on, primary first: (network key, address).
+    let networks_of = |id: &InstanceId| -> Vec<(String, Ipv4Addr)> {
+        let mut out = Vec::new();
+        let managed_of = managed.get(id).cloned().unwrap_or_default();
+        if let Some(ip) = primary.get(id) {
+            match managed_of.iter().find(|(_, m)| m == ip) {
+                // No stack overlay: the primary network is the managed one.
+                Some((network, _)) => out.push((format!("@{network}"), *ip)),
+                None => out.push((format!("stack:{}", id.stack), *ip)),
+            }
+        }
+        for (network, ip) in managed_of {
+            if !out.iter().any(|(_, a)| *a == ip) {
+                out.push((format!("@{network}"), ip));
+            }
+        }
+        out
+    };
+
+    // The instances of each service, with their networks.
+    type InstanceNets = Vec<(String, Ipv4Addr)>;
+    let mut services: BTreeMap<(String, String), Vec<InstanceNets>> = BTreeMap::new();
+    for id in primary.keys() {
+        services
+            .entry((id.service.clone(), id.stack.clone()))
+            .or_default()
+            .push(networks_of(id));
+    }
+
+    let mut views = BTreeMap::new();
+    for asker in managed.keys() {
+        let mine = networks_of(asker);
+        let mut records = shared.to_vec();
+        let mut differs = false;
+        for ((service, stack), instances) in &services {
+            let mut answer: Vec<Ipv4Addr> = instances
+                .iter()
+                .filter_map(|networks| {
+                    mine.iter()
+                        .find_map(|(key, _)| networks.iter().find(|(k, _)| k == key))
+                        .or_else(|| networks.first())
+                        .map(|(_, ip)| *ip)
+                })
+                .collect();
+            answer.sort();
+            answer.dedup();
+            for name in [
+                format!("{service}.{stack}"),
+                format!("tasks.{service}.{stack}"),
+            ] {
+                if let Some(record) = records.iter_mut().find(|r| r.name == name) {
+                    if record.addresses != answer {
+                        record.addresses = answer.clone();
+                        differs = true;
+                    }
+                }
+            }
+        }
+        if differs {
+            for (_, ip) in &mine {
+                views.insert(IpAddr::V4(*ip), records.clone());
+            }
+        }
+    }
+    views
 }
 
 /// Hostnames of routes published on a public network, pointed at this node's
@@ -325,6 +416,56 @@ services:
         let records = zone_for(&state, &cluster_config(), &nodes, None);
 
         assert_eq!(answer(&records, "blog"), None);
+    }
+
+    #[test]
+    fn a_container_on_a_managed_network_gets_answers_it_can_reach() {
+        use crate::placement::fixtures::managed_cluster;
+        use cl_raft::ids::InstanceId;
+        let (cfg, state) = managed_cluster();
+        let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
+        let shared = zone_for(&state, &cfg, &nodes, None);
+        let views = zone_views(&state, &cfg, &shared);
+
+        let held = crate::placement::managed_addresses(&state, &cfg);
+        let web = InstanceId::new("blog", "web", 0);
+        let solo = InstanceId::new("media", "solo", 0);
+        let web_managed = held[&web][0].1;
+        let solo_managed = held[&solo][0].1;
+
+        // media/solo sits on the managed network only, so web.blog must resolve to the
+        // address web holds there, not to its (unreachable) stack overlay address.
+        let view = views
+            .get(&IpAddr::V4(solo_managed))
+            .expect("solo gets its own view");
+        assert_eq!(answer(view, "web.blog"), Some(&[web_managed][..]));
+        assert_eq!(answer(view, "tasks.web.blog"), Some(&[web_managed][..]));
+        // Everything else is the shared zone.
+        assert_eq!(
+            answer(view, "client.plain"),
+            answer(&shared, "client.plain")
+        );
+        assert_eq!(answer(view, "solo.media"), Some(&[solo_managed][..]));
+        let overlay_web = answer(&shared, "web.blog").unwrap().to_vec();
+        assert_ne!(overlay_web, vec![web_managed]);
+
+        // web shares its stack overlay with itself and sees the shared answers: no view.
+        assert!(!views.contains_key(&IpAddr::V4(web_managed)));
+        // A container on no managed network has no view either.
+        assert_eq!(views.len(), 1);
+    }
+
+    #[test]
+    fn no_managed_network_means_no_per_container_views() {
+        use crate::placement::fixtures::managed_cluster;
+        let (cfg, state) = managed_cluster();
+        let shared = zone_for(&state, &cfg, &[], None);
+        assert!(zone_views(
+            &state,
+            &crate::placement::fixtures::cluster_config(),
+            &shared
+        )
+        .is_empty());
     }
 
     #[test]

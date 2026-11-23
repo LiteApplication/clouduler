@@ -312,6 +312,58 @@ impl Overlay {
         Ok(index)
     }
 
+    /// Make `extras` (a managed network's node address) the only IPv4
+    /// addresses on bridge `name` besides `gateway`: adds the missing ones as
+    /// secondary addresses of the subnet and removes any other, such as the
+    /// address of a node that left the network. Idempotent.
+    pub async fn reconcile_bridge_addresses(
+        &self,
+        name: &str,
+        gateway: Ipv4Addr,
+        extras: &BTreeSet<Ipv4Addr>,
+        prefix_len: u8,
+    ) -> Result<()> {
+        let index = self
+            .find_link(name)
+            .await?
+            .ok_or_else(|| NetError::UnknownNetwork(name.to_string()))?;
+        let mut stale = Vec::new();
+        let mut addrs = self
+            .handle
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .execute();
+        while let Some(addr) = addrs
+            .try_next()
+            .await
+            .map_err(|e| NetError::from_netlink(name, e))?
+        {
+            for attr in &addr.attributes {
+                if let rtnetlink::packet_route::address::AddressAttribute::Address(
+                    std::net::IpAddr::V4(existing),
+                ) = attr
+                {
+                    if *existing != gateway && !extras.contains(existing) {
+                        stale.push(addr.clone());
+                    }
+                }
+            }
+        }
+        for addr in stale {
+            self.handle
+                .address()
+                .del(addr)
+                .execute()
+                .await
+                .map_err(|e| NetError::from_netlink(name, e))?;
+        }
+        for extra in extras {
+            self.ensure_address(name, index, *extra, prefix_len).await?;
+        }
+        Ok(())
+    }
+
     /// VNI, local address and underlay link a VXLAN device was created with.
     async fn vxlan_params(&self, index: u32) -> Result<Option<VxlanParams>> {
         use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo};

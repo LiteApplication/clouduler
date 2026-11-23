@@ -184,7 +184,7 @@ pub fn start(
             // Before the docker check on purpose: the filter protects the host
             // from whatever containers exist, and must not wait for docker to
             // (re)connect to be in place.
-            if let Err(e) = ensure_container_input(&state, &cfg, &restricted).await {
+            if let Err(e) = ensure_container_input(&state, &cfg, &node_name, &restricted).await {
                 warn!(error = %e, "cannot apply the container input filter");
             }
             let wan_version = wan.version();
@@ -285,6 +285,7 @@ pub fn start(
 async fn ensure_container_input(
     state: &cl_raft::state::ClusterState,
     cfg: &ClusterConfig,
+    node_name: &str,
     restricted: &[Restriction],
 ) -> Result<()> {
     let services = HostServices {
@@ -295,6 +296,10 @@ async fn ensure_container_input(
         },
         published: crate::expose::published_ports(state, cfg),
         restricted: restricted.to_vec(),
+        managed: crate::overlay::managed_local(cfg, node_name)
+            .into_iter()
+            .map(|m| (m.subnet, cl_config::managed_gateway(m.subnet)))
+            .collect(),
     };
     let plan = container_input_plan(overlay_pool(), &container_pools(), &services);
     tokio::task::spawn_blocking(move || apply_plan(&plan))
@@ -793,6 +798,7 @@ async fn ensure_one(
             gateway,
             mtu,
             stack: OWNER.to_string(),
+            excluded: Vec::new(),
         })
         .await
         .with_context(|| format!("ensuring the {network} docker network"))?;
@@ -838,6 +844,7 @@ mod tests {
                 domain: None,
                 publish_dns: true,
                 access: None,
+                managed: false,
                 container: None,
             },
         );
@@ -849,6 +856,7 @@ mod tests {
                 domain: None,
                 publish_dns: true,
                 access: None,
+                managed: false,
                 container: None,
             },
         );

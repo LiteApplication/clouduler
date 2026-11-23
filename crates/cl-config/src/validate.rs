@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cluster::{ClusterConfig, ContainerNetwork, NetworkKind, NodeAddress};
+use crate::cluster::{
+    managed_gateway, ClusterConfig, ContainerNetwork, NetworkKind, NodeAddress, MANAGED_MAX_PREFIX,
+    MANAGED_MIN_PREFIX,
+};
 use crate::error::{ConfigError, Result};
 use crate::netalloc::{
     check_interface_name, container_mark, container_table_ids, egress_table_id, subnet_octet,
@@ -108,6 +111,9 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
+            if net.managed {
+                self.validate_managed_network(name, net)?;
+            }
             if let Some(access) = &net.access {
                 self.validate_access(name, net.kind, access)?;
             }
@@ -187,6 +193,84 @@ impl ClusterConfig {
                 ),
             )),
         }
+    }
+
+    /// A managed network is a private network with an IPv4 subnet of /16../29
+    /// that overlaps no other cluster subnet and none of the pools clouduler
+    /// derives overlays and bridges from.
+    fn validate_managed_network(&self, name: &str, net: &crate::cluster::Network) -> Result<()> {
+        let at = format!("networks.{name}");
+        if net.kind != NetworkKind::Private {
+            return Err(ConfigError::invalid(
+                format!("{at}.managed"),
+                format!(
+                    "only a private network can be managed, this one is {}",
+                    net.kind
+                ),
+            ));
+        }
+        let Some(subnet) = net.managed_subnet() else {
+            return Err(ConfigError::invalid(
+                format!("{at}.subnet"),
+                "a managed network needs an IPv4 subnet",
+            ));
+        };
+        if !(MANAGED_MIN_PREFIX..=MANAGED_MAX_PREFIX).contains(&subnet.prefix_len()) {
+            return Err(ConfigError::invalid(
+                format!("{at}.subnet"),
+                format!(
+                    "{subnet}: the prefix length of a managed network must be between /{MANAGED_MIN_PREFIX} and /{MANAGED_MAX_PREFIX}"
+                ),
+            ));
+        }
+        if subnet.network() != subnet.addr() {
+            return Err(ConfigError::invalid(
+                format!("{at}.subnet"),
+                format!(
+                    "{subnet} has host bits set, did you mean {}?",
+                    subnet.trunc()
+                ),
+            ));
+        }
+        let overlaps = |a: ipnet::Ipv4Net, b: ipnet::Ipv4Net| {
+            a.contains(&b.network()) || b.contains(&a.network())
+        };
+        for (octet, what) in [
+            (244u8, "the overlay pool"),
+            (EGRESS_POOL_BASE, "the egress pool"),
+            (NAT_POOL_BASE, "the nat pool"),
+        ] {
+            let pool = ipnet::Ipv4Net::new_assert(std::net::Ipv4Addr::new(10, octet, 0, 0), 16);
+            if overlaps(subnet, pool) {
+                return Err(ConfigError::invalid(
+                    format!("{at}.subnet"),
+                    format!("{subnet} overlaps {what} {pool}"),
+                ));
+            }
+        }
+        for (other_name, other) in &self.networks {
+            if other_name == name {
+                continue;
+            }
+            let Some(ipnet::IpNet::V4(v4)) = other.subnet else {
+                continue;
+            };
+            // A container network routing a wider range is fine: the more
+            // specific managed subnet wins, like the underlay ranges do.
+            if other.kind == NetworkKind::Container
+                && v4.contains(&subnet.network())
+                && v4 != subnet
+            {
+                continue;
+            }
+            if overlaps(subnet, v4) {
+                return Err(ConfigError::invalid(
+                    format!("{at}.subnet"),
+                    format!("{subnet} overlaps the subnet {v4} of network {other_name}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// `access` is the source side of the network graph: only networks that
@@ -408,6 +492,7 @@ impl ClusterConfig {
         };
         let internal = internal.clone();
         let mut internal_ips = BTreeSet::new();
+        let mut managed_ips: BTreeMap<&str, BTreeSet<std::net::IpAddr>> = BTreeMap::new();
 
         for (name, node) in &self.nodes {
             let at = format!("nodes.{name}");
@@ -446,6 +531,42 @@ impl ClusterConfig {
                                 at,
                                 format!("{ip} is used by another node"),
                             ));
+                        }
+                        if let Some(v4) = net.managed_subnet() {
+                            let std::net::IpAddr::V4(ip4) = ip else {
+                                return Err(ConfigError::invalid(
+                                    at,
+                                    "a managed network takes an IPv4 address",
+                                ));
+                            };
+                            // The tunnel to the other nodes and the forwarding NAT
+                            // run on the internal address, which must be IPv4.
+                            if !matches!(node.network.get(&internal).and_then(|a| a.as_ip()), Some(std::net::IpAddr::V4(_))) {
+                                return Err(ConfigError::invalid(
+                                    at,
+                                    format!(
+                                        "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for its tunnel; give it one or remove its address on {net_name}"
+                                    ),
+                                ));
+                            }
+                            if *ip4 == v4.network() || *ip4 == v4.broadcast() {
+                                return Err(ConfigError::invalid(
+                                    at,
+                                    format!("{ip} is the network or broadcast address of {v4}"),
+                                ));
+                            }
+                            if *ip4 == managed_gateway(v4) {
+                                return Err(ConfigError::invalid(
+                                    at,
+                                    format!("{ip} is the gateway of the managed network {net_name}, pick another address"),
+                                ));
+                            }
+                            if !managed_ips.entry(net_name.as_str()).or_default().insert(*ip) {
+                                return Err(ConfigError::invalid(
+                                    at,
+                                    format!("{ip} is used by another node on {net_name}"),
+                                ));
+                            }
                         }
                     }
                     (NetworkKind::Internal | NetworkKind::Private, _) => {
@@ -2229,6 +2350,153 @@ cloudflare:
         assert_eq!(
             cfg.client_network("10.10.0.7".parse().unwrap()),
             Some("tailscale")
+        );
+    }
+
+    fn managed(subnet: &str, n1: &str, n2: &str) -> Result<ClusterConfig> {
+        parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                &format!(
+                    "  wan:       {{ type: public,   domain: example.com }}\n  mgd:       {{ type: private, subnet: {subnet}, managed: true }}"
+                ),
+            ),
+            ("      lan: 192.168.1.1\n", &format!("      lan: 192.168.1.1\n      mgd: {n1}\n")),
+            ("      tailscale: 10.10.0.2\n", &format!("      tailscale: 10.10.0.2\n      mgd: {n2}\n")),
+        ])
+    }
+
+    fn managed_err(subnet: &str, n1: &str, n2: &str) -> String {
+        managed(subnet, n1, n2).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_managed_network_validates_and_round_trips() {
+        let cfg = managed("192.168.32.0/24", "192.168.32.2", "192.168.32.3").expect("valid");
+        assert!(cfg.is_managed_network("mgd"));
+        assert!(!cfg.is_managed_network("lan"));
+        assert_eq!(cfg.managed_networks().len(), 1);
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("managed: true"));
+        assert_eq!(ClusterConfig::parse(&yaml).unwrap(), cfg);
+        // An unmanaged network never serializes the flag.
+        let plain = ClusterConfig::parse(BASE).unwrap();
+        assert!(!serde_yaml::to_string(&plain).unwrap().contains("managed"));
+    }
+
+    #[test]
+    fn managed_needs_a_private_network_with_an_ipv4_subnet() {
+        let err = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com, managed: true }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("only a private network can be managed"),
+            "{err}"
+        );
+        let err = parse(&[(
+            "  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }",
+            "  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com, managed: true }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("only a private network can be managed"),
+            "{err}"
+        );
+        let err = managed_err("fd00::/64", "192.168.32.2", "192.168.32.3");
+        assert!(err.contains("IPv4"), "{err}");
+    }
+
+    #[test]
+    fn managed_prefix_length_is_bounded() {
+        for bad in ["10.50.0.0/15", "192.168.32.0/30", "192.168.32.0/31"] {
+            let err = managed_err(bad, "192.168.32.2", "192.168.32.3");
+            assert!(err.contains("prefix length"), "{bad}: {err}");
+        }
+        managed("192.168.32.0/29", "192.168.32.2", "192.168.32.3").expect("/29");
+        managed("172.20.0.0/16", "172.20.0.2", "172.20.0.3").expect("/16");
+        let err = managed_err("192.168.32.4/24", "192.168.32.2", "192.168.32.3");
+        assert!(err.contains("host bits"), "{err}");
+    }
+
+    #[test]
+    fn managed_subnet_may_not_overlap_anything() {
+        for bad in [
+            "192.168.1.0/24",
+            "192.168.0.0/16",
+            "10.10.0.0/24",
+            "10.244.0.0/16",
+            "10.245.0.0/24",
+            "10.246.0.0/20",
+        ] {
+            let err = managed_err(bad, "192.168.32.2", "192.168.32.3");
+            assert!(err.contains("overlaps"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn managed_node_addresses_are_checked() {
+        let err = managed_err("192.168.32.0/24", "192.168.33.2", "192.168.32.3");
+        assert!(err.contains("outside"), "{err}");
+        let err = managed_err("192.168.32.0/24", "192.168.32.0", "192.168.32.3");
+        assert!(err.contains("network or broadcast"), "{err}");
+        let err = managed_err("192.168.32.0/24", "192.168.32.2", "192.168.32.255");
+        assert!(err.contains("network or broadcast"), "{err}");
+        let err = managed_err("192.168.32.0/24", "192.168.32.1", "192.168.32.3");
+        assert!(err.contains("gateway"), "{err}");
+        let err = managed_err("192.168.32.0/24", "192.168.32.2", "192.168.32.2");
+        assert!(err.contains("used by another node"), "{err}");
+    }
+
+    #[test]
+    fn a_managed_address_needs_an_ipv4_internal_address_on_the_node() {
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  mgd:       { type: private, subnet: 192.168.32.0/24, managed: true }",
+            ),
+            ("tailscale: { type: internal, subnet: 10.10.0.0/24", "tailscale: { type: internal, subnet: fd00::/64"),
+            ("      lan: 192.168.1.1\n", "      lan: 192.168.1.1\n      mgd: 192.168.32.2\n"),
+            ("tailscale: 10.10.0.1", "tailscale: fd00::1"),
+            ("tailscale: 10.10.0.2", "tailscale: fd00::2"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("no IPv4 address on the internal network"),
+            "{err}"
+        );
+        assert!(err.contains("nodes."), "{err}");
+    }
+
+    #[test]
+    fn the_next_free_node_address_skips_reserved_and_used() {
+        let cfg = managed("192.168.32.0/24", "192.168.32.2", "192.168.32.4").unwrap();
+        // .0 network, .1 gateway, .2 and .4 nodes, so .3 is the lowest free.
+        assert_eq!(
+            cfg.next_free_node_address("mgd"),
+            Some("192.168.32.3".parse().unwrap())
+        );
+        assert_eq!(cfg.next_free_node_address("lan"), None);
+        assert_eq!(cfg.next_free_node_address("nope"), None);
+        let reserved = cfg.managed_reserved("mgd");
+        for ip in [
+            "192.168.32.0",
+            "192.168.32.1",
+            "192.168.32.2",
+            "192.168.32.4",
+            "192.168.32.255",
+        ] {
+            assert!(reserved.contains(&ip.parse().unwrap()), "{ip}");
+        }
+        // A /29 with both hosts taken still has room, until it is full.
+        let small = managed("192.168.32.0/29", "192.168.32.2", "192.168.32.3").unwrap();
+        assert_eq!(
+            small.next_free_node_address("mgd"),
+            Some("192.168.32.4".parse().unwrap())
         );
     }
 }
