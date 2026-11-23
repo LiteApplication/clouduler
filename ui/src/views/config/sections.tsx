@@ -29,7 +29,7 @@ import type {
   PublicAddress,
 } from '../../api/types';
 import { canServeDns, isLastServed, isServingDns, removeDnsNetwork, renameDnsNetwork, toggleDnsNetwork } from './dnsServerNetworks';
-import { BottomSheet, CheckOption, HelpTip, Tag, useConfirm } from '../../ds';
+import { BottomSheet, CheckOption, Disclosure, HelpTip, Tag, useConfirm } from '../../ds';
 import { NetworkGraph } from './NetworkGraph';
 import { canHaveAccess, validTargets } from './networkAccess';
 import { Icon } from '../../components/Icon';
@@ -760,6 +760,25 @@ function ServedByField({
   );
 }
 
+const NET_KIND_LABEL: Record<string, string> = { internal: 'internal', public: 'public', egress: 'egress', wireguard: 'wireguard', private: 'private' };
+
+function netKind(net: NetworkConfig): string {
+  return isManaged(net) ? 'managed' : (NET_KIND_LABEL[net.type] ?? net.type);
+}
+
+/** One-line address and port list of a node's address on a network, for the
+ *  collapsed row. */
+function netSummary(addr: NodeAddress | undefined): { address: string; ports: string } {
+  if (addr === undefined || addr === null) return { address: '', ports: '' };
+  if (typeof addr === 'string') return { address: addr, ports: '' };
+  const ports = (addr.open_ports ?? []).map((p) => `${p.port}/${p.protocol}`).join(', ');
+  if ('interface' in addr) {
+    const fb = addr.fallback ? ` (backup ${addr.fallback})` : '';
+    return { address: addr.interface ? `${addr.interface}${fb}` : '', ports };
+  }
+  return { address: [addr.ipv4, addr.ipv6, addr.domain].filter(Boolean).join(', '), ports };
+}
+
 /** A node's config-level card: role, ports, addresses and drive mounts. Used
  *  standalone on a node's detail page (see `NodeDetail`), scoped to just that
  *  one node rather than listed alongside every other node. */
@@ -828,18 +847,201 @@ export function NodeCard({
     setAddress(netName, value);
   };
 
+  // Networks this node has an editor for: internal always, wireguard once
+  // added or pending, every other addressable kind only when listed.
+  const shownNetworks = networkEntries.filter(([netName, net]) => {
+    if (net.type === 'nat' || net.type === 'container') return false;
+    if (net.type === 'internal') return true;
+    return netName in node.network || (net.type === 'wireguard' && pendingWireguard.includes(netName));
+  });
+  const [openNets, setOpenNets] = useState<string[]>([]);
+
+  const renderNetwork = (netName: string, net: NetworkConfig) => {
+      const addr = node.network[netName];
+      if (net.type === 'nat' || net.type === 'container') {
+        // Not addressable per node: nothing to render here at all.
+        return null;
+      } else if (net.type === 'internal') {
+        // always shown, falls through below
+      } else if (net.type === 'wireguard') {
+        if (!(netName in node.network) && !pendingWireguard.includes(netName)) return null;
+      } else if (!(netName in node.network)) {
+        return null;
+      }
+      if (net.type === 'wireguard') {
+        const wg: InterfaceAddress | null =
+          typeof addr === 'string'
+            ? { interface: addr, open_ports: [] }
+            : addr && 'interface' in addr
+              ? {
+                  interface: addr.interface,
+                  open_ports: addr.open_ports ?? [],
+                }
+              : null;
+        return (
+          <WireguardAddressField
+            key={netName}
+            nodeName={name}
+            netName={netName}
+            addr={wg}
+            onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports } : null)}
+            onCancel={
+              wg === null ? () => setPendingWireguard((prev) => prev.filter((n) => n !== netName)) : undefined
+            }
+            disabled={disabled}
+          />
+        );
+      }
+      if (net.type === 'public') {
+        const pub = (typeof addr === 'object' ? addr : {}) as Partial<PublicAddress>;
+        const update = (patch: Partial<PublicAddress>) => {
+          const merged: PublicAddress = {
+            ipv4: pub.ipv4 ?? null,
+            ipv6: pub.ipv6 ?? null,
+            domain: pub.domain ?? null,
+            open_ports: pub.open_ports ?? [],
+            ...patch,
+          };
+          const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain && merged.open_ports.length === 0;
+          setAddress(netName, empty ? null : merged);
+        };
+        return (
+          <div key={netName} className="card" style={{ marginBottom: 8 }}>
+            <div className="section-head">
+              <span className="faint">Public address</span>
+              {!disabled && (
+                <button
+                  className="ghost"
+                  onClick={() => setAddress(netName, null)}
+                  aria-label={`remove ${netName} from ${name}`}
+                  title={`Remove ${netName} from this node`}
+                >
+                  <Icon name="close" />
+                </button>
+              )}
+            </div>
+            <TextField
+              id={`node-${name}-${netName}-ipv4`}
+              label="Public IPv4"
+              value={pub.ipv4 ?? ''}
+              onChange={(v) => update({ ipv4: v || null })}
+              hint="Publishes an A record."
+              help="This node's public IPv4 address on this network. Publishes an A record if the network has a domain."
+              disabled={disabled}
+            />
+            <TextField
+              id={`node-${name}-${netName}-ipv6`}
+              label="Public IPv6"
+              value={pub.ipv6 ?? ''}
+              onChange={(v) => update({ ipv6: v || null })}
+              hint="Publishes an AAAA record."
+              help="This node's public IPv6 address on this network. Publishes an AAAA record if the network has a domain."
+              disabled={disabled}
+            />
+            <TextField
+              id={`node-${name}-${netName}-domain`}
+              label="Alias hostname"
+              value={pub.domain ?? ''}
+              onChange={(v) => update({ domain: v || null })}
+              hint="Points DNS at a hostname instead of an IP."
+              help="Points this node's DNS record at another hostname instead of a fixed IP, e.g. for a dynamic-DNS address."
+              disabled={disabled}
+            />
+            <OpenPortsEditor
+              idPrefix={`node-${name}-${netName}`}
+              hint="Ports this node's router forwards to it here. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
+              ports={pub.open_ports ?? []}
+              onChange={(open_ports) => update({ open_ports })}
+              disabled={disabled}
+            />
+          </div>
+        );
+      }
+      if (net.type === 'egress') {
+        const egress: InterfaceAddress =
+          typeof addr === 'string'
+            ? { interface: addr, open_ports: [], fallback: null }
+            : addr && 'interface' in addr
+              ? {
+                  interface: addr.interface,
+                  open_ports: addr.open_ports ?? [],
+                  fallback: addr.fallback ?? null,
+                }
+              : { interface: '', open_ports: [], fallback: null };
+        return (
+          <EgressInterfaceField
+            key={netName}
+            nodeName={name}
+            netName={netName}
+            addr={egress}
+            onChange={(v) => setAddress(netName, v.interface ? v : null)}
+            disabled={disabled}
+          />
+        );
+      }
+      const ip = typeof addr === 'string' ? addr : '';
+      return (
+        <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <IpField
+              id={`node-${name}-${netName}-ip`}
+              label={`Address on ${netName}`}
+              hint={
+                net.type === 'internal'
+                  ? 'Required, inside the subnet.'
+                  : isManaged(net)
+                    ? 'Inside the subnet; not the network, broadcast or gateway address.'
+                    : 'Inside the subnet.'
+              }
+              help={
+                net.type === 'internal'
+                  ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
+                  : isManaged(net)
+                    ? "This node's address on the managed network: listing it makes the node implement the network. Prefilled with the next free address. It is an entry point for clients outside the overlay; containers on other nodes cannot reach it and use the gateway (the first host address) instead."
+                    : "This node's fixed address on this network, inside its subnet."
+              }
+              configKey={`nodes.${name}.network.${netName}`}
+              value={ip}
+              onChange={(v) => setAddress(netName, v || null)}
+              disabled={disabled}
+            />
+          </div>
+          {!disabled && net.type !== 'internal' && (
+            <button
+              className="ghost"
+              onClick={() => setAddress(netName, null)}
+              aria-label={`remove ${netName} from ${name}`}
+              title={`Remove ${netName} from this node`}
+            >
+              <Icon name="close" />
+            </button>
+          )}
+          {isManaged(net) && (() => {
+            const err = managedNodeAddressError(fullDraft, name, netName);
+            return err ? (
+              <p className="field-error" style={{ flexBasis: '100%' }}>
+                <Icon name="alert-circle" /> {err}
+              </p>
+            ) : null;
+          })()}
+        </div>
+      );
+  };
+
   return (
-    <div className="card section">
-      <div className="section-head">
+    <div className="card section node-cfg">
+      <div className="section-head node-cfg__head">
         <h3 className="flex-row">
           <Icon name="nodes" /> {name}
         </h3>
+        <Tag>{node.role}</Tag>
         {!disabled && (
-          <button className="danger" onClick={onRemove}>
+          <button className="danger node-cfg__remove" onClick={onRemove}>
             <Icon name="trash" /> Remove node
           </button>
         )}
       </div>
+      <Disclosure title="General" defaultOpen>
       <SelectField
         id={`node-${name}-role`}
         label="Node role"
@@ -930,178 +1132,32 @@ export function NodeCard({
         disabled={disabled}
       />
 
-      <h4 className="flex-row">
-        <Icon name="network" /> Network addresses
-      </h4>
-      {networkEntries.map(([netName, net]) => {
+      </Disclosure>
+
+      <Disclosure title="Networks" count={shownNetworks.length} defaultOpen>
+      {shownNetworks.length === 0 && <p className="field-hint">No networks on this node.</p>}
+      {shownNetworks.map(([netName, net]) => {
+        const body = renderNetwork(netName, net);
+        if (!body) return null;
         const addr = node.network[netName];
-        if (net.type === 'nat' || net.type === 'container') {
-          // Not addressable per node: nothing to render here at all.
-          return null;
-        } else if (net.type === 'internal') {
-          // always shown, falls through below
-        } else if (net.type === 'wireguard') {
-          if (!(netName in node.network) && !pendingWireguard.includes(netName)) return null;
-        } else if (!(netName in node.network)) {
-          return null;
-        }
-        if (net.type === 'wireguard') {
-          const wg: InterfaceAddress | null =
-            typeof addr === 'string'
-              ? { interface: addr, open_ports: [] }
-              : addr && 'interface' in addr
-                ? {
-                    interface: addr.interface,
-                    open_ports: addr.open_ports ?? [],
-                  }
-                : null;
-          return (
-            <WireguardAddressField
-              key={netName}
-              nodeName={name}
-              netName={netName}
-              addr={wg}
-              onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports } : null)}
-              onCancel={
-                wg === null ? () => setPendingWireguard((prev) => prev.filter((n) => n !== netName)) : undefined
-              }
-              disabled={disabled}
-            />
-          );
-        }
-        if (net.type === 'public') {
-          const pub = (typeof addr === 'object' ? addr : {}) as Partial<PublicAddress>;
-          const update = (patch: Partial<PublicAddress>) => {
-            const merged: PublicAddress = {
-              ipv4: pub.ipv4 ?? null,
-              ipv6: pub.ipv6 ?? null,
-              domain: pub.domain ?? null,
-              open_ports: pub.open_ports ?? [],
-              ...patch,
-            };
-            const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain && merged.open_ports.length === 0;
-            setAddress(netName, empty ? null : merged);
-          };
-          return (
-            <div key={netName} className="card" style={{ marginBottom: 8 }}>
-              <div className="section-head">
-                <strong>{netName}</strong> <span className="faint">(public)</span>
-                {!disabled && (
-                  <button
-                    className="ghost"
-                    onClick={() => setAddress(netName, null)}
-                    aria-label={`remove ${netName} from ${name}`}
-                    title={`Remove ${netName} from this node`}
-                  >
-                    <Icon name="close" />
-                  </button>
-                )}
-              </div>
-              <TextField
-                id={`node-${name}-${netName}-ipv4`}
-                label="Public IPv4"
-                value={pub.ipv4 ?? ''}
-                onChange={(v) => update({ ipv4: v || null })}
-                hint="Publishes an A record."
-                help="This node's public IPv4 address on this network. Publishes an A record if the network has a domain."
-                disabled={disabled}
-              />
-              <TextField
-                id={`node-${name}-${netName}-ipv6`}
-                label="Public IPv6"
-                value={pub.ipv6 ?? ''}
-                onChange={(v) => update({ ipv6: v || null })}
-                hint="Publishes an AAAA record."
-                help="This node's public IPv6 address on this network. Publishes an AAAA record if the network has a domain."
-                disabled={disabled}
-              />
-              <TextField
-                id={`node-${name}-${netName}-domain`}
-                label="Alias hostname"
-                value={pub.domain ?? ''}
-                onChange={(v) => update({ domain: v || null })}
-                hint="Points DNS at a hostname instead of an IP."
-                help="Points this node's DNS record at another hostname instead of a fixed IP, e.g. for a dynamic-DNS address."
-                disabled={disabled}
-              />
-              <OpenPortsEditor
-                idPrefix={`node-${name}-${netName}`}
-                hint="Ports this node's router forwards to it here. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
-                ports={pub.open_ports ?? []}
-                onChange={(open_ports) => update({ open_ports })}
-                disabled={disabled}
-              />
-            </div>
-          );
-        }
-        if (net.type === 'egress') {
-          const egress: InterfaceAddress =
-            typeof addr === 'string'
-              ? { interface: addr, open_ports: [], fallback: null }
-              : addr && 'interface' in addr
-                ? {
-                    interface: addr.interface,
-                    open_ports: addr.open_ports ?? [],
-                    fallback: addr.fallback ?? null,
-                  }
-                : { interface: '', open_ports: [], fallback: null };
-          return (
-            <EgressInterfaceField
-              key={netName}
-              nodeName={name}
-              netName={netName}
-              addr={egress}
-              onChange={(v) => setAddress(netName, v.interface ? v : null)}
-              disabled={disabled}
-            />
-          );
-        }
-        const ip = typeof addr === 'string' ? addr : '';
+        const sum = netSummary(addr);
+        const addrErr = isManaged(net) ? managedNodeAddressError(fullDraft, name, netName) : null;
+        const pendingWg = net.type === 'wireguard' && !(netName in node.network);
         return (
-          <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
-            <div style={{ flex: 1 }}>
-              <IpField
-                id={`node-${name}-${netName}-ip`}
-                label={`Address on ${netName}`}
-                hint={
-                  net.type === 'internal'
-                    ? 'Required, inside the subnet.'
-                    : isManaged(net)
-                      ? 'Inside the subnet; not the network, broadcast or gateway address.'
-                      : 'Inside the subnet.'
-                }
-                help={
-                  net.type === 'internal'
-                    ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
-                    : isManaged(net)
-                      ? "This node's address on the managed network: listing it makes the node implement the network. Prefilled with the next free address. It is an entry point for clients outside the overlay; containers on other nodes cannot reach it and use the gateway (the first host address) instead."
-                      : "This node's fixed address on this network, inside its subnet."
-                }
-                configKey={`nodes.${name}.network.${netName}`}
-                value={ip}
-                onChange={(v) => setAddress(netName, v || null)}
-                disabled={disabled}
-              />
-            </div>
-            {!disabled && net.type !== 'internal' && (
-              <button
-                className="ghost"
-                onClick={() => setAddress(netName, null)}
-                aria-label={`remove ${netName} from ${name}`}
-                title={`Remove ${netName} from this node`}
-              >
-                <Icon name="close" />
-              </button>
-            )}
-            {isManaged(net) && (() => {
-              const err = managedNodeAddressError(fullDraft, name, netName);
-              return err ? (
-                <p className="field-error" style={{ flexBasis: '100%' }}>
-                  <Icon name="alert-circle" /> {err}
-                </p>
-              ) : null;
-            })()}
-          </div>
+          <Disclosure
+            key={netName}
+            title={
+              <>
+                <strong>{netName}</strong> <Tag>{netKind(net)}</Tag>
+                {addrErr && <Tag tone="danger">invalid address</Tag>}
+              </>
+            }
+            summary={[sum.address, sum.ports].filter(Boolean).join(' · ') || (net.type === 'internal' ? 'address required' : 'not configured')}
+            open={pendingWg || openNets.includes(netName)}
+            onOpenChange={(o) => setOpenNets((prev) => (o ? [...prev, netName] : prev.filter((n) => n !== netName)))}
+          >
+            {body}
+          </Disclosure>
         );
       })}
 
@@ -1127,6 +1183,7 @@ export function NodeCard({
             onClick={() => {
               if (!addingNetwork) return;
               addNetworkDefault(addingNetwork);
+              setOpenNets((prev) => (prev.includes(addingNetwork) ? prev : [...prev, addingNetwork]));
               setAddingNetwork('');
             }}
             disabled={!addingNetwork}
@@ -1136,9 +1193,9 @@ export function NodeCard({
         </div>
       )}
 
-      <h4 className="flex-row">
-        <Icon name="drives" /> Drives
-      </h4>
+      </Disclosure>
+
+      <Disclosure title="Drives" count={drivePairs.length}>
       <KeyValueList
         entries={drivePairs}
         onChange={(entries) => onChange({ drives: Object.fromEntries(entries.filter(([k]) => k)) })}
@@ -1147,6 +1204,7 @@ export function NodeCard({
         keyOptions={Object.keys(drives)}
         disabled={disabled}
       />
+      </Disclosure>
     </div>
   );
 }

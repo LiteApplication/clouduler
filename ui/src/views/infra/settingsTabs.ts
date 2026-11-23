@@ -33,6 +33,14 @@ export const SETTINGS_TABS: SettingsTab[] = [
     group: 'Cluster',
   },
   {
+    id: 'nodes',
+    label: 'Nodes',
+    desc: 'Role, ports, addresses and drives per node',
+    sub: 'How each node is configured. Pick a node, then change its role, addresses or drive paths.',
+    icon: 'nodes',
+    group: 'Cluster',
+  },
+  {
     id: 'network',
     label: 'Network',
     desc: 'Networks, dashboard, proxy, DNS',

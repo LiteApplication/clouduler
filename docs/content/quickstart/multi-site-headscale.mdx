@@ -132,7 +132,7 @@ Headscale must be reachable at `https://headscale.example.com` by every machine,
 
 1. Create the Cloudflare token ([guide](/docs/guides/cloudflare-api-token)) and store it under **Settings**, **Network**, **Cloudflare DNS**.
 2. Add a network named `public` of type public with the domain <code><Var plain name="zone" fallback="example.com" /></code> on the **Networks** page.
-3. On the **Nodes** page give <code><Var plain name="n1" fallback="atlas" /></code> the address <code><Var plain name="pubip" fallback="203.0.113.5" /></code> on `public`.
+3. In **Settings > Nodes**, open the tab of <code><Var plain name="n1" fallback="atlas" /></code>, expand **Networks** and give it the address <code><Var plain name="pubip" fallback="203.0.113.5" /></code> on `public`.
 4. Open TCP 80 and 443 in the VPS provider's firewall and in `ufw` if you use it. Port 80 only redirects to HTTPS; certificates are issued through DNS, so it is not needed for that.
 5. Leave the ACME directory URL empty (Let's Encrypt production). The tailscale clients in step 4 need a certificate their system trusts, and a staging certificate would make `tailscale up` fail. Quick start 1 explains why switching from staging to production later is awkward.
 
@@ -332,7 +332,7 @@ What happens when you apply it: the leader dials the new address, requires that 
 <UiCli.Ui>
 
 1. Open **Settings**, **Network**, **Networks**. On the internal network change the **Address range** to <code><Var plain name="tailnet" fallback="100.64.0.0/10" /></code>.
-2. On the **Nodes** page change <code><Var plain name="n1" fallback="atlas" /></code>'s address on the internal network to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>.
+2. In **Settings > Nodes**, open the tab of <code><Var plain name="n1" fallback="atlas" /></code>, expand **Networks** and change its address on the internal network to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>.
 3. Under **Changes to apply** press **Validate config**. Both edits are in the same draft.
 4. Press **Apply changes**. The edit takes effect at once, so the page may lose its connection until you open the dashboard at the new address.
 

@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
+import { Icon } from './Icon';
 import { Link } from 'react-router-dom';
 import { cx } from './cx';
 
@@ -68,6 +69,53 @@ export function Panel({
       )}
       {children}
     </Tag>
+  );
+}
+
+/** A collapsible block: a header button (title, optional summary, optional
+ *  count) that shows or hides its children. Uncontrolled via `defaultOpen`, or
+ *  controlled with `open` + `onOpenChange`. Children are not mounted while closed. */
+export function Disclosure({
+  title,
+  summary,
+  count,
+  defaultOpen = false,
+  open: openProp,
+  onOpenChange,
+  children,
+  className,
+}: {
+  title: ReactNode;
+  /** Short text on the header's right, shown while collapsed or open. */
+  summary?: ReactNode;
+  count?: number | string;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: ReactNode;
+  className?: string;
+}) {
+  const [inner, setInner] = useState(defaultOpen);
+  const open = openProp ?? inner;
+  const bodyId = useId();
+  const toggle = () => {
+    setInner(!open);
+    onOpenChange?.(!open);
+  };
+  return (
+    <div className={cx('disc', open && 'disc--open', className)}>
+      <button type="button" className="disc__h" aria-expanded={open} aria-controls={bodyId} onClick={toggle}>
+        <Icon name="chevron-right" size={16} className="disc__chev" />
+        <span className="disc__t">{title}</span>
+        {count != null && <span className="disc__n">{count}</span>}
+        {summary != null && summary !== '' && <span className="disc__s">{summary}</span>}
+      </button>
+      {open && (
+        <div className="disc__b" id={bodyId}>
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 

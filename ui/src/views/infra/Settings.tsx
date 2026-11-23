@@ -15,7 +15,7 @@ import './settings.css';
 
 export { SETTINGS_TABS, CONFIG_SLUG_TAB } from './settingsTabs';
 
-const CONFIG_TABS = ['general', 'network', 'storage', 'security'];
+const CONFIG_TABS = ['general', 'nodes', 'network', 'storage', 'security'];
 
 /** Below this width the menu and the section take turns instead of sitting
  *  side by side. */
@@ -34,7 +34,7 @@ function useCompact(): boolean {
 }
 
 export function Settings() {
-  const { tab } = useParams();
+  const { tab, node } = useParams();
   const compact = useCompact();
   const { isAdmin } = useAuth();
   const cfg = useSettingsConfig();
@@ -95,7 +95,7 @@ export function Settings() {
       <div className="settings__body">
         {!compact && menu}
         <div className="settings__main">
-          {isConfig && <ConfigTab tab={current.id} cfg={cfg} />}
+          {isConfig && <ConfigTab tab={current.id} cfg={cfg} node={node} />}
           {current.id === 'secrets' && <SettingsSecrets sheetOpen={sheet} onClose={() => setSheet(false)} />}
           {current.id === 'access' && <SettingsAccess sheetOpen={sheet} onClose={() => setSheet(false)} />}
           {current.id === 'self-update' && <SettingsUpdate />}

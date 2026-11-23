@@ -96,7 +96,7 @@ function Shell() {
                 <Route path="/storage/:tab?" element={<Storage />} />
                 <Route path="/storage/drives/:name" element={<DriveDetail />} />
                 <Route path="/networks/:name" element={<NetworkDetail />} />
-                <Route path="/settings/:tab?" element={<Settings />} />
+                <Route path="/settings/:tab?/:node?" element={<Settings />} />
                 <Route path="/more" element={<PhoneMore />} />
 
                 {/* Old URLs, kept working for bookmarks and links in old views. */}

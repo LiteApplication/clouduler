@@ -19,7 +19,7 @@ export {
   type PlacementServer,
   type PlacementConstraint,
 } from './PlacementTable';
-export { PageHeader, Panel, KV, Tag, Spark, StepBar, type Crumb, type TagTone } from './primitives';
+export { PageHeader, Panel, Disclosure, KV, Tag, Spark, StepBar, type Crumb, type TagTone } from './primitives';
 export { ToastProvider, useToast } from './toast';
 export { ConfirmProvider, useConfirm, type ConfirmOptions } from './confirm';
 export { cx } from './cx';

@@ -157,8 +157,8 @@ export const CONFIG_PAGES: ConfigPage[] = [
 ];
 
 /** Page owning a given diff path, so Review can link straight to its editor.
- *  A `nodes.<name>.*` path has no page of its own because that config now lives on
- *  the node's own detail page, so it never matches here; see
+ *  A `nodes.<name>.*` path has no page of its own because that config now lives in
+ *  Settings > Nodes, so it never matches here; see
  *  `nodePathTarget` for that case. */
 export function pageForPath(path: string): ConfigPage | undefined {
   // Longest key wins, so `proxy.auth.*` lands on Service login, not Proxy.
@@ -175,8 +175,8 @@ export function pageForPath(path: string): ConfigPage | undefined {
   return best;
 }
 
-/** The node detail route owning a `nodes.<name>.*` diff path, if any. */
+/** The Settings > Nodes route owning a `nodes.<name>.*` diff path, if any. */
 export function nodePathTarget(path: string): string | undefined {
   const match = /^nodes\.([^.]+)/.exec(path);
-  return match ? `/nodes/${encodeURIComponent(match[1])}` : undefined;
+  return match ? `/settings/nodes/${encodeURIComponent(match[1])}` : undefined;
 }

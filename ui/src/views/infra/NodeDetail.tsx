@@ -2,19 +2,18 @@
 // drain / activate / retire actions.
 
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, nodeLogsUrl } from '../../api/client';
 import type { NodeAddress, NodeDetail as NodeDetailT, NodeLogLine } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, Button, ContainerRow, LogView, Meter, PageHeader, Panel, KV, StatusBadge, Tag, useConfirm, useToast, type LogViewLine } from '../../ds';
+import { Banner, Button, ContainerRow, Icon, LogView, Meter, PageHeader, Panel, KV, StatusBadge, Tag, useConfirm, useToast, type LogViewLine } from '../../ds';
 import { useEventSource } from '../../hooks/useEventSource';
 import { cpuPercent, memPercent } from '../../hooks/useNodeMetrics';
 import { formatBytes, formatUptime } from '../../lib/format';
 import { instanceStatus, nodeStatus } from '../../lib/status';
 import { useInstances } from '../../state/instancesStore';
 import { useClusterState } from '../../state/store';
-import { useConfigApply, useConfigDraft } from '../config/draft';
-import { NodeCard as NodeConfigForm } from '../config/sections';
+import { useConfigDraft } from '../config/draft';
 
 export function NodeDetail() {
   const { name = '' } = useParams();
@@ -26,9 +25,7 @@ export function NodeDetail() {
   const toast = useToast();
   const [detail, setDetail] = useState<NodeDetailT | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
-  const { original, draft, setDraft, reload } = useConfigDraft();
-  const { errors: configErrors, busy, apply, clearErrors } = useConfigApply(reload);
+  const { draft } = useConfigDraft();
 
   useEffect(() => {
     let cancelled = false;
@@ -96,16 +93,6 @@ export function NodeDetail() {
     }
   };
 
-  const cancelEditing = () => {
-    // Drop only this node's staged edits; unrelated drafts elsewhere stay put.
-    if (original && draft) setDraft({ ...draft, nodes: { ...draft.nodes, [name]: original.nodes[name] } });
-    clearErrors();
-    setEditing(false);
-  };
-  const save = async () => {
-    if (draft && (await apply(draft))) setEditing(false);
-  };
-
   if (!node && !configNode) {
     if (!cluster || !draft) return <p className="cl-muted">Loading node…</p>;
     return <Banner tone="warn" title={`No node named ${name}`}>Check the name on the Nodes page.</Banner>;
@@ -170,11 +157,11 @@ export function NodeDetail() {
 
           <Panel
             title="Networks and drives"
-            actions={isAdmin && !editing && configNode && <Button size="sm" icon="edit" onClick={() => { clearErrors(); setEditing(true); }}>Edit</Button>}
+            actions={isAdmin && configNode && <Link to={`/settings/nodes/${encodeURIComponent(name)}`} className="cl-btn cl-btn--secondary cl-btn--sm"><Icon name="edit" size={16} /> Edit</Link>}
           >
             {!draft && <p className="cl-muted">Loading configuration…</p>}
             {draft && !configNode && <p className="cl-sm cl-muted">This node is not in the cluster config yet.</p>}
-            {configNode && !editing && (
+            {configNode && (
               <>
                 <KV items={[
                   ['Role', configNode.role],
@@ -219,38 +206,6 @@ export function NodeDetail() {
           </Panel>
         )}
 
-        {configNode && editing && draft && (
-          <Panel title="Edit node config">
-            <div className="cfg">
-              <NodeConfigForm
-                name={name}
-                node={configNode}
-                networks={draft.networks}
-                drives={draft.drives}
-                cluster={draft}
-                onChange={(patch) => setDraft({ ...draft, nodes: { ...draft.nodes, [name]: { ...configNode, ...patch } } })}
-                onRemove={async () => {
-                  if (!(await confirm({ title: `Remove ${name} from the cluster config?`, body: 'This does not remove the node itself.', confirmLabel: 'Remove from config', confirmVariant: 'danger' }))) return;
-                  const next = { ...draft.nodes };
-                  delete next[name];
-                  setDraft({ ...draft, nodes: next });
-                }}
-                disabled={!isAdmin || busy}
-              />
-            </div>
-            {configErrors.length > 0 && (
-              <Banner tone="danger" title="Fix these before saving">
-                {configErrors.map((e, i) => (
-                  <span key={i} style={{ display: 'block' }}>{e.path && <code>{e.path}: </code>}{e.message}</span>
-                ))}
-              </Banner>
-            )}
-            <div className="row">
-              <Button onClick={cancelEditing} disabled={busy}>Cancel</Button>
-              <Button variant="primary" icon="check" loading={busy} onClick={() => void save()}>Save</Button>
-            </div>
-          </Panel>
-        )}
 
         <Panel title={`Containers on ${name}`} flush>
           {mine.length === 0 && <p className="cl-sm cl-muted" style={{ padding: 'var(--space-4)' }}>Nothing is running here.</p>}

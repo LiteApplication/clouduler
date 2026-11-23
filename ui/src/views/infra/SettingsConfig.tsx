@@ -12,11 +12,13 @@ import { CONFIG_PAGES, nodePathTarget, pageForPath } from '../config/pages';
 import type { SectionProps } from '../config/sections';
 import type { DiffEntry } from '../../lib/configDiff';
 import { CONFIG_SLUG_TAB } from './settingsTabs';
+import { SettingsNodes } from './SettingsNodes';
 
 /** Unsaved-field count for one settings tab. */
 export function tabChanges(diff: DiffEntry[], tab: string): number {
   // Attribute each diff to its single owning page, so `proxy.auth.*` counts
   // under Service login only, not also under Proxy.
+  if (tab === 'nodes') return diff.filter((d) => d.path.startsWith('nodes.') && !pageForPath(d.path)).length;
   return diff.filter((d) => {
     const page = pageForPath(d.path);
     return !!page && CONFIG_SLUG_TAB[page.slug] === tab;
@@ -39,9 +41,10 @@ export function primaryAction(cfg: SettingsConfig) {
   };
 }
 
-export function ConfigTab({ tab, cfg }: {
+export function ConfigTab({ tab, cfg, node }: {
   tab: string;
   cfg: SettingsConfig;
+  node?: string;
 }) {
   const { isAdmin } = useAuth();
   const toast = useToast();
@@ -73,6 +76,7 @@ export function ConfigTab({ tab, cfg }: {
           ))}
         </Banner>
       )}
+      {tab === 'nodes' && <SettingsNodes cfg={cfg} node={node} />}
       {pages.map(({ slug, label, blurb, Component }) => (
         <Panel key={slug} title={label} className="settings__panel">
           <span id={`cfg-${slug}`} className="settings__anchor" />

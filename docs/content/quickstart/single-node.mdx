@@ -328,7 +328,7 @@ To get a certificate that browsers trust, Clouduler needs to prove to Let's Encr
 2. In the web UI open **Settings**, then **Network**, and on the **Cloudflare DNS** page turn on **Manage DNS with Cloudflare**, set **DNS zones** to `example.com`, and use **Save token** to store the token.
 3. On the **Reverse proxy** page turn on **Issue certificates automatically**, set **Contact email**, and while you're testing set **ACME directory URL** to Let's Encrypt's staging address `https://acme-staging-v02.api.letsencrypt.org/directory`.
 4. On the **Networks** page add a network named `wan` of type public with the domain `example.com`.
-5. On the **Nodes** page give <code><Var plain name="hostname" fallback="atlas" /></code> its public IPv4 address for `wan`. A service on a public network can only be placed on a node that has a public address for it.
+5. In **Settings > Nodes**, open the node's tab, expand **Networks**, then **wan**, and give <code><Var plain name="hostname" fallback="atlas" /></code> its public IPv4 address. Apply the change. A service on a public network can only be placed on a node that has a public address for it.
 
 :::danger Set the staging URL first
 If you leave **ACME directory URL** empty, Clouduler uses Let's Encrypt production, which rate-limits failures. Test on staging, and be aware that the ACME account Clouduler creates is remembered together with the directory it was created against. Clearing the field later does not re-point that account, so only use staging when you are ready to wipe the account file (`acme-account.json` in the data directory) before switching.

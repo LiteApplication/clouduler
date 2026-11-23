@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ConfirmProvider, ToastProvider } from '../../ds';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -130,12 +130,11 @@ describe('NodeDetail configuration section', () => {
     getConfiguration.mockResolvedValue(clusterConfig);
   });
 
-  it('shows the node config read-only with an Edit button, admin only', async () => {
+  it('shows the node config read-only with an Edit link, admin only', async () => {
     renderNodeDetail();
     await waitFor(() => expect(screen.getByText('manager')).toBeInTheDocument());
     expect(screen.getByText('10.10.0.1')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument();
-    // The editing form is not mounted until Edit is clicked.
+    expect(screen.getByRole('link', { name: /edit/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
   });
 
@@ -164,32 +163,17 @@ describe('NodeDetail configuration section', () => {
     expect(screen.queryByText('GPUs')).not.toBeInTheDocument();
   });
 
-  it('hides the Edit button for a viewer', async () => {
+  it('hides the Edit link for a viewer', async () => {
     isAdmin = false;
     renderNodeDetail();
     await waitFor(() => expect(screen.getByText('manager')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /edit/i })).not.toBeInTheDocument();
   });
 
-  it('entering edit mode shows the node card form with Save and Cancel', async () => {
+  it('links Edit to the node tab in Settings', async () => {
     renderNodeDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
-
-    expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
-    // The NodeCard editing form exposes the RPC port as a number field.
-    expect(screen.getByLabelText(/rpc port/i)).toHaveValue(7373);
-  });
-
-  it('cancelling edit mode returns to the read-only view without saving', async () => {
-    renderNodeDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
-    expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
-    expect(applyConfiguration).not.toHaveBeenCalled();
+    const link = await screen.findByRole('link', { name: /edit/i });
+    expect(link).toHaveAttribute('href', '/settings/nodes/n1');
+    expect(screen.queryByLabelText(/rpc port/i)).not.toBeInTheDocument();
   });
 });
