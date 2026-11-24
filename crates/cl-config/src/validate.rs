@@ -809,11 +809,11 @@ impl ClusterConfig {
                 format!("no network named {}", self.web.network),
             ));
         };
-        if net.is_managed() {
+        if net.is_managed() && self.addressed_nodes_on(&self.web.network).is_empty() {
             return Err(ConfigError::invalid(
                 "web.network",
                 format!(
-                    "{} is a managed network: a node's address there is only reachable through that node, so the dashboard cannot be published on it; pick another network",
+                    "{} is a managed network and no node has an IP address on it; the dashboard is served from node addresses, so give at least one node an address there or pick another network",
                     self.web.network
                 ),
             ));
@@ -971,11 +971,11 @@ impl ClusterConfig {
                         format!("no network named {network}"),
                     ));
                 };
-                if net.is_managed() {
+                if net.is_managed() && self.addressed_nodes_on(network).is_empty() {
                     return Err(ConfigError::invalid(
                         "proxy.auth.networks",
                         format!(
-                            "{network} is a managed network: a node's address there is only reachable through that node, so the login page cannot be published on it; pick another network"
+                            "{network} is a managed network and no node has an IP address on it; the login page is served from node addresses, so give at least one node an address there or pick another network"
                         ),
                     ));
                 }
@@ -2572,20 +2572,63 @@ cloudflare:
         assert!(err.contains("nodes."), "{err}");
     }
 
-    #[test]
-    fn the_dashboard_and_login_page_cannot_sit_on_a_managed_network() {
-        let err = parse(&[
+    /// BASE plus a managed network `mgd` (with a domain) where n1 and n2 hold
+    /// the given addresses (`~` for none), with the dashboard on `web` and the
+    /// login offered on `login_networks`.
+    fn managed_portal(
+        n1: &str,
+        n2: &str,
+        web: &str,
+        login_networks: &str,
+    ) -> Result<ClusterConfig> {
+        let auth = format!(
+            "proxy:\n  auth:\n    host: login\n    networks: [{login_networks}]\n    issuer: https://id.example.com\n    client_id: c\n"
+        );
+        parse(&[
             (
                 "  wan:       { type: public,   domain: example.com }",
                 "  wan:       { type: public,   domain: example.com }\n  mgd:       { type: private, subnet: 192.168.32.0/24, managed: true, domain: m.example.com }",
             ),
-            ("      lan: 192.168.1.1\n", "      lan: 192.168.1.1\n      mgd: 192.168.32.2\n"),
-            ("web: { address: cloud, network: tailscale }", "web: { address: cloud, network: mgd }"),
+            ("      lan: 192.168.1.1\n", &format!("      lan: 192.168.1.1\n      mgd: {n1}\n")),
+            ("      tailscale: 10.10.0.2\n", &format!("      tailscale: 10.10.0.2\n      mgd: {n2}\n")),
+            ("web: { address: cloud, network: tailscale }", &format!("web: {{ address: cloud, network: {web} }}")),
+            ("  zones: [example.com]\n", &format!("  zones: [example.com]\n{auth}")),
         ])
-        .unwrap_err()
-        .to_string();
+    }
+
+    #[test]
+    fn the_dashboard_and_login_page_may_sit_on_a_managed_network_with_an_addressed_node() {
+        // One addressed node is enough, whichever it is.
+        let cfg =
+            managed_portal("192.168.32.2", "~", "mgd", "lan, mgd").expect("n1 holds an address");
+        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
+        managed_portal("~", "192.168.32.3", "mgd", "mgd").expect("n2 holds an address");
+        let both = managed_portal("192.168.32.2", "192.168.32.3", "mgd", "lan, mgd").expect("both");
+        assert_eq!(both.addressed_nodes_on("mgd"), vec!["n1", "n2"]);
+    }
+
+    #[test]
+    fn the_dashboard_needs_an_addressed_node_on_a_managed_network() {
+        let err = managed_portal("~", "~", "mgd", "lan")
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("web.network") && err.contains("managed network"),
+            err.contains("web.network")
+                && err.contains("managed network")
+                && err.contains("no node has an IP address"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_login_page_needs_an_addressed_node_on_a_managed_network() {
+        let err = managed_portal("~", "~", "tailscale", "lan, mgd")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("proxy.auth.networks")
+                && err.contains("managed network")
+                && err.contains("no node has an IP address"),
             "{err}"
         );
     }

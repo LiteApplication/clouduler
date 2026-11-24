@@ -227,6 +227,10 @@ struct Entry {
     nodes: Vec<String>,
     /// False when the route opted out of the per-network address shortcut.
     private_shortcut: bool,
+    /// The login portal or the dashboard: answered by a node's own address
+    /// even on a managed network, which `nodes` already limits to the nodes
+    /// holding one. Any other name there is answered by container addresses.
+    node_served: bool,
 }
 
 /// One view per network a client can be in (every subnetted and public
@@ -251,18 +255,33 @@ fn views_for(
                 network: network.clone(),
                 nodes: nodes.iter().cloned().collect(),
                 private_shortcut: !no_private.contains(&(host.clone(), network.clone())),
+                node_served: cfg.proxy.auth.as_ref().is_some_and(|auth| {
+                    auth.host == *host && auth.covers(network) && cfg.is_managed_network(network)
+                }),
             });
     }
     // Writes only land on the leader, so the dashboard names no other node.
     if let (Some(leader), Some(net)) = (leader, cfg.networks.get(&cfg.web.network)) {
         if let Some((name, _)) = cfg.nodes.iter().find(|(_, n)| n.id == leader.id) {
+            // On a managed network only a node holding an address there can
+            // answer: the leader if it does, otherwise any that does (reads
+            // work on every node, a write on a follower is redirected).
+            let nodes = if net.is_managed() && leader.ip_on(&cfg.web.network).is_none() {
+                cfg.addressed_nodes_on(&cfg.web.network)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                vec![name.clone()]
+            };
             by_name
                 .entry(qualify(&cfg.web.address, net.domain.as_deref()))
                 .or_default()
                 .push(Entry {
                     network: cfg.web.network.clone(),
-                    nodes: vec![name.clone()],
+                    nodes,
                     private_shortcut: true,
+                    node_served: net.is_managed(),
                 });
         }
     }
@@ -405,7 +424,7 @@ fn answers_for(
                 &entry.network
             };
             let node_records = |net: &str| {
-                if cfg.is_managed_network(net) {
+                if cfg.is_managed_network(net) && !entry.node_served {
                     Err(cl_dns::DnsError::Invalid(format!(
                         "a node's address on the managed network {net} is not handed out"
                     )))
@@ -551,6 +570,62 @@ mod tests {
         let none = BTreeMap::from([(("files".to_string(), "mgd".to_string()), BTreeSet::new())]);
         add_managed_containers(&cfg, &mut empty, &none);
         assert!(answer(&empty, "mgd", "files.m.example.com").is_none());
+    }
+
+    /// The login portal and the dashboard are the exception on a managed
+    /// network: they are served from a node's own address there, so they name
+    /// only the nodes holding one, while any other name stays refused.
+    #[test]
+    fn the_portal_and_dashboard_on_a_managed_network_name_addressed_nodes() {
+        let mut cfg = managed_cfg();
+        cfg.proxy.auth = Some(
+            serde_yaml::from_str(
+                "{ host: login, networks: [mgd], issuer: 'https://id.example.com', client_id: c }",
+            )
+            .unwrap(),
+        );
+        cfg.web.network = "mgd".into();
+        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
+
+        // As desired_dns_hosts builds it: only the addressed node.
+        let rows = hosts(&[("login", "mgd", &["n1"]), ("files", "mgd", &["n1", "n2"])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "mgd", "login.m.example.com"),
+            Some(&[a([192, 168, 32, 2])][..])
+        );
+        // An ordinary route there is still never answered with a node address.
+        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
+        assert!(views["mgd"].refused.contains("files.m.example.com"));
+        // A network that does not reach mgd is refused the portal.
+        assert!(answer(&views, "wan", "login.m.example.com").is_none());
+
+        // The dashboard goes to the leader when it holds an address there.
+        let leader = cfg.nodes["n1"].clone();
+        let views = views_for(
+            &cfg,
+            &alloc(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Some(&leader),
+        );
+        assert_eq!(
+            answer(&views, "mgd", "cloud.m.example.com"),
+            Some(&[a([192, 168, 32, 2])][..])
+        );
+        // Otherwise to the nodes that do, never to an address-less leader.
+        let leader = cfg.nodes["n2"].clone();
+        let views = views_for(
+            &cfg,
+            &alloc(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Some(&leader),
+        );
+        assert_eq!(
+            answer(&views, "mgd", "cloud.m.example.com"),
+            Some(&[a([192, 168, 32, 2])][..])
+        );
     }
 
     /// `private_shortcut: false` hands a LAN client the route's own address.

@@ -63,6 +63,25 @@ export function managedNetworkNames(cfg: ClusterConfig): string[] {
     .map(([name]) => name);
 }
 
+/** Nodes holding an IPv4 address on `network` (ClusterConfig::addressed_nodes_on). */
+export function addressedNodesOn(cfg: ClusterConfig, network: string): string[] {
+  return Object.entries(cfg.nodes)
+    .filter(([, node]) => typeof node.network[network] === 'string' && node.network[network] !== '')
+    .map(([name]) => name);
+}
+
+/**
+ * Why `network` cannot carry the dashboard or the login portal, or null: a
+ * managed network is only usable when at least one node has an address on it,
+ * since those pages are served from node addresses (validate_web and
+ * validate_proxy in cl-config validate.rs).
+ */
+export function managedPortalError(cfg: ClusterConfig, network: string, what: string): string | null {
+  if (!isManaged(cfg.networks[network])) return null;
+  if (addressedNodesOn(cfg, network).length > 0) return null;
+  return `${network} is a managed network and no node has an IP address on it; ${what} is served from node addresses, so give at least one node an address there`;
+}
+
 /** Network, broadcast, gateway and every node address on `network`. */
 export function managedReserved(cfg: ClusterConfig, network: string): Set<number> {
   const out = new Set<number>();

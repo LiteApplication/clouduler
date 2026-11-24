@@ -1493,6 +1493,17 @@ impl ClusterConfig {
         out
     }
 
+    /// Names of the nodes holding an IP address on `network`. On a managed
+    /// network only these can serve the login portal and the dashboard, since
+    /// a node's address there is the one a client is pointed to.
+    pub fn addressed_nodes_on(&self, network: &str) -> Vec<&String> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.ip_on(network).is_some())
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     /// Names of every public or wireguard network, whose outside reachability
     /// depends on a specific node, so a raw `x-clouduler.expose` port only
     /// schedules onto a node that has it open.

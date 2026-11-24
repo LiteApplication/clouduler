@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClusterConfig } from '../api/types';
-import { managedNetworkError, managedNodeAddressError } from './managedNetwork';
+import { addressedNodesOn, managedNetworkError, managedNodeAddressError, managedPortalError } from './managedNetwork';
 
 function cfg(subnet: string, addrs: Record<string, string>, extra: Record<string, unknown> = {}): ClusterConfig {
   return {
@@ -37,5 +37,16 @@ describe('managed networks', () => {
     expect(managedNodeAddressError(c, 'a', 'mgd')).toMatch(/no IPv4 address on the internal network ts/);
     (c.nodes.a.network as Record<string, unknown>).ts = '10.10.0.1';
     expect(managedNodeAddressError(c, 'a', 'mgd')).toBeNull();
+  });
+  it('lets the dashboard and login sit on a managed network with an addressed node', () => {
+    const c = cfg('192.168.32.0/24', { a: '192.168.32.2' });
+    (c.nodes as Record<string, unknown>).b = { network: { mgd: null } };
+    expect(addressedNodesOn(c, 'mgd')).toEqual(['a']);
+    expect(managedPortalError(c, 'mgd', 'the login page')).toBeNull();
+    expect(managedPortalError(c, 'lan', 'the login page')).toBeNull();
+    const none = cfg('192.168.32.0/24', {});
+    (none.nodes as Record<string, unknown>).b = { network: { mgd: null } };
+    expect(managedPortalError(none, 'mgd', 'the dashboard')).toMatch(/no node has an IP address/);
+    expect(managedPortalError(none, 'lan', 'the dashboard')).toBeNull();
   });
 });

@@ -1277,13 +1277,23 @@ pub fn desired_dns_hosts(
             .or_default()
             .extend(all_nodes.clone());
     }
-    // Any node can answer the login portal.
+    // Any node can answer the login portal, except on a managed network,
+    // where a client is pointed at a node's own address there: only the nodes
+    // that hold one serve it.
     if let Some(auth) = &cfg.proxy.auth {
         for network in &auth.networks {
+            let nodes: BTreeSet<String> = if cfg.is_managed_network(network) {
+                cfg.addressed_nodes_on(network)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                all_nodes.clone()
+            };
             hosts
                 .entry((auth.host.clone(), network.clone()))
                 .or_default()
-                .extend(all_nodes.clone());
+                .extend(nodes);
         }
     }
     hosts
@@ -1420,9 +1430,10 @@ fn desired_records(
     let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
 
     // A node's address on a managed network is only reachable through that
-    // node, so it never goes to the provider (validation keeps the dashboard and
-    // the login page off such networks; stored routes and redirects that predate
-    // it are reported by `unaddressed_hosts`).
+    // node, so it never goes to the provider. That covers the dashboard and the
+    // login page too: on a managed network they are answered by the client dns
+    // server alone (stored routes and redirects that predate the ban are
+    // reported by `unaddressed_hosts`).
     if let Some(leader) = leader_node(cfg, leader_id).filter(|_| {
         publishes_dns(cfg, &cfg.web.network) && !cfg.is_managed_network(&cfg.web.network)
     }) {
@@ -2524,6 +2535,51 @@ services:
             "{records:?}"
         );
         assert!(unaddressed_hosts(&cfg, &state).is_empty());
+    }
+
+    /// The login portal on a managed network is served only by the nodes that
+    /// hold an address there, and its record never reaches the provider.
+    #[test]
+    fn the_login_portal_on_a_managed_network_names_only_addressed_nodes() {
+        let (mut cfg, state) = managed_published();
+        cfg.networks.get_mut("mgd").unwrap().domain = Some("m.example.com".into());
+        cfg.proxy.auth = Some(
+            serde_yaml::from_str(
+                "{ host: login, networks: [default, mgd], issuer: 'https://id.example.com', client_id: c }",
+            )
+            .unwrap(),
+        );
+        let mut n2 = cfg.nodes["n1"].clone();
+        n2.id = uuid::Uuid::new_v4();
+        n2.network.remove("mgd");
+        n2.network.insert(
+            "default".into(),
+            cl_config::NodeAddress::Ip("10.10.0.2".parse().unwrap()),
+        );
+        cfg.nodes.insert("n2".into(), n2);
+        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
+
+        let hosts = desired_dns_hosts(&cfg, &state);
+        assert_eq!(
+            hosts[&("login".to_string(), "mgd".to_string())],
+            BTreeSet::from(["n1".to_string()])
+        );
+        assert_eq!(
+            hosts[&("login".to_string(), "default".to_string())].len(),
+            cfg.nodes.len(),
+            "an ordinary network keeps every node"
+        );
+
+        let records = desired_records(&cfg, None, &state);
+        assert!(
+            records.iter().all(|r| r.fqdn != "login.m.example.com"),
+            "{records:?}"
+        );
+        assert!(
+            records.iter().all(|r| r.content != "192.168.32.2"),
+            "{records:?}"
+        );
+        assert!(!unaddressed_hosts(&cfg, &state).contains_key("login.m.example.com"));
     }
 
     #[test]

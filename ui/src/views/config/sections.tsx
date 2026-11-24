@@ -46,7 +46,7 @@ import {
   TextField,
 } from '../../components/FormFields';
 import { fenceMarginWarning } from '../../lib/validate';
-import { isManaged, managedNetworkError, managedNodeAddressError } from '../../lib/managedNetwork';
+import { addressedNodesOn, isManaged, managedNetworkError, managedNodeAddressError, managedPortalError } from '../../lib/managedNetwork';
 
 export interface SectionProps {
   draft: ClusterConfig;
@@ -998,7 +998,7 @@ export function NodeCard({
                 hint={isManaged(net) ? 'No node address on this network (the default).' : 'Route into this network without an address of its own.'}
                 help={
                   isManaged(net)
-                    ? "The node implements the managed network (it joins the tunnel and routes and NATs clients into it) without a node address of its own, which is the default. Containers still run on it. A node's own address on a managed network is only reachable through that node, so no DNS record or route ever publishes it; give one only if you want a node-local endpoint."
+                    ? "The node implements the managed network (it joins the tunnel and routes and NATs clients into it) without a node address of its own, which is the default. Containers still run on it. A node's own address on a managed network is only reachable through that node, so no DNS provider record or route ever publishes it; give one only if you want a node-local endpoint, or if the dashboard or login page is served on this network (they need at least one addressed node)."
                     : "The node implements the network (it routes and NATs traffic into it) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
                 }
                 configKey={`nodes.${name}.network.${netName}`}
@@ -1019,7 +1019,7 @@ export function NodeCard({
                 net.type === 'internal'
                   ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
                   : isManaged(net)
-                    ? "An optional node-local endpoint on the managed network. It is only reachable through this node (containers on other nodes use the gateway, the first host address, instead), so clouduler never publishes it in DNS or routes; leave it off unless something on this node needs it."
+                    ? "An optional node-local endpoint on the managed network. It is only reachable through this node (containers on other nodes use the gateway, the first host address, instead), so clouduler never publishes it to the DNS provider or uses it for routes; leave it off unless something on this node needs it, such as serving the dashboard or login page on this network."
                     : "This node's fixed address on this network, inside its subnet."
               }
               configKey={`nodes.${name}.network.${netName}`}
@@ -1796,10 +1796,15 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
           label: n,
         }))}
         hint="Which node address DNS points at."
-        help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use."
+        help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use. A managed network works when at least one node has an address on it: only those nodes answer, and only the client DNS server hands the address out (never public DNS), so it opens from clients that reach the managed subnet."
         configKey="web.network"
         disabled={disabled}
       />
+      {managedPortalError(draft, draft.web.network, 'the dashboard') && (
+        <span className="field-error" role="alert">
+          <Icon name="alert-circle" /> {managedPortalError(draft, draft.web.network, 'the dashboard')}
+        </span>
+      )}
       <PortField
         id="web-port"
         label="Direct HTTPS port"
@@ -2600,12 +2605,16 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
             {nets.map(([name, net]) => {
               const hasDomain = !!net.domain;
               const checked = a.networks.includes(name);
+              const portalErr = managedPortalError(draft, name, 'the login page');
+              const managedNote = isManaged(net) && !portalErr
+                ? `served from the nodes with an address on it (${addressedNodesOn(draft, name).join(', ')}); only the client DNS server resolves it, never public DNS`
+                : null;
               return (
                 <div key={name}>
                   <CheckOption
                     checked={checked}
-                    disabled={disabled || (!hasDomain && !checked)}
-                    hint={!hasDomain && '(no DNS domain, set one on the Networks page)'}
+                    disabled={disabled || (!hasDomain && !checked) || (!!portalErr && !checked)}
+                    hint={(!hasDomain && '(no DNS domain, set one on the Networks page)') || (portalErr && '(managed network: no node has an address on it)') || (managedNote && `(${managedNote})`)}
                     onChange={(on) =>
                       patch({
                         networks: on ? [...a.networks, name] : a.networks.filter((n) => n !== name),

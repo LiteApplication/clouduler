@@ -258,9 +258,9 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   node's own address is a secondary address on its bridge: an entry point for
   outside clients and the proxy/DNS target for the network's `domain`.
   Containers on other nodes cannot reach a node address (anycast MAC); they
-  use the gateway. Nothing publishes it: no DNS record, client DNS answer,
-  static route, redirect, dashboard or login portal uses a node address on a
-  managed network (see DNS below).
+  use the gateway. It is never sent to the DNS provider and
+  no static route or redirect uses it; only the dashboard and login portal may
+  be answered with it, by the client DNS server alone (see DNS below).
 * Container pool: the subnet minus network, broadcast, gateway and every node
   address (`ClusterConfig::managed_reserved`). The leader allocates in raft
   under the `@NET` key and releases on instance removal.
@@ -282,10 +282,15 @@ address there is only reachable via that node; the `/32` routes make container
 addresses reachable from any entry node. Static routes and redirects on a
 managed network are refused by the API (`check_not_managed`); stored ones
 publish nothing and set a DNS status error (`unaddressed_hosts`). `web.network`
-and `proxy.auth.networks` may not be managed (validation). The client DNS
-server (`client_dns::add_managed_containers`) answers a managed route with the
-container addresses to clients on that network, and never with a node address
-on one.
+and `proxy.auth.networks` may be managed only if at least one node has an IP
+address there (validation, `ClusterConfig::addressed_nodes_on`): the portal and
+dashboard hostnames are then answered, by the client DNS server only (never
+published to the provider), with just the addressed nodes' addresses
+(`proxy::desired_dns_hosts`, `client_dns::Entry::node_served`), so they work
+for clients that reach the managed subnet and not for public-DNS clients. The
+client DNS server (`client_dns::add_managed_containers`) answers any other
+managed route with the container addresses to clients on that network, and
+never with a node address on one.
 
 Access is by routing. Clouduler advertises nothing: clients route the whole
 subnet via any implementing node (for example `tailscale up
