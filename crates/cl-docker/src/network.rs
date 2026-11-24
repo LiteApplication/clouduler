@@ -109,17 +109,26 @@ impl Docker {
     /// network).
     pub async fn ensure_managed_network(&self, spec: &NetworkSpec) -> Result<bool> {
         if let Some(existing) = self.inspect_network_opt(&spec.name).await? {
-            if ipam_drifted(&existing, spec) {
+            let drift = ipam_drift(&existing, spec);
+            if drift.is_none() {
+                forget_drift(&spec.name);
+            }
+            if let Some(drift) = drift {
                 if network_in_use(&existing) {
-                    tracing::warn!(
-                        network = %spec.name,
-                        expected_subnet = %spec.subnet,
-                        "the docker network of a managed network no longer matches its subnet or \
-                         reserved addresses, but containers are attached; recreate it once they \
-                         are stopped"
-                    );
+                    // Reconciled every pass: say it once per distinct drift.
+                    if first_report(&spec.name, &drift) {
+                        tracing::warn!(
+                            network = %spec.name,
+                            expected_subnet = %spec.subnet,
+                            %drift,
+                            "the docker network of a managed network no longer matches its subnet or \
+                             reserved addresses, but containers are attached; recreate it once they \
+                             are stopped"
+                        );
+                    }
                     return Ok(false);
                 }
+                forget_drift(&spec.name);
                 tracing::info!(
                     network = %spec.name,
                     subnet = %spec.subnet,
@@ -485,14 +494,45 @@ fn warn_on_nat_subnet_drift(
 
 /// Whether the live IPAM (subnet, gateway, auxiliary addresses) differs from
 /// what `spec` would create.
+#[cfg(test)]
 fn ipam_drifted(existing: &bollard::models::NetworkInspect, spec: &NetworkSpec) -> bool {
+    ipam_drift(existing, spec).is_some()
+}
+
+/// Drifts already logged, per docker network name, so a persistent one is
+/// reported once instead of on every reconcile pass.
+static REPORTED_DRIFT: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// True the first time `drift` is seen for `network` (or when it changed).
+fn first_report(network: &str, drift: &str) -> bool {
+    let mut seen = REPORTED_DRIFT.lock().unwrap_or_else(|e| e.into_inner());
+    match seen.iter_mut().find(|(n, _)| n == network) {
+        Some((_, d)) if d == drift => false,
+        Some((_, d)) => {
+            *d = drift.to_string();
+            true
+        }
+        None => {
+            seen.push((network.to_string(), drift.to_string()));
+            true
+        }
+    }
+}
+
+fn forget_drift(network: &str) {
+    let mut seen = REPORTED_DRIFT.lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|(n, _)| n != network);
+}
+
+/// What differs between the live IPAM and `spec`, or `None` when they match.
+fn ipam_drift(existing: &bollard::models::NetworkInspect, spec: &NetworkSpec) -> Option<String> {
     let config = existing
         .ipam
         .as_ref()
         .and_then(|ipam| ipam.config.as_ref())
         .and_then(|configs| configs.first());
     let Some(config) = config else {
-        return true;
+        return Some("no ipam config".to_string());
     };
     let reserved: std::collections::BTreeSet<String> = config
         .auxiliary_addresses
@@ -501,9 +541,18 @@ fn ipam_drifted(existing: &bollard::models::NetworkInspect, spec: &NetworkSpec) 
         .collect();
     let wanted: std::collections::BTreeSet<String> =
         spec.excluded.iter().map(|ip| ip.to_string()).collect();
-    config.subnet.as_deref() != Some(spec.subnet.as_str())
-        || config.gateway.as_deref() != Some(spec.gateway.to_string().as_str())
-        || reserved != wanted
+    let mut diffs = Vec::new();
+    if config.subnet.as_deref() != Some(spec.subnet.as_str()) {
+        diffs.push(format!("subnet {:?} != {}", config.subnet, spec.subnet));
+    }
+    let gateway = spec.gateway.to_string();
+    if config.gateway.as_deref() != Some(gateway.as_str()) {
+        diffs.push(format!("gateway {:?} != {gateway}", config.gateway));
+    }
+    if reserved != wanted {
+        diffs.push(format!("reserved {reserved:?} != {wanted:?}"));
+    }
+    (!diffs.is_empty()).then(|| diffs.join("; "))
 }
 
 fn network_in_use(existing: &bollard::models::NetworkInspect) -> bool {
@@ -606,6 +655,26 @@ mod tests {
             &bollard::models::NetworkInspect::default(),
             &s
         ));
+    }
+
+    #[test]
+    fn a_persistent_drift_is_reported_once_until_it_changes() {
+        let n = "MNG_test-dedupe";
+        forget_drift(n);
+        assert!(first_report(n, "a"));
+        assert!(!first_report(n, "a"));
+        assert!(first_report(n, "b"));
+        forget_drift(n);
+        assert!(first_report(n, "b"));
+        forget_drift(n);
+    }
+
+    #[test]
+    fn the_drift_names_what_differs() {
+        let mut s = spec();
+        s.excluded = vec![Ipv4Addr::new(10, 244, 1, 2)];
+        let d = ipam_drift(&inspected("10.244.1.0/24", "10.244.1.1", &[], 1), &s).unwrap();
+        assert!(d.contains("reserved") && !d.contains("subnet"), "{d}");
     }
 
     #[test]
