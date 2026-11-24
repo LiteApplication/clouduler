@@ -1,5 +1,5 @@
 /* Global base rules, plus the styling of the pre-redesign forms that are still
-   in use: the cluster config sections (views/config/sections.tsx) and
+   in use: the cluster config sections (views/config/sections/) and
    SecretForm. Those render inside a .cfg wrapper and every rule for them is
    scoped under :where(.cfg); their bare-element rules also skip anything with
    a cl-* class so the design-system components inside them keep their own
