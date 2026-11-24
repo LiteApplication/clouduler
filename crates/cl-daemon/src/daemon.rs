@@ -1083,8 +1083,9 @@ async fn watch_git_backup(
         if last_snapshot.as_ref() == Some(&snapshot) {
             continue;
         }
+        let empty_snapshot = cl_backup::snapshot::Snapshot::default();
         let changes =
-            cl_backup::snapshot::diff(&last_snapshot.clone().unwrap_or_default(), &snapshot);
+            cl_backup::snapshot::diff(last_snapshot.as_ref().unwrap_or(&empty_snapshot), &snapshot);
         let message = cl_backup::snapshot::commit_message(&changes);
 
         if !cl_backup::deploy_key::is_present(&state) {
@@ -1879,7 +1880,7 @@ async fn report_self(
             version,
             gpus,
             images,
-            ..current.clone()
+            ..current
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {
             warn!(error = %e, "could not report this node's arch, binary hash, memory total and public key");
