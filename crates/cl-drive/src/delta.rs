@@ -97,7 +97,6 @@ pub trait SyncEngine: Send + Sync {
     /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off push and
     /// carries the destination's configured path (see `Message::Hello` in
     /// `transport.rs`). Every other caller passes `None`.
-    #[allow(clippy::too_many_arguments)]
     fn sync<'a>(
         &'a self,
         src: &'a Path,
@@ -196,7 +195,6 @@ where
 pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl DeltaEngine {
-    #[allow(clippy::too_many_arguments)]
     async fn sync_impl(
         &self,
         src: &Path,

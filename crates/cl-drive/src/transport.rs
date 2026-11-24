@@ -469,11 +469,17 @@ impl Drop for ChunkedWrite {
     fn drop(&mut self) {
         self.file = None;
         if self.armed {
-            let _ = std::fs::remove_file(&self.tmp);
+            // A single unlink; the explicit replacement path in `receive` drops
+            // off the runtime, the remaining drops are error exits.
+            remove_file_logged(&self.tmp, "removing an abandoned temp file");
         }
     }
 }
 
+/// Every filesystem call the apply steps below make (create_dir_all, rename,
+/// set_permissions, remove_*, symlink_metadata) runs inside `off_runtime`
+/// (`spawn_blocking`), never on a tokio worker thread.
+///
 /// Run the receive side of one sync over an accepted connection, which must
 /// already have passed `stream_auth::accept` (`serve` does; direct test callers
 /// must). Exposed for loopback tests.
@@ -539,26 +545,34 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }) => {
                 // Drop (deleting the temp of) an unfinished transfer first: the same
                 // target would use the same temp name.
-                drop(chunked.take());
+                let previous = chunked.take();
                 let target = resolve_no_follow(&root, &path)?;
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                }
-                let tmp = temp_path(&target);
-                let file = create_temp(&tmp)?;
-                chunked = Some(ChunkedWrite {
-                    target,
-                    tmp,
-                    mode,
-                    uid,
-                    gid,
-                    mtime_nanos,
-                    file: Some(file),
-                    armed: true,
-                });
+                // The old temp's unlink, the parent mkdir and the temp creation all
+                // touch the filesystem: blocking pool, not a runtime thread.
+                chunked = Some(
+                    off_runtime("starting a chunked file", move || {
+                        drop(previous);
+                        if let Some(parent) = target.parent() {
+                            std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+                                path: parent.to_path_buf(),
+                                source,
+                            })?;
+                        }
+                        let tmp = temp_path(&target);
+                        let file = create_temp(&tmp)?;
+                        Ok(ChunkedWrite {
+                            target,
+                            tmp,
+                            mode,
+                            uid,
+                            gid,
+                            mtime_nanos,
+                            file: Some(file),
+                            armed: true,
+                        })
+                    })
+                    .await?,
+                );
             }
             Some(Message::WholeFileChunk { data }) => {
                 let mut state = chunked.take().ok_or_else(|| DriveError::Transfer {
@@ -653,14 +667,16 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 off_runtime("writing a whole file", move || {
                     write_whole(
                         &root,
-                        &path,
-                        mode,
-                        uid,
-                        gid,
-                        mtime_nanos,
-                        is_symlink,
-                        link_target.as_deref(),
-                        &data,
+                        &WholeFileParams {
+                            rel: &path,
+                            mode,
+                            uid,
+                            gid,
+                            mtime_nanos,
+                            is_symlink,
+                            link_target: link_target.as_deref(),
+                            data: &data,
+                        },
                     )
                 })
                 .await?;
@@ -696,25 +712,30 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }) => {
                 let src = resolve_no_follow(&root, &from)?;
                 let dst = resolve_no_follow(&root, &to)?;
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                }
                 // A rename is only the sender's *guess*. A miss (source consumed by an
                 // earlier rename, or deleted) must not kill the volume: returning drops
                 // the connection, the sender sees "Broken pipe", and the volume fails
                 // every pass. Skip; the file is sent whole next pass.
-                clear_dir_in_the_way(&dst)?;
-                if let Err(source) = std::fs::rename(&src, &dst) {
-                    if source.kind() == io::ErrorKind::NotFound {
-                        warn!(%from, %to, "skipping a rename whose source is gone");
-                    } else {
-                        return Err(DriveError::Io { path: dst, source });
+                let renamed = off_runtime("renaming a file", move || {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+                            path: parent.to_path_buf(),
+                            source,
+                        })?;
                     }
-                } else {
-                    stamp_path_no_follow(&dst, mode, uid, gid, mtime_nanos)?;
+                    clear_dir_in_the_way(&dst)?;
+                    match std::fs::rename(&src, &dst) {
+                        Ok(()) => {
+                            stamp_path_no_follow(&dst, mode, uid, gid, mtime_nanos)?;
+                            Ok(true)
+                        }
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+                        Err(source) => Err(DriveError::Io { path: dst, source }),
+                    }
+                })
+                .await?;
+                if !renamed {
+                    warn!(%from, %to, "skipping a rename whose source is gone");
                 }
             }
             Some(Message::MakeDir {
@@ -807,25 +828,29 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }
             Some(Message::Delete(path)) => {
                 let target = resolve_no_follow(&root, &path)?;
-                match std::fs::remove_file(&target) {
-                    Ok(()) => {}
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                        ) => {}
-                    // The path became a directory (type change): not ours to delete
-                    // as a file, and not worth killing the sync over.
-                    Err(e) if target.is_dir() => {
-                        debug!(path = %target.display(), error = %e, "not deleting a directory as a file");
+                off_runtime("deleting a file", move || {
+                    match std::fs::remove_file(&target) {
+                        Ok(()) => {}
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                            ) => {}
+                        // The path became a directory (type change): not ours to delete
+                        // as a file, and not worth killing the sync over.
+                        Err(e) if target.is_dir() => {
+                            debug!(path = %target.display(), error = %e, "not deleting a directory as a file");
+                        }
+                        Err(source) => {
+                            return Err(DriveError::Io {
+                                path: target,
+                                source,
+                            })
+                        }
                     }
-                    Err(source) => {
-                        return Err(DriveError::Io {
-                            path: target,
-                            source,
-                        })
-                    }
-                }
+                    Ok(())
+                })
+                .await?;
             }
             Some(Message::Done) => {
                 // Copy now matches its source: remember the tree so later writes are noticed.
@@ -880,6 +905,16 @@ pub async fn request_manifest(
     }
 }
 
+/// Best-effort unlink of a temp file: a missing file is the normal case, anything
+/// else is logged rather than swallowed. Blocking; call from the blocking pool.
+fn remove_file_logged(path: &Path, what: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != io::ErrorKind::NotFound {
+            warn!(path = %path.display(), error = %e, "{what} failed");
+        }
+    }
+}
+
 /// A temp path next to `target` so the final rename is same-filesystem (atomic).
 fn temp_path(target: &Path) -> PathBuf {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
@@ -891,7 +926,7 @@ fn temp_path(target: &Path) -> PathBuf {
 /// reuse a file, so a symlink planted between the two can't redirect the write.
 /// Mode is 0600 until the real mode is stamped.
 fn create_temp(tmp: &Path) -> Result<std::fs::File> {
-    let _ = std::fs::remove_file(tmp);
+    remove_file_logged(tmp, "removing a stale temp file");
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1054,23 +1089,35 @@ fn write_temp_then_rename_with(
             })
         });
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        remove_file_logged(&tmp, "cleaning up a failed write");
     }
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_whole(
-    root: &Path,
-    rel: &str,
+/// What a `Message::WholeFile` asks `write_whole` to put at `rel`.
+struct WholeFileParams<'a> {
+    rel: &'a str,
     mode: u32,
     uid: u32,
     gid: u32,
     mtime_nanos: i64,
     is_symlink: bool,
-    link_target: Option<&str>,
-    data: &[u8],
-) -> Result<()> {
+    link_target: Option<&'a str>,
+    data: &'a [u8],
+}
+
+/// Blocking (create_dir_all, rename, ...): call from the blocking pool.
+fn write_whole(root: &Path, params: &WholeFileParams<'_>) -> Result<()> {
+    let WholeFileParams {
+        rel,
+        mode,
+        uid,
+        gid,
+        mtime_nanos,
+        is_symlink,
+        link_target,
+        data,
+    } = *params;
     let target = resolve_no_follow(root, rel)?;
 
     if !is_symlink {
@@ -1087,7 +1134,7 @@ fn write_whole(
         })?;
     }
     let tmp = temp_path(&target);
-    let _ = std::fs::remove_file(&tmp);
+    remove_file_logged(&tmp, "removing a stale temp symlink");
     std::os::unix::fs::symlink(link_target, &tmp).map_err(|source| DriveError::Io {
         path: tmp.clone(),
         source,
@@ -1099,7 +1146,7 @@ fn write_whole(
         source,
     })?;
     if let Err(e) = clear_dir_in_the_way(&target) {
-        let _ = std::fs::remove_file(&tmp);
+        remove_file_logged(&tmp, "cleaning up a failed symlink write");
         return Err(e);
     }
     std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io {

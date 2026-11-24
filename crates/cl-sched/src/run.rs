@@ -20,7 +20,7 @@ use cl_raft::FenceState;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::materialize::Materializer;
+use crate::materialize::{blocking_fs, Materializer};
 use crate::place;
 use crate::plan::{self, Desired};
 
@@ -288,7 +288,7 @@ impl Scheduler {
                 updates,
             );
 
-        let (targets, config_edits, refused) = self.targets(state)?;
+        let (targets, config_edits, refused) = self.targets(state).await?;
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
@@ -376,7 +376,7 @@ impl Scheduler {
             .iter()
             .map(|t| (t.assignment.instance.container_name(), ()))
             .collect();
-        if let Err(e) = self.materializer.clean_orphans(&keep) {
+        if let Err(e) = blocking_fs(|| self.materializer.clean_orphans(&keep)) {
             warn!(error = %e, "could not clean orphaned objects");
         }
 
@@ -454,10 +454,10 @@ impl Scheduler {
             {
                 continue;
             }
-            if let Err(e) =
+            if let Err(e) = blocking_fs(|| {
                 self.materializer
                     .prepare(&state, instance, &service.configs, &service.secrets)
-            {
+            }) {
                 warn!(instance = %instance, error = %e, "could not refresh a config copy after a write-back");
             }
         }
@@ -834,7 +834,7 @@ impl Scheduler {
 
     /// Build what this node should run, materializing configs and secrets, and return any edit
     /// a container made to a writable config mount.
-    fn targets(&self, state: &ClusterState) -> crate::Result<Targets> {
+    async fn targets(&self, state: &ClusterState) -> crate::Result<Targets> {
         let live = self.live_config(state);
         let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
@@ -869,17 +869,17 @@ impl Scheduler {
 
             // A served-drive volume this node does not serve is a FUSE mount set up on demand and maybe
             // not up yet; starting against the empty directory would bind the wrong data, so wait.
-            if !volumes_ready(service, &drive_roots, &dynamic_mounts) {
+            if !volumes_ready(service, &drive_roots, &dynamic_mounts).await {
                 debug!(instance = %instance, "waiting for a served drive volume to be mounted");
                 continue;
             }
 
             // A missing secret or key blocks this container, not the whole pass.
             let mut objects =
-                match self
-                    .materializer
-                    .prepare(state, instance, &service.configs, &service.secrets)
-                {
+                match blocking_fs(|| {
+                    self.materializer
+                        .prepare(state, instance, &service.configs, &service.secrets)
+                }) {
                     Ok(objects) => objects,
                     Err(e) => {
                         warn!(instance = %instance, error = %e, "cannot prepare objects, skipping");
@@ -1204,39 +1204,49 @@ fn active_server<'a>(
 
 /// Whether `path` is a mount point (device differs from its parent's), telling a live FUSE
 /// mount from an unmounted directory without `cl-drive`.
-fn is_mounted(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let Ok(parent_meta) = std::fs::metadata(parent) else {
-        return false;
-    };
-    meta.dev() != parent_meta.dev()
+///
+/// The stat runs on the blocking pool under a timeout: a wedged FUSE mount hangs `stat`
+/// forever. A timeout (or a failed task) counts as not mounted.
+async fn is_mounted(path: PathBuf) -> bool {
+    const STAT_TIMEOUT: Duration = Duration::from_secs(5);
+    let stat = tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&path).ok()?;
+        let parent_meta = std::fs::metadata(path.parent()?).ok()?;
+        Some(meta.dev() != parent_meta.dev())
+    });
+    match tokio::time::timeout(STAT_TIMEOUT, stat).await {
+        Ok(Ok(mounted)) => mounted.unwrap_or(false),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            warn!("timed out checking whether a drive volume is mounted; treating it as not mounted");
+            false
+        }
+    }
 }
 
 /// Whether every served-drive volume this service mounts is mounted here yet. Replicated
 /// volumes and served drives this node serves are always ready; only `dynamic` mounts lag.
-fn volumes_ready(
+async fn volumes_ready(
     service: &cl_config::Service,
     drive_roots: &BTreeMap<String, PathBuf>,
     dynamic: &BTreeSet<String>,
 ) -> bool {
-    service.volumes.iter().all(|mount| {
+    for mount in &service.volumes {
         let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) else {
-            return true;
+            continue;
         };
         if !dynamic.contains(drive) {
-            return true;
+            continue;
         }
         let Some(root) = drive_roots.get(drive) else {
-            return true;
+            continue;
         };
-        is_mounted(&root.join(volume))
-    })
+        if !is_mounted(root.join(volume)).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// `UpsertVolume` for every volume a placed instance mounts that the cluster does not know.

@@ -80,6 +80,25 @@ pub fn docker_api_socket_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Writes objects out for one instance.
+/// Run blocking filesystem work from async code without stalling a runtime worker.
+///
+/// `Materializer` borrows the (large) cluster state, so the work cannot be moved onto
+/// `spawn_blocking` without cloning it; on a multi-thread runtime this hands the worker's
+/// queue to another thread (`block_in_place`) instead. A current-thread runtime (tests)
+/// has no other worker to hand off to and just runs it inline.
+pub(crate) fn blocking_fs<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+/// Writes instance configs and secrets to disk.
+///
+/// All methods here use blocking `std::fs` (create_dir_all, rename, set_permissions,
+/// remove_dir_all, ...). Async callers must go through [`blocking_fs`].
 pub struct Materializer {
     root: PathBuf,
     docker_api_socket: PathBuf,
