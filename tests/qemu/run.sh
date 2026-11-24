@@ -45,6 +45,8 @@ run_one() {
     # the disk long before the last scenario runs. Nothing worth keeping
     # from a passing run, so drop the whole directory.
     rm -rf "$run_dir"
+    # Drop work/ itself once nothing (e.g. a failed run's logs) is left in it.
+    rmdir "$WORK_DIR" 2>/dev/null || true
     return 0
   else
     echo "=== FAIL: $name (logs in $run_dir) ==="

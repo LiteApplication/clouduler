@@ -29,6 +29,16 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$BRANCH" != "master" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "warning: not on master (on '$BRANCH'); a real release would refuse to run" >&2
+    else
+        echo "error: releases must be cut from master (on '$BRANCH')" >&2
+        exit 1
+    fi
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         echo "warning: working tree is not clean (a real release would refuse to run)" >&2
@@ -91,15 +101,20 @@ echo "Last release tag: $LAST_TAG"
 echo "Release version:  ${VERSION} (workspace)"
 echo "Bumped:"
 for c in "${BUMP[@]}"; do echo "  $c: $(crate_version "$c") -> ${VERSION}"; done
-if [ "$UI_CHANGED" = 1 ]; then echo "  ui: ${UI_OLD} -> ${VERSION}"; fi
+echo "  ui: ${UI_OLD} -> ${VERSION}"
 echo "Kept:"
 for c in "${KEEP[@]}"; do echo "  $c: $(crate_version "$c")"; done
-if [ "$UI_CHANGED" = 0 ]; then echo "  ui: ${UI_OLD}"; fi
 
 if [ "$DRY_RUN" = 1 ]; then
     echo "Dry run: nothing modified."
     exit 0
 fi
+
+read -r -p "Release v${VERSION} and push to origin? [y/N] " CONFIRM
+case "$CONFIRM" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborted." >&2; exit 1 ;;
+esac
 
 echo "Bumping version to ${VERSION}..."
 
@@ -107,9 +122,8 @@ sed -i -E "/^\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"${VERS
 for c in "${BUMP[@]}"; do
     sed -i -E "/^\[package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" "crates/$c/Cargo.toml"
 done
-if [ "$UI_CHANGED" = 1 ]; then
-    sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
-fi
+# ui/package.json always follows the release version.
+sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
 
 if [ -f Cargo.lock ]; then
     cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace

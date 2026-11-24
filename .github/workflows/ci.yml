@@ -44,6 +44,14 @@ jobs:
           name: api-shapes-fixture
           path: ui/src/api/__fixtures__/api-shapes.json
 
+  deny:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans
+
   ui:
     needs: rust
     runs-on: ubuntu-26.04
