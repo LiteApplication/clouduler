@@ -69,9 +69,12 @@ pub fn take_listen_fds() -> Vec<std::net::TcpListener> {
         // SAFETY: systemd handed us this descriptor and, per the protocol,
         // nothing else in the process owns it.
         let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-        let _ = nix::fcntl::fcntl(
-            &owned,
-            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        crate::supervisor::log_err(
+            "cannot set close-on-exec on an activated socket",
+            nix::fcntl::fcntl(
+                &owned,
+                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+            ),
         );
         let listener = std::net::TcpListener::from(owned);
         if listener.local_addr().is_ok() && listener.set_nonblocking(true).is_ok() {

@@ -23,6 +23,7 @@
 //! deletes the directory it backed, only stops mounting/exporting/transporting
 //! it.
 
+use crate::supervisor::log_err;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -161,7 +162,7 @@ impl Drives {
     /// answer them (raft, docker) goes away.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.supervisor.await;
+        log_err("the drive supervisor failed", self.supervisor.await);
     }
 }
 
@@ -252,7 +253,10 @@ pub fn start(
                             // Unmounts and un-exports block on the kernel, and
                             // a busy mount can hang: keep that off the runtime
                             // so the other shutdown steps stay responsive.
-                            let _ = tokio::task::spawn_blocking(move || running.teardown()).await;
+                            log_err(
+                                "the drive teardown task failed",
+                                tokio::task::spawn_blocking(move || running.teardown()).await,
+                            );
                             return;
                         }
                     }

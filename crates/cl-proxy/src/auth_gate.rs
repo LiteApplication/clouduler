@@ -706,17 +706,23 @@ impl AuthGate {
         // Signing out also forgets this address, or "sign out" on a shared
         // machine would leave the door open.
         if let Some(client) = self.client_net(peer) {
-            let _ = self
+            if let Err(e) = self
                 .submit(RaftRequest::RemoveProxySession {
                     key: trusted_key(&client, peer),
                 })
-                .await;
+                .await
+            {
+                warn!(error = %e, "cannot forget the signed-out address");
+            }
         }
         if let Some(id) = extract_cookie(req.headers(), PORTAL_COOKIE_NAME) {
             if id.len() == ID_LEN {
-                let _ = self
+                if let Err(e) = self
                     .submit(RaftRequest::RemoveProxySession { key: hash_id(&id) })
-                    .await;
+                    .await
+                {
+                    warn!(error = %e, "cannot remove the signed-out session");
+                }
             }
         }
         let to = match callback {

@@ -396,13 +396,16 @@ pub async fn run(
     .await;
 
     if probation {
-        tokio::spawn(cl_update::rollback::watch(
-            cluster.clone(),
-            node_name.clone(),
-            update_dir.clone(),
-            rollback_shutdown,
-            || unix_now() as i64,
-        ));
+        background.spawn(
+            "rollback-watch",
+            cl_update::rollback::watch(
+                cluster.clone(),
+                node_name.clone(),
+                update_dir.clone(),
+                rollback_shutdown,
+                || unix_now() as i64,
+            ),
+        );
     }
 
     // The api records a move; this carries it out. It needs a docker to stop the
@@ -645,6 +648,7 @@ async fn prepare_for_host_shutdown(
     info!("pushing volumes to other nodes");
     // The unit's own stop timeout is far shorter; keep extending it for as
     // long as the push is making use of the time.
+    // Aborted right after the drain below, so it needs no supervisor.
     let extend = tokio::spawn(async {
         let mut ticker = tokio::time::interval(Duration::from_secs(20));
         loop {

@@ -14,6 +14,7 @@
 //! `access` list takes effect without a restart. A node that implements no
 //! managed network carries none of it.
 
+use crate::supervisor::log_err;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -194,7 +195,10 @@ async fn firewall(cluster: Arc<ClusterNode>, node_name: String, boot_cfg: Cluste
     // calls on a cluster that never uses managed networks.
     let mut clean = false;
     // The routes and tunnels of earlier versions go once, at boot.
-    let _ = tokio::task::spawn_blocking(remove_legacy_plumbing).await;
+    log_err(
+        "the legacy managed-network cleanup failed",
+        tokio::task::spawn_blocking(remove_legacy_plumbing).await,
+    );
     loop {
         ticker.tick().await;
         let state = cluster.snapshot().await;

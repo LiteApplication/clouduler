@@ -61,6 +61,7 @@ use tracing::{debug, warn};
 
 use crate::backup_runner::{currently_running, instances_using_drive};
 use crate::backup_secrets::{self, TempFileGuard};
+use crate::supervisor::log_err;
 use cl_raft::client::client_for;
 use cl_raft::state::instances_touching_volumes;
 
@@ -98,15 +99,18 @@ pub fn start_restore_watcher(
                         // here; the first to commit wins and the rest are
                         // told it already finished.
                         warn!(request = %request.id, error = %e, "restore request cannot be planned, failing it");
-                        let _ = cluster
-                            .submit(Request::SetRestoreStatus {
-                                id: request.id.clone(),
-                                status: RestoreStatus::Failed {
-                                    error: format!("{e:#}"),
-                                },
-                                at: unix_now(),
-                            })
-                            .await;
+                        log_err(
+                            "cannot record the failed restore request",
+                            cluster
+                                .submit(Request::SetRestoreStatus {
+                                    id: request.id.clone(),
+                                    status: RestoreStatus::Failed {
+                                        error: format!("{e:#}"),
+                                    },
+                                    at: unix_now(),
+                                })
+                                .await,
+                        );
                         continue;
                     }
                 };
@@ -143,13 +147,16 @@ pub fn start_restore_watcher(
                         }
                     }
                 };
-                let _ = cluster
-                    .submit(Request::SetRestoreStatus {
-                        id: request.id.clone(),
-                        status,
-                        at: unix_now(),
-                    })
-                    .await;
+                log_err(
+                    "cannot record the restore result",
+                    cluster
+                        .submit(Request::SetRestoreStatus {
+                            id: request.id.clone(),
+                            status,
+                            at: unix_now(),
+                        })
+                        .await,
+                );
             }
         }
     })

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::supervisor::Supervisor;
+use crate::supervisor::{log_err, Supervisor};
 use cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET;
 use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
@@ -210,7 +210,7 @@ pub struct Proxy {
 impl Proxy {
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.supervisor.await;
+        log_err("the proxy supervisor failed", self.supervisor.await);
     }
 }
 
