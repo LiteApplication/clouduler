@@ -481,16 +481,16 @@ pub async fn run(
         key_rx.clone(),
         data_dir.clone(),
     );
-    let terraform_runner = crate::terraform_runner::start(
-        cluster.clone(),
-        node_name.clone(),
-        docker.clone(),
-        key_rx.clone(),
-        config_rx.clone(),
-        data_dir.clone(),
-        nudges.terraform.clone(),
-        api_state.clone(),
-    );
+    let terraform_runner = crate::terraform_runner::start(crate::terraform_runner::StartArgs {
+        cluster: cluster.clone(),
+        node_name: node_name.clone(),
+        docker: docker.clone(),
+        key_rx: key_rx.clone(),
+        config_rx: config_rx.clone(),
+        data_dir: data_dir.clone(),
+        nudge: nudges.terraform.clone(),
+        api: api_state.clone(),
+    });
     let restore_watcher = crate::backup_restore::start_restore_watcher(
         cfg_for_restore,
         cluster.clone(),

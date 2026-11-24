@@ -35,6 +35,7 @@
 //! `clouduler.managed`), so the reconciler ignores them. Leftovers and work dirs
 //! are swept at startup. All blocking fs work runs under `spawn_blocking`.
 
+use crate::supervisor::log_err;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -592,7 +593,10 @@ async fn run_phase(
     log: &mut LogTail,
 ) -> Result<PhaseResult, String> {
     let name = spec.name.clone();
-    let _ = docker.remove(&name, true).await;
+    log_err(
+        "removing a stale terraform helper container failed",
+        docker.remove(&name, true).await,
+    );
     docker
         .create(&spec)
         .await
@@ -847,7 +851,19 @@ pub async fn run_tofu(
     let mut log = LogTail::new(LOG_CAPTURE_BYTES);
 
     let outcome =
-        run_tofu_inner(docker, &work, &cache, cfg, mode, inputs, deadline, &mut log).await;
+        run_tofu_inner(
+            docker,
+            &TofuRun {
+                work: &work,
+                cache: &cache,
+                deadline,
+            },
+            cfg,
+            mode,
+            inputs,
+            &mut log,
+        )
+        .await;
 
     let mut new_state = None;
     let mut final_state = None;
@@ -869,7 +885,10 @@ pub async fn run_tofu(
         hidden.extend(secret_output_values(&inputs.outputs, bytes));
     }
     let cleanup = work.clone();
-    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await;
+    log_err(
+        "removing the terraform work dir failed",
+        flatten_blocking(tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await),
+    );
 
     let text = redact(&log.into_text(), &hidden);
     let log = cap_text(text, MAX_TERRAFORM_LOG_BYTES);
@@ -889,17 +908,37 @@ pub async fn run_tofu(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Where and until when one tofu run works.
+struct TofuRun<'a> {
+    work: &'a Path,
+    cache: &'a Path,
+    deadline: tokio::time::Instant,
+}
+
+/// A `spawn_blocking` result with the join error folded into the io one.
+fn flatten_blocking<T>(
+    result: Result<std::io::Result<T>, tokio::task::JoinError>,
+) -> Result<T, String> {
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 async fn run_tofu_inner(
     docker: &Docker,
-    work: &Path,
-    cache: &Path,
+    tofu: &TofuRun<'_>,
     cfg: &TerraformConfig,
     mode: TerraformMode,
     inputs: &RunInputs,
-    deadline: tokio::time::Instant,
     log: &mut LogTail,
 ) -> Result<(), String> {
+    let TofuRun {
+        work,
+        cache,
+        deadline,
+    } = *tofu;
     {
         let (work, cache) = (work.to_path_buf(), cache.to_path_buf());
         let files = RunInputs {
@@ -1040,18 +1079,27 @@ async fn sweep(docker: &Docker, data_dir: &Path) {
         Ok(list) => {
             for c in list {
                 info!(container = %c.id, "removing a leftover terraform container");
-                let _ = docker.remove(&c.id, true).await;
+                log_err(
+                    "removing a leftover terraform container failed",
+                    docker.remove(&c.id, true).await,
+                );
             }
         }
         Err(e) => warn!(error = %e, "could not list leftover terraform containers"),
     }
     let work = data_dir.join("tofu").join("work");
-    let _ = tokio::task::spawn_blocking(move || {
-        if work.is_dir() {
-            let _ = std::fs::remove_dir_all(&work);
-        }
-    })
-    .await;
+    log_err(
+        "removing leftover terraform work dirs failed",
+        flatten_blocking(
+            tokio::task::spawn_blocking(move || {
+                if work.is_dir() {
+                    std::fs::remove_dir_all(&work)?;
+                }
+                Ok(())
+            })
+            .await,
+        ),
+    );
 }
 
 // -------------------------------------------------------------------- the loop
@@ -1065,17 +1113,29 @@ struct Ctx {
     in_flight: Mutex<BTreeSet<String>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn start(
-    cluster: Arc<ClusterNode>,
-    node_name: String,
-    docker: DockerHandle,
-    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    config_rx: tokio::sync::watch::Receiver<Arc<cl_config::ClusterConfig>>,
-    data_dir: PathBuf,
-    nudge: Arc<Notify>,
-    api: Option<cl_api::AppState>,
-) -> JoinHandle<()> {
+/// Everything `start` needs to run the terraform loop.
+pub struct StartArgs {
+    pub cluster: Arc<ClusterNode>,
+    pub node_name: String,
+    pub docker: DockerHandle,
+    pub key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    pub config_rx: tokio::sync::watch::Receiver<Arc<cl_config::ClusterConfig>>,
+    pub data_dir: PathBuf,
+    pub nudge: Arc<Notify>,
+    pub api: Option<cl_api::AppState>,
+}
+
+pub fn start(args: StartArgs) -> JoinHandle<()> {
+    let StartArgs {
+        cluster,
+        node_name,
+        docker,
+        key_rx,
+        config_rx,
+        data_dir,
+        nudge,
+        api,
+    } = args;
     tokio::spawn(async move {
         let ctx = Arc::new(Ctx {
             cluster,
@@ -1190,10 +1250,12 @@ async fn target_still_there(docker: &Docker, instance: &InstanceId, id: &str) ->
 async fn finish_failed(ctx: &Ctx, mut run: TerraformRun, error: String) {
     run.finished_at = Some(unix_now());
     run.outcome = TerraformOutcome::Failed { error };
-    let _ = ctx
-        .cluster
-        .submit(Request::RecordTerraformRun { run })
-        .await;
+    log_err(
+        "recording a failed terraform run failed",
+        ctx.cluster
+            .submit(Request::RecordTerraformRun { run })
+            .await,
+    );
 }
 
 async fn claim_and_spawn(
