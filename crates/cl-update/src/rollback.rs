@@ -145,10 +145,12 @@ fn roll_back(dir: &Path, pending: &Pending, reason: &str, now: i64) -> std::io::
     // A rename over the (possibly running) executable swaps the directory
     // entry, like the install did.
     std::fs::rename(previous_path(&pending.binary), &pending.binary)?;
-    let _ = std::fs::write(
+    if let Err(e) = std::fs::write(
         dir.join(NOTE),
         serde_json::to_vec(&serde_json::json!({ "at": now, "reason": reason }))?,
-    );
+    ) {
+        warn!(error = %e, "could not write the rollback note");
+    }
     confirm(dir)
 }
 
@@ -157,7 +159,9 @@ fn roll_back(dir: &Path, pending: &Pending, reason: &str, now: i64) -> std::io::
 pub fn take_note(dir: &Path) -> Option<String> {
     let path = dir.join(NOTE);
     let raw = std::fs::read(&path).ok()?;
-    let _ = std::fs::remove_file(path);
+    if let Err(e) = std::fs::remove_file(&path) {
+        warn!(error = %e, "could not remove the rollback note");
+    }
     let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     Some(value.get("reason")?.as_str()?.to_string())
 }
@@ -182,7 +186,9 @@ pub fn verify_runnable(path: &Path) -> Result<(), String> {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
-                let _ = child.kill();
+                if let Err(e) = child.kill() {
+                    tracing::warn!(error = %e, "could not kill the unresponsive downloaded binary");
+                }
                 return Err("the downloaded binary did not answer --version".into());
             }
             Err(e) => return Err(format!("waiting for the downloaded binary: {e}")),

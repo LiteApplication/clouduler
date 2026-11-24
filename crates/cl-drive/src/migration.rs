@@ -336,14 +336,16 @@ async fn advance(
 
 /// Record the failure through raft (best effort) and return the original error.
 async fn fail(node: &ClusterNode, instance: &InstanceId, err: DriveError) -> DriveError {
-    let _ = node
+    if let Err(e) = node
         .submit(Request::AdvanceMigration {
             instance: instance.clone(),
             phase: MigrationPhase::Failed {
                 reason: err.to_string(),
             },
         })
-        .await;
+        .await {
+        tracing::warn!(error = %e, "could not record the migration failure");
+    }
     err
 }
 

@@ -109,11 +109,15 @@ impl DriveRegistry {
             return;
         };
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(error = %e, path = %parent.display(), "could not create the digest directory");
+            }
         }
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, digest).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, path = %path.display(), "could not store the digest");
+            }
         }
     }
 

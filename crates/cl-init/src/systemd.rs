@@ -139,7 +139,11 @@ pub fn install(unit: &Unit) -> Result<PathBuf> {
         }
         // Proxy turned off: a leftover socket would keep holding the ports.
         None => {
-            let _ = std::fs::remove_file(socket_path());
+            if let Err(e) = std::fs::remove_file(socket_path()) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(error = %e, "could not remove the proxy socket unit");
+                }
+            }
         }
     }
     systemctl(&["daemon-reload"])?;

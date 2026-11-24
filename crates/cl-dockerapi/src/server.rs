@@ -196,7 +196,13 @@ pub async fn serve(
             }
         }
     }
-    let _ = std::fs::remove_file(path);
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            debug!(path = %path.display(), "socket already gone");
+        } else {
+            warn!(error = %e, path = %path.display(), "could not remove the socket file");
+        }
+    }
     Ok(())
 }
 

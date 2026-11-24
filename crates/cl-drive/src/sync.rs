@@ -391,13 +391,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     }
                 }
             }
-            let _ = self
+            if let Err(e) = self
                 .node
                 .submit(Request::AckVolumeRemoved {
                     id: id.clone(),
                     node: self.registry.node().to_string(),
                 })
-                .await;
+                .await {
+                tracing::warn!(error = %e, "could not acknowledge the removed volume");
+            }
         }
     }
 
@@ -478,7 +480,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
     /// conflict for an operator.
     async fn record_served_conflict(&self, id: &VolumeId, other: &str, reason: String) {
         warn!(%id, %other, %reason, "served drive copies diverged, keeping both");
-        let _ = self
+        if let Err(e) = self
             .node
             .submit(Request::Served {
                 drive: id.drive.clone(),
@@ -491,7 +493,9 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                         .map_or(0, |d| d.as_secs() as i64),
                 },
             })
-            .await;
+            .await {
+            tracing::warn!(error = %e, "could not record the served-drive conflict");
+        }
     }
 
     async fn clear_refusal(&self, id: &VolumeId) {
@@ -503,13 +507,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             .get(id)
             .is_some_and(|v| v.sync_refused.is_some());
         if recorded {
-            let _ = self
+            if let Err(e) = self
                 .node
                 .submit(Request::SetVolumeSyncRefusal {
                     id: id.clone(),
                     refusal: None,
                 })
-                .await;
+                .await {
+                tracing::warn!(error = %e, "could not clear the recorded sync refusal");
+            }
         }
     }
 
@@ -619,13 +625,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                             .and_then(|a| a.as_ref())
                             .is_some_and(|a| a.overwrite.as_deref() == Some(target.node.as_str()))
                         {
-                            let _ = self
+                            if let Err(e) = self
                                 .node
                                 .submit(Request::Served {
                                     drive: id.drive.clone(),
                                     op: cl_raft::served::ServedOp::ClearOverwrite,
                                 })
-                                .await;
+                                .await {
+                                tracing::warn!(error = %e, "could not clear the served-drive overwrite marker");
+                            }
                         }
                     }
                     self.clear_refusal(&id).await;

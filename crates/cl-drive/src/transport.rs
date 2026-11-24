@@ -275,10 +275,13 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// The bincode prefix of `Message::WholeFileChunk { data }` for `len` bytes of data,
 /// so a chunk can be read into a frame buffer and sent without a copy into a `Vec`.
 pub fn chunk_header(len: usize) -> [u8; CHUNK_HEADER_LEN] {
+    static VARIANT_TAG: std::sync::LazyLock<[u8; 4]> = std::sync::LazyLock::new(|| {
+        let empty = bincode::serialize(&Message::WholeFileChunk { data: Vec::new() })
+            .expect("serializing an empty chunk cannot fail");
+        [empty[0], empty[1], empty[2], empty[3]]
+    });
     let mut head = [0u8; CHUNK_HEADER_LEN];
-    let empty = bincode::serialize(&Message::WholeFileChunk { data: Vec::new() })
-        .expect("serializing an empty chunk cannot fail");
-    head[..4].copy_from_slice(&empty[..4]);
+    head[..4].copy_from_slice(&*VARIANT_TAG);
     head[4..].copy_from_slice(&(len as u64).to_le_bytes());
     head
 }

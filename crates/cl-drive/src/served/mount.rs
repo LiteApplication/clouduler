@@ -202,7 +202,9 @@ impl MountManager {
                 Ok(()) => mounted.push(key),
                 Err(e) => {
                     for key in mounted {
-                        let _ = self.unmount(&key);
+                        if let Err(e) = self.unmount(&key) {
+                            tracing::warn!(error = %e, "could not unmount after a failed mount batch");
+                        }
                     }
                     return Err(e);
                 }

@@ -53,19 +53,21 @@ pub async fn target(cfg: &ClusterConfig, command: BackupTargetCommand) -> Result
         } => {
             set_target(
                 cfg,
-                id,
-                drive,
-                destination,
-                frequency,
-                time_of_day,
-                keep_last,
-                keep_within,
-                keep_daily,
-                keep_weekly,
-                keep_monthly,
-                keep_yearly,
-                stop_containers,
-                enabled,
+                TargetSpec {
+                    id,
+                    drive,
+                    destination_id: destination,
+                    frequency,
+                    time_of_day,
+                    keep_last,
+                    keep_within,
+                    keep_daily,
+                    keep_weekly,
+                    keep_monthly,
+                    keep_yearly,
+                    stop_containers,
+                    enabled,
+                },
                 via.as_deref(),
             )
             .await
@@ -234,9 +236,8 @@ async fn remove_destination(cfg: &ClusterConfig, id: &str, via: Option<&str>) ->
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn set_target(
-    cfg: &ClusterConfig,
+/// What `backup target set` asks the cluster to store.
+struct TargetSpec {
     id: String,
     drive: String,
     destination_id: String,
@@ -250,8 +251,24 @@ async fn set_target(
     keep_yearly: Option<u32>,
     stop_containers: Option<bool>,
     enabled: bool,
-    via: Option<&str>,
-) -> Result<()> {
+}
+
+async fn set_target(cfg: &ClusterConfig, spec: TargetSpec, via: Option<&str>) -> Result<()> {
+    let TargetSpec {
+        id,
+        drive,
+        destination_id,
+        frequency,
+        time_of_day,
+        keep_last,
+        keep_within,
+        keep_daily,
+        keep_weekly,
+        keep_monthly,
+        keep_yearly,
+        stop_containers,
+        enabled,
+    } = spec;
     let frequency_secs = humantime::parse_duration(&frequency)
         .with_context(|| format!("parsing --frequency {frequency}"))?
         .as_secs();

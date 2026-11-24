@@ -432,12 +432,16 @@ pub fn remove_legacy_plumbing() {
     let routes =
         ip(&["-o", "route", "show", "proto", LEGACY_ROUTE_PROTO], true).unwrap_or_default();
     if !routes.trim().is_empty() {
-        let _ = ip(&["route", "flush", "proto", LEGACY_ROUTE_PROTO], true);
+        if let Err(e) = ip(&["route", "flush", "proto", LEGACY_ROUTE_PROTO], true) {
+            tracing::warn!(error = %e, "could not flush the legacy routes");
+        }
     }
     let links = ip(&["-o", "link", "show", "type", "ipip"], false).unwrap_or_default();
     let tunnels = legacy_tunnels(&links);
     for dev in &tunnels {
-        let _ = ip(&["link", "del", "dev", dev], false);
+        if let Err(e) = ip(&["link", "del", "dev", dev], false) {
+            tracing::warn!(error = %e, "could not delete a legacy tunnel");
+        }
     }
     if !tunnels.is_empty() {
         let _ = ip(&["fou", "del", "port", LEGACY_FOU_PORT], false);

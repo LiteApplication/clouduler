@@ -431,7 +431,9 @@ impl Materializer {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !keep.contains_key(&name) {
-                let _ = std::fs::remove_dir_all(entry.path());
+                if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                    tracing::warn!(error = %e, "could not remove a stale materialized directory");
+                }
             }
         }
         Ok(())
