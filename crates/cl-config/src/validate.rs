@@ -809,6 +809,15 @@ impl ClusterConfig {
                 format!("no network named {}", self.web.network),
             ));
         };
+        if net.is_managed() {
+            return Err(ConfigError::invalid(
+                "web.network",
+                format!(
+                    "{} is a managed network: a node's address there is only reachable through that node, so the dashboard cannot be published on it; pick another network",
+                    self.web.network
+                ),
+            ));
+        }
         if net.domain.is_none() && !self.web.address.contains('.') {
             return Err(ConfigError::invalid(
                 "web.address",
@@ -962,6 +971,14 @@ impl ClusterConfig {
                         format!("no network named {network}"),
                     ));
                 };
+                if net.is_managed() {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.networks",
+                        format!(
+                            "{network} is a managed network: a node's address there is only reachable through that node, so the login page cannot be published on it; pick another network"
+                        ),
+                    ));
+                }
                 if net.domain.is_none() {
                     return Err(ConfigError::invalid(
                         "proxy.auth.networks",
@@ -2487,15 +2504,23 @@ cloudflare:
         assert!(n1.is_addressless_on("lan"));
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         let again: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(again.nodes["n1"].network.get("lan"), Some(&NodeAddress::None));
+        assert_eq!(
+            again.nodes["n1"].network.get("lan"),
+            Some(&NodeAddress::None)
+        );
         parse(&[("lan: 192.168.1.1", "lan: null")]).expect("explicit null");
     }
 
     #[test]
     fn only_a_private_network_may_be_listed_without_an_address() {
         let err = parse(&[("tailscale: 10.10.0.1", "tailscale:")]).unwrap_err();
-        assert!(err.to_string().contains("needs an IP address on every node"), "{err}");
-        let err = parse(&[("wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }", "wan:")]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("needs an IP address on every node"),
+            "{err}"
+        );
+        let err =
+            parse(&[("wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }", "wan:")]).unwrap_err();
         assert!(err.to_string().contains("public network takes"), "{err}");
     }
 
@@ -2503,11 +2528,10 @@ cloudflare:
     fn a_managed_network_may_be_listed_without_an_address_for_access() {
         let cfg = managed("192.168.32.0/24", "~", "192.168.32.3").expect("valid");
         assert!(cfg.nodes["n1"].is_addressless_on("mgd"));
-        // Not reserved, and the free-address search ignores it.
+        // Not reserved: it holds no address.
         let reserved = cfg.managed_reserved("mgd");
         assert!(reserved.contains(&"192.168.32.3".parse().unwrap()));
         assert!(!reserved.contains(&"192.168.32.2".parse().unwrap()));
-        assert_eq!(cfg.next_free_node_address("mgd"), Some("192.168.32.2".parse().unwrap()));
         // Still needs an IPv4 internal address for the tunnel.
         let err = parse(&[
             (
@@ -2521,7 +2545,10 @@ cloudflare:
         ])
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no IPv4 address on the internal network"), "{err}");
+        assert!(
+            err.contains("no IPv4 address on the internal network"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2546,15 +2573,27 @@ cloudflare:
     }
 
     #[test]
-    fn the_next_free_node_address_skips_reserved_and_used() {
-        let cfg = managed("192.168.32.0/24", "192.168.32.2", "192.168.32.4").unwrap();
-        // .0 network, .1 gateway, .2 and .4 nodes, so .3 is the lowest free.
-        assert_eq!(
-            cfg.next_free_node_address("mgd"),
-            Some("192.168.32.3".parse().unwrap())
+    fn the_dashboard_and_login_page_cannot_sit_on_a_managed_network() {
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  mgd:       { type: private, subnet: 192.168.32.0/24, managed: true, domain: m.example.com }",
+            ),
+            ("      lan: 192.168.1.1\n", "      lan: 192.168.1.1\n      mgd: 192.168.32.2\n"),
+            ("web: { address: cloud, network: tailscale }", "web: { address: cloud, network: mgd }"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("web.network") && err.contains("managed network"),
+            "{err}"
         );
-        assert_eq!(cfg.next_free_node_address("lan"), None);
-        assert_eq!(cfg.next_free_node_address("nope"), None);
+    }
+
+    #[test]
+    fn the_reserved_addresses_cover_network_gateway_broadcast_and_nodes() {
+        let cfg = managed("192.168.32.0/24", "192.168.32.2", "192.168.32.4").unwrap();
+        // .0 network, .1 gateway, .2 and .4 nodes, .255 broadcast.
         let reserved = cfg.managed_reserved("mgd");
         for ip in [
             "192.168.32.0",
@@ -2565,11 +2604,5 @@ cloudflare:
         ] {
             assert!(reserved.contains(&ip.parse().unwrap()), "{ip}");
         }
-        // A /29 with both hosts taken still has room, until it is full.
-        let small = managed("192.168.32.0/29", "192.168.32.2", "192.168.32.3").unwrap();
-        assert_eq!(
-            small.next_free_node_address("mgd"),
-            Some("192.168.32.4".parse().unwrap())
-        );
     }
 }

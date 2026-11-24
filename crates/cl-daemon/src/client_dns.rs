@@ -106,7 +106,12 @@ async fn run(
                 .find(|node| cl_raft::node_id(node.id) == id)
         });
         let no_private = crate::proxy::private_shortcut_denied_hosts(&cfg, &state);
-        let views = views_for(&cfg, &allocations, &hosts, &no_private, leader);
+        let mut views = views_for(&cfg, &allocations, &hosts, &no_private, leader);
+        add_managed_containers(
+            &cfg,
+            &mut views,
+            &crate::proxy::managed_container_hosts(&cfg, &state),
+        );
         let live = Arc::new(cfg.clone());
         let segments = segments_of(&cfg, &allocations);
         let classify: Classifier = Arc::new(move |ip| {
@@ -305,6 +310,46 @@ fn views_for(
     views
 }
 
+/// A stack route on a managed network is answered with its containers' own
+/// addresses (the same ones the DNS provider gets), never a node's address
+/// there. Clients on the managed network itself always get them; any other
+/// client that can reach the network gets them only for a name it would
+/// otherwise be refused, since a node address on its own network still works
+/// for it. A route with no running container adds nothing.
+fn add_managed_containers(
+    cfg: &ClusterConfig,
+    views: &mut BTreeMap<String, View>,
+    hosts: &BTreeMap<(String, String), BTreeSet<std::net::Ipv4Addr>>,
+) {
+    for ((host, network), ips) in hosts {
+        let Some(net) = cfg.networks.get(network) else {
+            continue;
+        };
+        if ips.is_empty() {
+            continue;
+        }
+        let fqdn = qualify(host, net.domain.as_deref());
+        for (client_net, view) in views.iter_mut() {
+            if !cfg.reaches(client_net, network) {
+                continue;
+            }
+            let existing = view.records.iter().position(|r| r.name == fqdn);
+            if existing.is_some() && client_net != network {
+                continue;
+            }
+            let answers: Vec<ViewAnswer> = ips.iter().copied().map(ViewAnswer::A).collect();
+            view.refused.remove(&fqdn);
+            match existing {
+                Some(i) => view.records[i].answers = answers,
+                None => view.records.push(ViewRecord {
+                    name: fqdn.clone(),
+                    answers,
+                }),
+            }
+        }
+    }
+}
+
 /// The answers a client on `client_net` gets for `fqdn`: each serving node's
 /// address on the client's own network, or failing that on the route's.
 fn answers_for(
@@ -329,6 +374,11 @@ fn answers_for(
             // address itself.
             if let (Some(_), true) = (container, entry.private_shortcut) {
                 let own = cfg.access_of(client_net).iter().find_map(|net| {
+                    // A node's address on a managed network is only reachable
+                    // through that node, so it is never handed out.
+                    if cfg.is_managed_network(net) {
+                        return None;
+                    }
                     // Only IPv4 node addresses are routed through the segment.
                     let found: Vec<DesiredRecord> = records_for(cfg, fqdn, net, node)
                         .ok()?
@@ -354,8 +404,16 @@ fn answers_for(
             } else {
                 &entry.network
             };
-            let found = records_for(cfg, fqdn, own_net, node)
-                .or_else(|_| records_for(cfg, fqdn, &entry.network, node));
+            let node_records = |net: &str| {
+                if cfg.is_managed_network(net) {
+                    Err(cl_dns::DnsError::Invalid(format!(
+                        "a node's address on the managed network {net} is not handed out"
+                    )))
+                } else {
+                    records_for(cfg, fqdn, net, node)
+                }
+            };
+            let found = node_records(own_net).or_else(|_| node_records(&entry.network));
             if let Ok(found) = found {
                 records.extend(found);
             }
@@ -441,6 +499,58 @@ mod tests {
             answer(&views, "tailscale", "blog.example.com"),
             Some(&[a([10, 10, 0, 1])][..])
         );
+    }
+
+    fn managed_cfg() -> ClusterConfig {
+        let mut cfg = cfg();
+        cfg.networks.insert(
+            "mgd".into(),
+            serde_yaml::from_str(
+                "{ type: private, subnet: 192.168.32.0/24, managed: true, domain: m.example.com }",
+            )
+            .unwrap(),
+        );
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip("192.168.32.2".parse().unwrap()),
+        );
+        cfg
+    }
+
+    /// A node's address on a managed network is never an answer; the
+    /// container addresses of the route are, for clients on that network.
+    #[test]
+    fn a_managed_network_route_is_answered_with_container_addresses() {
+        let cfg = managed_cfg();
+        let rows = hosts(&[("files", "mgd", &["n1"])]);
+        let mut views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        for (name, view) in &views {
+            assert!(
+                view.records
+                    .iter()
+                    .all(|r| !r.answers.contains(&a([192, 168, 32, 2]))),
+                "{name}: {view:?}"
+            );
+        }
+        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
+        assert!(views["mgd"].refused.contains("files.m.example.com"));
+
+        let ips = BTreeMap::from([(
+            ("files".to_string(), "mgd".to_string()),
+            BTreeSet::from([Ipv4Addr::new(192, 168, 32, 7)]),
+        )]);
+        add_managed_containers(&cfg, &mut views, &ips);
+        assert_eq!(
+            answer(&views, "mgd", "files.m.example.com"),
+            Some(&[a([192, 168, 32, 7])][..])
+        );
+        assert!(!views["mgd"].refused.contains("files.m.example.com"));
+
+        // No running container, nothing to add.
+        let mut empty = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        let none = BTreeMap::from([(("files".to_string(), "mgd".to_string()), BTreeSet::new())]);
+        add_managed_containers(&cfg, &mut empty, &none);
+        assert!(answer(&empty, "mgd", "files.m.example.com").is_none());
     }
 
     /// `private_shortcut: false` hands a LAN client the route's own address.

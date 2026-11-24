@@ -1,8 +1,8 @@
 // Managed private networks (networks.NET.managed: true): clouduler builds one
 // cluster-wide VXLAN overlay over the subnet between the nodes that list an
-// address on it. These helpers mirror ClusterConfig::{managed_reserved,
-// next_free_node_address} (cl-config cluster.rs) and the managed rules of
-// cl-config validate.rs, so the form can autofill and flag mistakes before a
+// address on it. These helpers mirror ClusterConfig::managed_reserved
+// (cl-config cluster.rs) and the managed rules of
+// cl-config validate.rs, so the form can flag mistakes before a
 // save round-trips. The server stays the authority.
 
 import type { ClusterConfig, NetworkConfig } from '../api/types';
@@ -79,18 +79,6 @@ export function managedReserved(cfg: ClusterConfig, network: string): Set<number
     }
   }
   return out;
-}
-
-/** The lowest host address not reserved (ClusterConfig::next_free_node_address). */
-export function nextFreeNodeAddress(cfg: ClusterConfig, network: string): string | null {
-  const c = managedSubnet(cfg.networks[network]);
-  if (!c) return null;
-  const used = managedReserved(cfg, network);
-  // Host range like Ipv4Net::hosts(): /31 and /32 use every address, others skip network and broadcast.
-  const first = c.prefix >= 31 ? c.base : c.base + 1;
-  const last = c.prefix >= 31 ? c.base + size4(c) - 1 : c.base + size4(c) - 2;
-  for (let ip = first; ip <= last; ip++) if (!used.has(ip)) return intToIpv4(ip);
-  return null;
 }
 
 /** Problem with a managed network's own settings, or null. */

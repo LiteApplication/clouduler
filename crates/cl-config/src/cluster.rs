@@ -1493,16 +1493,6 @@ impl ClusterConfig {
         out
     }
 
-    /// The lowest host address of managed network `network` that is not the
-    /// network, broadcast or gateway address nor held by any node, for
-    /// autofilling a new node's address. `None` for a non managed network or
-    /// a full subnet.
-    pub fn next_free_node_address(&self, network: &str) -> Option<Ipv4Addr> {
-        let subnet = self.networks.get(network)?.managed_subnet()?;
-        let used = self.managed_reserved(network);
-        subnet.hosts().find(|ip| !used.contains(ip))
-    }
-
     /// Names of every public or wireguard network, whose outside reachability
     /// depends on a specific node, so a raw `x-clouduler.expose` port only
     /// schedules onto a node that has it open.
@@ -1592,6 +1582,16 @@ impl Node {
     /// The IP this node holds on a subnetted network.
     pub fn ip_on(&self, network: &str) -> Option<IpAddr> {
         self.network.get(network)?.as_ip()
+    }
+
+    /// Whether this node can host containers on `network`: it lists the
+    /// network and either holds an address on it or the network is managed (a
+    /// managed network's address is an optional node-local endpoint; hosting
+    /// needs only the tunnel). `managed` is whether the network is managed.
+    pub fn hosts_on(&self, network: &str, managed: bool) -> bool {
+        self.network
+            .get(network)
+            .is_some_and(|a| managed || *a != NodeAddress::None)
     }
 
     /// Whether this node lists `network` without an address (access only).

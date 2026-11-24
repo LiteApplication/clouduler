@@ -154,6 +154,7 @@ async fn validate(state: &AppState, body: &StaticRouteBody) -> Result<(), ApiErr
             body.network
         )));
     }
+    super::check_not_managed(&cluster_config, &body.network, "a static route")?;
     check_cloudflare_proxy(&cluster_config, &body.network, body.cloudflare_proxy)?;
     if let Some(node) = &body.node {
         if !cluster_config.nodes.contains_key(node) {

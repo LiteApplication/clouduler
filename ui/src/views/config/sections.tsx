@@ -46,7 +46,7 @@ import {
   TextField,
 } from '../../components/FormFields';
 import { fenceMarginWarning } from '../../lib/validate';
-import { isManaged, managedNetworkError, managedNodeAddressError, nextFreeNodeAddress } from '../../lib/managedNetwork';
+import { isManaged, managedNetworkError, managedNodeAddressError } from '../../lib/managedNetwork';
 
 export interface SectionProps {
   draft: ClusterConfig;
@@ -839,13 +839,15 @@ export function NodeCard({
       setPendingWireguard((prev) => (prev.includes(netName) ? prev : [...prev, netName]));
       return;
     }
-    const value: NodeAddress =
+    // A managed network starts as "access only" (no address): the node address
+    // there is an optional node-local endpoint, never something to fill in.
+    const value: NodeAddress | null =
       net.type === 'public'
         ? { ipv4: null, ipv6: null, domain: null, open_ports: [] }
         : isManaged(net)
-          ? (nextFreeNodeAddress(fullDraft, netName) ?? '')
+          ? null
           : '';
-    setAddress(netName, value);
+    onChange({ network: { ...node.network, [netName]: value } });
   };
 
   // Networks this node has an editor for: internal always, wireguard once
@@ -992,9 +994,13 @@ export function NodeCard({
                 id={`node-${name}-${netName}-access-only`}
                 label="Access only (no address)"
                 value={accessOnly}
-                onChange={(v) => onChange({ network: { ...node.network, [netName]: v ? null : (isManaged(net) ? (nextFreeNodeAddress(fullDraft, netName) ?? '') : '') } })}
-                hint="Route into this network without an address of its own."
-                help="The node implements the network (it routes and NATs traffic into it, and for a managed network joins the tunnel) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
+                onChange={(v) => onChange({ network: { ...node.network, [netName]: v ? null : '' } })}
+                hint={isManaged(net) ? 'No node address on this network (the default).' : 'Route into this network without an address of its own.'}
+                help={
+                  isManaged(net)
+                    ? "The node implements the managed network (it joins the tunnel and routes and NATs clients into it) without a node address of its own, which is the default. Containers still run on it. A node's own address on a managed network is only reachable through that node, so no DNS record or route ever publishes it; give one only if you want a node-local endpoint."
+                    : "The node implements the network (it routes and NATs traffic into it) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
+                }
                 configKey={`nodes.${name}.network.${netName}`}
                 disabled={disabled}
               />
@@ -1013,7 +1019,7 @@ export function NodeCard({
                 net.type === 'internal'
                   ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
                   : isManaged(net)
-                    ? "This node's address on the managed network: listing it makes the node implement the network. Prefilled with the next free address. It is an entry point for clients outside the overlay; containers on other nodes cannot reach it and use the gateway (the first host address) instead."
+                    ? "An optional node-local endpoint on the managed network. It is only reachable through this node (containers on other nodes use the gateway, the first host address, instead), so clouduler never publishes it in DNS or routes; leave it off unless something on this node needs it."
                     : "This node's fixed address on this network, inside its subnet."
               }
               configKey={`nodes.${name}.network.${netName}`}

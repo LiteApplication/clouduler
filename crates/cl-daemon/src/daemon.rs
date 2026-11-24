@@ -1638,7 +1638,7 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             }
         }
 
-        let desired = to_state(name, node, rpc_addr, known.nodes.get(name));
+        let desired = to_state(name, node, cfg, rpc_addr, known.nodes.get(name));
         if known.nodes.get(name) != Some(&desired) {
             let response = cluster.submit(Request::UpsertNode(desired)).await?;
             if let Some(error) = response.error {
@@ -1692,6 +1692,7 @@ fn to_port_protocol(protocol: cl_config::Protocol) -> cl_raft::PortProtocol {
 fn to_state(
     name: &str,
     node: &Node,
+    cfg: &ClusterConfig,
     rpc_addr: std::net::SocketAddr,
     current: Option<&NodeState>,
 ) -> NodeState {
@@ -1719,13 +1720,14 @@ fn to_state(
             .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
             .map(|(name, _)| name.clone())
             .collect(),
-        // An address-less private network is routed into for access only: the
-        // node hosts no containers on it, so it is not a placement candidate.
+        // An address-less listing of an unmanaged private network is routed into
+        // for access only, so it is no placement candidate; on a managed
+        // network the node address is optional and the node hosts regardless.
         networks: node
             .network
-            .iter()
-            .filter(|(_, addr)| !matches!(addr, cl_config::NodeAddress::None))
-            .map(|(name, _)| name.clone())
+            .keys()
+            .filter(|name| node.hosts_on(name, cfg.is_managed_network(name)))
+            .cloned()
             .collect(),
         // Public networks declare open ports on the router address; wireguard
         // ones on the tunnel interface address (a VPN provider's port

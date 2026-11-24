@@ -125,6 +125,7 @@ async fn validate(state: &AppState, body: &RedirectBody) -> Result<(), ApiError>
             body.network
         )));
     }
+    super::check_not_managed(&cluster_config, &body.network, "a redirect")?;
     check_cloudflare_proxy(&cluster_config, &body.network, body.cloudflare_proxy)?;
     Ok(())
 }

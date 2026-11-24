@@ -181,8 +181,8 @@ pub(crate) fn managed_network_conflict(
                 .nodes
                 .get(node)
                 .is_some_and(|n| n.network.contains_key(name));
-            // An address-less listing no longer lets the node host instances.
-            let has = spec.ip_on(name).is_some();
+            // Dropping the listing (or, off a managed network, its address) ends hosting.
+            let has = spec.hosts_on(name, new.is_managed_network(name));
             if had && !has {
                 for assignment in cluster_state.assignments.values() {
                     if assignment.node != *node {

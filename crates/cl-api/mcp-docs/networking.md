@@ -247,8 +247,10 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   network `MNG_NET`. It exists only on nodes that list an address on the
   network (`nodes.N.network.NET`: a bare IPv4 inside the subnet, not the
   network, broadcast or gateway address, unique per node; or empty, `NET:`,
-  for an access-only node that builds the overlay and routes into it but
-  holds no address and is never a placement candidate for it). Peers are those
+  with no address, the default: the node still builds the overlay, routes
+  into it and is a placement candidate, the address being only an optional
+  node-local endpoint; `Node::hosts_on`). On an unmanaged private network an
+  empty value is access only and never hosts). Peers are those
   nodes' internal addresses; MTU is the underlay's minus 50. Built by
   `cl_daemon::overlay` (`ensure_managed`), never swept as a stack orphan,
   torn down when a node stops implementing it or the network goes away.
@@ -256,7 +258,9 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   node's own address is a secondary address on its bridge: an entry point for
   outside clients and the proxy/DNS target for the network's `domain`.
   Containers on other nodes cannot reach a node address (anycast MAC); they
-  use the gateway.
+  use the gateway. Nothing publishes it: no DNS record, client DNS answer,
+  static route, redirect, dashboard or login portal uses a node address on a
+  managed network (see DNS below).
 * Container pool: the subnet minus network, broadcast, gateway and every node
   address (`ClusterConfig::managed_reserved`). The leader allocates in raft
   under the `@NET` key and releases on instance removal.
@@ -271,6 +275,17 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   with the address on a network the asker shares (primary first), else the
   target's primary address.
 * Masquerade is off: the internet needs a nat, egress or wireguard network.
+
+DNS: a stack route hostname on a managed network is published (Cloudflare) as the
+containers' own addresses (`proxy::managed_container_hosts`), since a node's own
+address there is only reachable via that node; the `/32` routes make container
+addresses reachable from any entry node. Static routes and redirects on a
+managed network are refused by the API (`check_not_managed`); stored ones
+publish nothing and set a DNS status error (`unaddressed_hosts`). `web.network`
+and `proxy.auth.networks` may not be managed (validation). The client DNS
+server (`client_dns::add_managed_containers`) answers a managed route with the
+container addresses to clients on that network, and never with a node address
+on one.
 
 Access is by routing. Clouduler advertises nothing: clients route the whole
 subnet via any implementing node (for example `tailscale up
@@ -314,8 +329,8 @@ gateway or reserved addresses drift, only with nothing attached (else it logs).
 Validation refuses a managed address on a node whose internal address is not
 IPv4. Rolling upgrade: every node must run a managed-capable release before
 `managed: true` is set; an older daemon rejects the config and an older leader
-drops managed allocations. The UI prefills new node addresses with
-`ClusterConfig::next_free_node_address`.
+drops managed allocations. The UI adds a managed network to a node as access
+only (no address) and does not fill one in.
 
 ## Host firewall
 

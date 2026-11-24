@@ -324,7 +324,7 @@ Nodes do not use logins. They prove they hold the **cluster key** (`/etc/cloudul
 <OptionTable rows={[
   {"key": "proxy.auth", "type": "object", "default": "absent", "reload": "live", "description": "Service login: a portal that stands in front of apps whose routes use the authenticated middleware. A separate OIDC client from auth.oidc."},
   {"key": "proxy.auth.host", "type": "label or FQDN", "reload": "live", "description": "Portal hostname. A bare label gets each listed network's domain appended.", "quirks": "Required when proxy.auth is set. Must differ from the dashboard hostname."},
-  {"key": "proxy.auth.networks", "type": "list of network names", "reload": "live", "description": "Networks that offer the login. Each needs a domain. A route can require login only on a listed network.", "quirks": "Required, at least one."},
+  {"key": "proxy.auth.networks", "type": "list of network names", "reload": "live", "description": "Networks that offer the login. Each needs a domain. A route can require login only on a listed network.", "quirks": "Required, at least one. A managed private network is refused (a node's address there is only reachable through that node), so a route on one cannot require login."},
   {"key": "proxy.auth.issuer", "type": "https URL", "reload": "live", "description": "Identity provider for the portal.", "quirks": "Required."},
   {"key": "proxy.auth.client_id", "type": "string", "reload": "live", "description": "Client ID for the portal. Its secret is sealed separately.", "quirks": "Required."},
   {"key": "proxy.auth.scopes", "type": "list", "default": "[openid, profile, email, groups]", "reload": "live", "description": "OIDC scopes. Must include openid.", "quirks": "The UI takes space- or comma-separated text."},

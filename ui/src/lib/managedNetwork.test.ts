@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClusterConfig } from '../api/types';
-import { managedNetworkError, managedNodeAddressError, nextFreeNodeAddress } from './managedNetwork';
+import { managedNetworkError, managedNodeAddressError } from './managedNetwork';
 
 function cfg(subnet: string, addrs: Record<string, string>, extra: Record<string, unknown> = {}): ClusterConfig {
   return {
@@ -14,12 +14,6 @@ function cfg(subnet: string, addrs: Record<string, string>, extra: Record<string
 }
 
 describe('managed networks', () => {
-  it('autofills the lowest free host address', () => {
-    expect(nextFreeNodeAddress(cfg('192.168.32.0/24', {}), 'mgd')).toBe('192.168.32.2');
-    expect(nextFreeNodeAddress(cfg('192.168.32.0/24', { a: '192.168.32.2', b: '192.168.32.4' }), 'mgd')).toBe('192.168.32.3');
-    expect(nextFreeNodeAddress(cfg('192.168.32.0/29', { a: '192.168.32.2', b: '192.168.32.3', c: '192.168.32.4', d: '192.168.32.5', e: '192.168.32.6' }), 'mgd')).toBeNull();
-    expect(nextFreeNodeAddress(cfg('192.168.32.0/24', {}), 'lan')).toBeNull();
-  });
   it('checks the subnet', () => {
     expect(managedNetworkError(cfg('192.168.32.0/24', {}), 'mgd')).toBeNull();
     expect(managedNetworkError(cfg('192.168.32.0/30', {}), 'mgd')).toMatch(/prefix length/);

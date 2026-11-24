@@ -589,12 +589,10 @@ impl StackFile {
                 ) {
                     continue;
                 }
-                // An address-less listing routes into the network but hosts nothing on it.
-                if !cluster.nodes.values().any(|n| {
-                    n.network
-                        .get(net)
-                        .is_some_and(|a| *a != crate::cluster::NodeAddress::None)
-                }) {
+                // An address-less listing of an unmanaged network routes into it but hosts
+                // nothing on it; on a managed network the address is optional.
+                let managed = cluster.is_managed_network(net);
+                if !cluster.nodes.values().any(|n| n.hosts_on(net, managed)) {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.networks"),
                         format!(
@@ -2106,6 +2104,29 @@ services:
         // Public wins over nothing but a managed network still is not an overlay.
         let f = stack("services:\n  web:\n    image: x\nnetworks:\n  mgd1: {}\n  wan: {}\n");
         assert_eq!(f.overlay_network(&cluster), Some("wan"));
+    }
+
+    #[test]
+    fn a_managed_network_needs_no_node_address_to_host_a_stack() {
+        let mut cluster = managed_cluster();
+        let node = cluster.nodes.values_mut().next().unwrap();
+        node.network
+            .insert("mgd1".into(), crate::cluster::NodeAddress::None);
+        let f =
+            stack("services:\n  web:\n    image: x\n    networks: [mgd1]\nnetworks:\n  mgd1: {}\n");
+        f.validate(&cluster)
+            .expect("an address-less listing still hosts on a managed network");
+        // An unmanaged private network does not: the listing is access only.
+        let node = cluster.nodes.values_mut().next().unwrap();
+        node.network
+            .insert("lan".into(), crate::cluster::NodeAddress::None);
+        for n in cluster.nodes.values_mut().skip(1) {
+            n.network.remove("lan");
+        }
+        let node = cluster.nodes.values().next().unwrap();
+        assert!(node.hosts_on("mgd1", true));
+        assert!(!node.hosts_on("lan", false));
+        assert!(!node.hosts_on("absent", true));
     }
 
     #[test]
