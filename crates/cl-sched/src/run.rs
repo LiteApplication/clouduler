@@ -515,31 +515,32 @@ impl Scheduler {
         let config_revs = label_revisions(reconcile::LABEL_CONFIGS);
 
         type Revisions = BTreeMap<String, u64>;
-        let report: BTreeMap<InstanceId, (bool, Revisions, Revisions)> = state
+        let empty = Revisions::new();
+        let report: BTreeMap<&InstanceId, (bool, &Revisions, &Revisions)> = state
             .assignments_on(&self.node)
             .map(|a| {
                 (
-                    a.instance.clone(),
+                    &a.instance,
                     (
                         running.get(&a.instance).copied().unwrap_or(false),
-                        revisions.get(&a.instance).cloned().unwrap_or_default(),
-                        config_revs.get(&a.instance).cloned().unwrap_or_default(),
+                        revisions.get(&a.instance).unwrap_or(&empty),
+                        config_revs.get(&a.instance).unwrap_or(&empty),
                     ),
                 )
             })
             .collect();
 
-        let current: BTreeMap<InstanceId, (bool, Revisions, Revisions)> = state
+        let current: BTreeMap<&InstanceId, (bool, &Revisions, &Revisions)> = state
             .container_status
             .iter()
             .filter(|(_, status)| status.node == self.node)
             .map(|(id, status)| {
                 (
-                    id.clone(),
+                    id,
                     (
                         status.running,
-                        status.secret_revisions.clone(),
-                        status.config_revisions.clone(),
+                        &status.secret_revisions,
+                        &status.config_revisions,
                     ),
                 )
             })
@@ -554,15 +555,15 @@ impl Scheduler {
                 node: self.node.clone(),
                 running: report
                     .iter()
-                    .map(|(id, (r, _, _))| (id.clone(), *r))
+                    .map(|(id, (r, _, _))| ((*id).clone(), *r))
                     .collect(),
                 secret_revisions: report
                     .iter()
-                    .map(|(id, (_, revs, _))| (id.clone(), revs.clone()))
+                    .map(|(id, (_, revs, _))| ((*id).clone(), (*revs).clone()))
                     .collect(),
                 config_revisions: report
-                    .into_iter()
-                    .map(|(id, (_, _, revs))| (id, revs))
+                    .iter()
+                    .map(|(id, (_, _, revs))| ((*id).clone(), (*revs).clone()))
                     .collect(),
             })
             .await
@@ -874,7 +875,7 @@ impl Scheduler {
             }
 
             // A missing secret or key blocks this container, not the whole pass.
-            let objects =
+            let mut objects =
                 match self
                     .materializer
                     .prepare(state, instance, &service.configs, &service.secrets)
@@ -885,7 +886,7 @@ impl Scheduler {
                         continue;
                     }
                 };
-            config_edits.extend(objects.config_edits.clone());
+            config_edits.append(&mut objects.config_edits);
 
             let managed_attached = file.managed_attachments(&live, &instance.service);
             let overlay =

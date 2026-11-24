@@ -592,13 +592,13 @@ pub fn place(
             .assignments
             .get(&item.id)
             .and_then(|a| a.image_digest.as_deref());
-        let target = eligible.iter().min_by_key(|node| {
+        let target = eligible.iter().min_by_key(|&node| {
             (
                 node.last_resort,
                 std::cmp::Reverse(users_on(&node.name)),
                 pinned_digest.is_some_and(|d| !node.holds_image(&item.image, Some(d))),
                 load.get(&node.name).copied().unwrap_or(0),
-                node.name.clone(),
+                &node.name,
             )
         });
 
