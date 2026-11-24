@@ -547,13 +547,51 @@ pub async fn run(
     relay.abort();
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.
-    drives.shutdown().await;
-    let stopped = cluster.shutdown().await;
+    timed_step("drives", DRIVES_SHUTDOWN_TIMEOUT, drives.shutdown()).await;
+    let stopped = timed_step("cluster", CLUSTER_SHUTDOWN_TIMEOUT, cluster.shutdown())
+        .await
+        .unwrap_or(Ok(()));
     // Last, so the proxy keeps answering for as long as the process lives: the
     // port is only free for the next start once we exit anyway.
-    proxy.shutdown().await;
+    timed_step("proxy", PROXY_SHUTDOWN_TIMEOUT, proxy.shutdown()).await;
     stopped?;
     Ok(())
+}
+
+/// Per-step budgets for the teardown above. Their sum plus the host-shutdown
+/// push must stay under the unit's `TimeoutStopSec` (90, see cl-init's
+/// systemd unit), or systemd SIGKILLs the daemon mid-step.
+const DRIVES_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const CLUSTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
+const PROXY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run one shutdown step for at most `limit`, logging how long it took, so a
+/// slow step is named in the journal and cannot block the ones after it.
+/// `None` when it timed out.
+async fn timed_step<T>(
+    step: &str,
+    limit: Duration,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(limit, work).await {
+        Ok(value) => {
+            info!(
+                step,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "shutdown step done"
+            );
+            Some(value)
+        }
+        Err(_) => {
+            warn!(
+                step,
+                limit_secs = limit.as_secs(),
+                "shutdown step timed out, carrying on"
+            );
+            None
+        }
+    }
 }
 
 /// How long a leader waits for another node to take over before it carries on

@@ -249,7 +249,10 @@ pub fn start(
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_ok() && *shutdown_rx.borrow() {
-                            running.teardown();
+                            // Unmounts and un-exports block on the kernel, and
+                            // a busy mount can hang: keep that off the runtime
+                            // so the other shutdown steps stay responsive.
+                            let _ = tokio::task::spawn_blocking(move || running.teardown()).await;
                             return;
                         }
                     }

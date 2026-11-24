@@ -50,7 +50,7 @@ impl Unit {
              RestartSec=5\n\
              RestartPreventExitStatus={removed}\n\
              TimeoutStartSec=300\n\
-             TimeoutStopSec=30\n\
+             TimeoutStopSec=90\n\
              WatchdogSec=120\n\
              KillMode=mixed\n\
              SyslogIdentifier=clouduler\n\
