@@ -1,9 +1,13 @@
 name: release
 
-# Pushes to master also run the build, and publish it as a pre-release. GitHub only
-# lets a tag ref restore caches saved from the default branch, never from
-# another tag, so master is what keeps the release-profile cache warm. Tag runs
-# restore it and do not save.
+# Tags build in release mode and publish a release. Pushes to master build in
+# debug mode (much faster) and publish that as a pre-release. GitHub only lets
+# a tag ref restore caches saved from the default branch, never from another
+# tag, so master saves the cache; tag runs restore it and do not save. The
+# debug and release profiles use separate target dirs, so master's cache does
+# not warm the release build, but dependencies compiled by sccache still hit.
+# Pre-release assets keep the release asset names, so a pinned pre-release url
+# still resolves; they are just unoptimized binaries.
 on:
   push:
     branches: [master]
@@ -54,13 +58,23 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      # tags: release build; master: debug build
       - name: build
-        run: cargo build --release --target ${{ matrix.target }} -p clouduler
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            cargo build --release --target ${{ matrix.target }} -p clouduler
+          else
+            cargo build --target ${{ matrix.target }} -p clouduler
+          fi
 
       - name: package
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/clouduler dist/clouduler-${{ matrix.target }}
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            cp target/${{ matrix.target }}/release/clouduler dist/clouduler-${{ matrix.target }}
+          else
+            cp target/${{ matrix.target }}/debug/clouduler dist/clouduler-${{ matrix.target }}
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
