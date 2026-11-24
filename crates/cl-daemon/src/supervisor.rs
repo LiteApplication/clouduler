@@ -71,6 +71,14 @@ impl Supervisor {
     }
 }
 
+/// Log a failure that cannot be acted on at the call site, instead of
+/// discarding it with `let _ =`.
+pub fn log_err<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) {
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "{what}");
+    }
+}
+
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         (*s).to_string()

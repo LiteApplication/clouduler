@@ -29,6 +29,7 @@
 //! still in flight then yields a partial tree for that run; the next scheduled
 //! run (or the stale-run watchdog) corrects it.
 
+use crate::supervisor::log_err;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -97,12 +98,15 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 if already_running {
                     continue;
                 }
-                let _ = cluster
-                    .submit(Request::SetBackupTargetLastRun {
-                        id: target.id.clone(),
-                        at: now,
-                    })
-                    .await;
+                log_err(
+                    "recording a scheduled backup run time failed",
+                    cluster
+                        .submit(Request::SetBackupTargetLastRun {
+                            id: target.id.clone(),
+                            at: now,
+                        })
+                        .await,
+                );
                 let run = BackupRun {
                     id: Uuid::new_v4().to_string(),
                     target_id: target.id.clone(),
@@ -113,7 +117,10 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                     outcome: BackupRunOutcome::Running { percent: None },
                     triggered_by: BackupTrigger::Schedule,
                 };
-                let _ = cluster.submit(Request::RecordBackupRun(run)).await;
+                log_err(
+                    "recording a scheduled backup run failed",
+                    cluster.submit(Request::RecordBackupRun(run)).await,
+                );
             }
 
             tracker.retain_running(&state);
@@ -137,7 +144,10 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                             (now - last_progress) / 3600
                         ),
                     };
-                    let _ = cluster.submit(Request::RecordBackupRun(stale)).await;
+                    log_err(
+                        "recording a stale backup run failed",
+                        cluster.submit(Request::RecordBackupRun(stale)).await,
+                    );
                 }
             }
         }
@@ -212,6 +222,15 @@ pub fn start_runner(
                 continue;
             };
             let state = cluster.snapshot().await;
+            let env = RunEnv {
+                cluster: &cluster,
+                registry: &registry,
+                docker: &docker,
+                key: &key,
+                data_dir: &data_dir,
+                node_name: &node_name,
+                state: &state,
+            };
 
             for run in state.restic_runs.values() {
                 if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
@@ -234,16 +253,12 @@ pub fn start_runner(
                             continue;
                         }
                         claim_and_execute(
-                            &cluster,
-                            &registry,
-                            &docker,
-                            &key,
-                            &data_dir,
-                            &node_name,
-                            &state,
-                            run,
-                            target,
-                            destination,
+                            &env,
+                            &RunTarget {
+                                run,
+                                target,
+                                destination,
+                            },
                             &in_flight,
                         )
                         .await;
@@ -276,23 +291,22 @@ pub fn start_runner(
                             failed.outcome = BackupRunOutcome::Failed {
                                 error: format!("syncing {} to {node}: {e}", run.drive),
                             };
-                            let _ = cluster.submit(Request::RecordBackupRun(failed)).await;
+                            log_err(
+                                "recording a failed backup sync failed",
+                                cluster.submit(Request::RecordBackupRun(failed)).await,
+                            );
                         }
                     }
                     BackupDestinationKind::Ssh { .. } | BackupDestinationKind::S3 { .. }
                         if is_source =>
                     {
                         claim_and_execute(
-                            &cluster,
-                            &registry,
-                            &docker,
-                            &key,
-                            &data_dir,
-                            &node_name,
-                            &state,
-                            run,
-                            target,
-                            destination,
+                            &env,
+                            &RunTarget {
+                                run,
+                                target,
+                                destination,
+                            },
                             &in_flight,
                         )
                         .await;
@@ -304,36 +318,37 @@ pub fn start_runner(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a backup run needs from the node it executes on.
+#[derive(Clone, Copy)]
+struct RunEnv<'a> {
+    cluster: &'a Arc<ClusterNode>,
+    registry: &'a DriveRegistry,
+    docker: &'a cl_docker::DockerHandle,
+    key: &'a ClusterKey,
+    data_dir: &'a Path,
+    node_name: &'a str,
+    state: &'a ClusterState,
+}
+
+/// The run being executed with the target and destination it belongs to.
+#[derive(Clone, Copy)]
+struct RunTarget<'a> {
+    run: &'a BackupRun,
+    target: &'a DriveBackupTarget,
+    destination: &'a BackupDestination,
+}
+
 async fn claim_and_execute(
-    cluster: &Arc<ClusterNode>,
-    registry: &DriveRegistry,
-    docker: &cl_docker::DockerHandle,
-    key: &ClusterKey,
-    data_dir: &Path,
-    node_name: &str,
-    state: &ClusterState,
-    run: &BackupRun,
-    target: &DriveBackupTarget,
-    destination: &BackupDestination,
+    env: &RunEnv<'_>,
+    at: &RunTarget<'_>,
     in_flight: &Arc<Mutex<BTreeSet<String>>>,
 ) {
+    let RunEnv { cluster, .. } = *env;
+    let run = at.run;
     if !in_flight.lock().await.insert(run.id.clone()) {
         return;
     }
-    let result = execute(
-        cluster,
-        registry,
-        docker,
-        key,
-        data_dir,
-        node_name,
-        state,
-        run,
-        target,
-        destination,
-    )
-    .await;
+    let result = execute(env, at).await;
     let outcome = match &result {
         Ok(outcome) => outcome.clone(),
         Err(e) => {
@@ -346,39 +361,24 @@ async fn claim_and_execute(
     let mut finished = run.clone();
     finished.finished_at = Some(unix_now());
     finished.outcome = outcome;
-    let _ = cluster.submit(Request::RecordBackupRun(finished)).await;
+    log_err(
+        "recording a finished backup run failed",
+        cluster.submit(Request::RecordBackupRun(finished)).await,
+    );
     in_flight.lock().await.remove(&run.id);
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute(
-    cluster: &Arc<ClusterNode>,
-    registry: &DriveRegistry,
-    docker: &cl_docker::DockerHandle,
-    key: &ClusterKey,
-    data_dir: &Path,
-    node_name: &str,
-    state: &ClusterState,
-    run: &BackupRun,
-    target: &DriveBackupTarget,
-    destination: &BackupDestination,
-) -> Result<BackupRunOutcome> {
+async fn execute(env: &RunEnv<'_>, at: &RunTarget<'_>) -> Result<BackupRunOutcome> {
+    let RunEnv { cluster, state, .. } = *env;
+    let RunTarget { run, target, .. } = *at;
     let instances = instances_using_drive(state, &run.drive);
     let should_stop = resolve_stop_containers(target, state, &instances);
 
     // One an operator stopped on purpose must not be resurrected by a backup.
     let mut stopped: Vec<InstanceId> = Vec::new();
     let result = stop_and_back_up(
-        cluster,
-        registry,
-        docker,
-        key,
-        data_dir,
-        node_name,
-        state,
-        run,
-        target,
-        destination,
+        env,
+        at,
         if should_stop { &instances } else { &[] },
         &mut stopped,
     )
@@ -391,21 +391,23 @@ async fn execute(
 /// The part of a backup run that happens while containers are down. Each instance
 /// is pushed onto `stopped` *before* its stop is requested, so a failure anywhere
 /// still leaves a complete list to restart.
-#[allow(clippy::too_many_arguments)]
 async fn stop_and_back_up(
-    cluster: &Arc<ClusterNode>,
-    registry: &DriveRegistry,
-    docker: &cl_docker::DockerHandle,
-    key: &ClusterKey,
-    data_dir: &Path,
-    node_name: &str,
-    state: &ClusterState,
-    run: &BackupRun,
-    target: &DriveBackupTarget,
-    destination: &BackupDestination,
+    env: &RunEnv<'_>,
+    at: &RunTarget<'_>,
     to_stop: &[InstanceId],
     stopped: &mut Vec<InstanceId>,
 ) -> Result<BackupRunOutcome> {
+    let RunEnv {
+        cluster,
+        registry,
+        docker,
+        node_name,
+        state,
+        ..
+    } = *env;
+    let RunTarget {
+        run, destination, ..
+    } = *at;
     let running = currently_running(state, to_stop);
     // One at a time rather than all `SetDesiredState` at once, so a node does not
     // shut down every affected container in the same instant.
@@ -447,17 +449,7 @@ async fn stop_and_back_up(
         };
         registry.ensure_staging_root(Path::new(path), &run.drive)?
     };
-    run_restic_backup(
-        cluster,
-        key,
-        data_dir,
-        state,
-        run,
-        target,
-        destination,
-        &source_path,
-    )
-    .await
+    run_restic_backup(env, at, &source_path).await
 }
 
 pub fn currently_running(state: &ClusterState, instances: &[InstanceId]) -> Vec<InstanceId> {
@@ -802,17 +794,23 @@ async fn push_drive_once(
 /// several-per-second status lines do not flood raft proposals.
 const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(3);
 
-#[allow(clippy::too_many_arguments)]
 async fn run_restic_backup(
-    cluster: &Arc<ClusterNode>,
-    key: &ClusterKey,
-    data_dir: &Path,
-    state: &ClusterState,
-    run: &BackupRun,
-    target: &DriveBackupTarget,
-    destination: &BackupDestination,
+    env: &RunEnv<'_>,
+    at: &RunTarget<'_>,
     source_path: &Path,
 ) -> Result<BackupRunOutcome> {
+    let RunEnv {
+        cluster,
+        key,
+        data_dir,
+        state,
+        ..
+    } = *env;
+    let RunTarget {
+        run,
+        target,
+        destination,
+    } = *at;
     backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret)
         .await?;
     let state = cluster.snapshot().await;
@@ -833,9 +831,12 @@ async fn run_restic_backup(
             let percent = *progress_rx.borrow();
             let mut updated = run_for_progress.clone();
             updated.outcome = BackupRunOutcome::Running { percent };
-            let _ = cluster_for_progress
-                .submit(Request::RecordBackupRun(updated))
-                .await;
+            log_err(
+                "recording backup progress failed",
+                cluster_for_progress
+                    .submit(Request::RecordBackupRun(updated))
+                    .await,
+            );
         }
     });
 
@@ -875,7 +876,7 @@ async fn run_restic_backup(
     .await
     .map_err(|e| anyhow!("the restic task panicked: {e}"))?;
 
-    let _ = reporter.await;
+    log_err("the backup progress reporter failed", reporter.await);
     result
 }
 
