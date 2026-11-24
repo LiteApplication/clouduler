@@ -274,6 +274,22 @@ impl StackFile {
             let Some(ext) = &svc.x_clouduler else {
                 continue;
             };
+            for (label, action) in &ext.actions {
+                let Some(image) = &action.image else { continue };
+                let field = format!("services.{name}.x-clouduler.actions.{label}.image");
+                if !action.standalone {
+                    return Err(ConfigError::invalid(
+                        field,
+                        "image needs standalone: true, other actions run inside the service's own container",
+                    ));
+                }
+                if image.trim().is_empty() || image.contains(char::is_whitespace) {
+                    return Err(ConfigError::invalid(
+                        field,
+                        "must be an image reference without spaces",
+                    ));
+                }
+            }
             for (volume, o) in &ext.volume_sync {
                 if o.enabled.is_some() {
                     return Err(enabled_rejected(format!(
@@ -1308,6 +1324,16 @@ mod tests {
         let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Flush: { cmd: sync, standalone: true }\n      volume_sync:\n        data: { before: Flush }\n";
         assert!(super::StackFile::parse(ok).is_err());
         super::StackFile::parse(&ok.replace(", standalone: true", "")).unwrap();
+    }
+
+    #[test]
+    fn an_action_image_needs_standalone() {
+        let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Fix: { cmd: ls, standalone: true, image: 'postgres:16' }\n";
+        let f = super::StackFile::parse(ok).unwrap();
+        let a = &f.services["db"].x_clouduler.as_ref().unwrap().actions["Fix"];
+        assert_eq!(a.image.as_deref(), Some("postgres:16"));
+        assert!(super::StackFile::parse(&ok.replace(", standalone: true", "")).is_err());
+        assert!(super::StackFile::parse(&ok.replace("postgres:16", "a b")).is_err());
     }
 
     #[test]

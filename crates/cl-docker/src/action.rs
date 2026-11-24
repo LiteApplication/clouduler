@@ -27,13 +27,14 @@ impl Docker {
     /// `main`: same image, environment, mounts, devices, limits, network and
     /// fixed address, but no published ports, restart policy or healthcheck, and
     /// the entrypoint cleared so `cmd` is the whole command. Only the primary
-    /// network is carried over.
+    /// network is carried over. `image` replaces the copied image; it must be local.
     pub async fn create_action_container(
         &self,
         main: &str,
         name: &str,
         cmd: Vec<String>,
         user: Option<String>,
+        image: Option<String>,
     ) -> Result<String> {
         let resp = self
             .inner
@@ -84,7 +85,7 @@ impl Docker {
         });
 
         let body = ContainerCreateBody {
-            image: config.image,
+            image: image.or(config.image),
             hostname: config.hostname,
             domainname: config.domainname,
             user: user.or(config.user).filter(|u| !u.is_empty()),

@@ -120,6 +120,7 @@ pub(super) async fn exec(ctx: &Ctx, args: ExecArgs) -> ToolResult {
             .clamp(1, MAX_EXEC_TIMEOUT),
         max_output: EXEC_OUTPUT_CAP,
         standalone: false,
+        image: None,
     };
     let r = instances::exec_run(&ctx.state, &id, req)
         .await

@@ -1723,6 +1723,9 @@ pub(crate) struct ExecRunRequest {
     /// Run in a one-off container replacing the instance's own for the duration; `stdin` unsupported.
     #[serde(default)]
     pub(crate) standalone: bool,
+    /// Image for the standalone container instead of the instance's own.
+    #[serde(default)]
+    pub(crate) image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1799,7 +1802,12 @@ pub(crate) async fn exec_run_local(
                 "a standalone action takes no stdin".to_string(),
             ));
         }
-        return exec_standalone(&docker, instance, req).await;
+        return exec_standalone(state, &docker, instance, req).await;
+    }
+    if req.image.is_some() {
+        return Err(ApiError::BadRequest(
+            "an image override needs a standalone action".to_string(),
+        ));
     }
     exec_run_docker(&docker, instance, req).await
 }
@@ -1810,6 +1818,7 @@ const STANDALONE_STOP_GRACE: Duration = Duration::from_secs(30);
 /// whole time, which keeps the reconciler from restarting the instance (`Docker::action_holds`);
 /// the instance is restarted at the end if it was running.
 async fn exec_standalone(
+    state: &AppState,
     docker: &Docker,
     instance: &InstanceId,
     req: ExecRunRequest,
@@ -1836,9 +1845,18 @@ async fn exec_standalone(
     let started = std::time::Instant::now();
     let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
     let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
+    if let Some(image) = &req.image {
+        if !docker.image_exists(image).await.map_err(docker_error)? {
+            let registries = super::registries::load(state).await;
+            docker
+                .pull_as(image, registries.for_image(image))
+                .await
+                .map_err(docker_error)?;
+        }
+    }
     // Created before the instance stops so the reconciler never sees a gap.
     docker
-        .create_action_container(&main, &name, req.cmd, req.user)
+        .create_action_container(&main, &name, req.cmd, req.user, req.image)
         .await
         .map_err(docker_error)?;
 
@@ -2081,6 +2099,7 @@ fn action_request(action: &cl_config::ServiceAction) -> ExecRunRequest {
         timeout_secs: action.timeout.map_or(30, |d| d.as_secs()),
         max_output: default_exec_output(),
         standalone: action.standalone,
+        image: action.image.clone(),
     }
 }
 

@@ -608,6 +608,7 @@ actions:
     confirm: true                                   # optional, default false: ask before running
     show_in_ui: true                                # optional, default true: false hides the button
     standalone: true                                # optional, default false: run in its own container
+    image: postgres:16                              # optional, needs standalone: run this image instead of the service's
 ```
 
 Predefined commands shown as buttons on the instance page. The key is the
@@ -622,7 +623,9 @@ takes its place (same image, env, mounts, devices, limits, primary network and
 address; no published ports or healthcheck; the image entrypoint is cleared so
 `cmd` is the whole command). Use it for work that needs the service down,
 such as `pg_resetwal` on a data directory. The service is started again
-afterwards. A standalone action cannot be a `volume_sync` hook.
+afterwards. `image:` swaps the one-off container's image (pulled first if
+missing); it is only allowed with `standalone: true`. A standalone action
+cannot be a `volume_sync` hook.
 
 An action can also run around a volume's replication, with `before` and
 `after` on that volume's `volume_sync` entry (service level only):

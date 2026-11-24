@@ -868,6 +868,10 @@ pub struct ServiceAction {
     /// afterwards. Off by default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub standalone: bool,
+    /// Image for the one-off container instead of the service's own. Needs
+    /// `standalone: true`; pulled first when it is not on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 impl ServiceAction {

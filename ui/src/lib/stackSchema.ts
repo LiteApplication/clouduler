@@ -187,7 +187,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.docker_socket': ['target', 'read_only', 'mode'],
   'services.*.x-clouduler.backup': ['stop_before'],
   'services.*.x-clouduler.terraform': ['enabled', 'secrets', 'configs', 'vars'],
-  'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui', 'standalone'],
+  'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui', 'standalone', 'image'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup', 'alerts', 'subnet'],
