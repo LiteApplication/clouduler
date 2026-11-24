@@ -375,7 +375,11 @@ fn add_managed_containers(
 /// without the list is unrestricted. Addresses in no configured subnet (public
 /// ones) are always reachable.
 fn client_can_reach(cfg: &ClusterConfig, client_net: &str, ip: IpAddr) -> bool {
-    if cfg.networks.get(client_net).is_none_or(|n| n.access.is_none()) {
+    if cfg
+        .networks
+        .get(client_net)
+        .is_none_or(|n| n.access.is_none())
+    {
         return true;
     }
     !cfg.networks.iter().any(|(name, net)| {
@@ -453,13 +457,18 @@ fn answers_for(
             // is handed out: the client's network, the route's, then any other
             // network of the node the client's `access` list grants.
             let mut candidates: Vec<&str> = vec![own_net, entry.network.as_str()];
-            if cfg.networks.get(client_net).is_some_and(|n| n.access.is_some()) {
-                candidates.extend(
-                    cfg.access_of(client_net)
-                        .iter()
-                        .map(String::as_str)
-                        .filter(|net| cfg.networks.get(*net).is_some_and(|n| n.kind.is_subnetted())),
-                );
+            if cfg
+                .networks
+                .get(client_net)
+                .is_some_and(|n| n.access.is_some())
+            {
+                candidates.extend(cfg.access_of(client_net).iter().map(String::as_str).filter(
+                    |net| {
+                        cfg.networks
+                            .get(*net)
+                            .is_some_and(|n| n.kind.is_subnetted())
+                    },
+                ));
             }
             for net in candidates {
                 let Ok(found) = node_records(net) else {
@@ -479,6 +488,12 @@ fn answers_for(
             }
         }
     }
+    // Whatever path produced an address, the client's network must be able to
+    // route to it.
+    records.retain(|r| match r.content.parse::<IpAddr>() {
+        Ok(ip) => client_can_reach(cfg, client_net, ip),
+        Err(_) => true,
+    });
     // A cname beside address records is not valid DNS; the publisher collapses
     // them the same way.
     let mut answers: Vec<ViewAnswer> = cl_dns::normalize_desired(&records)

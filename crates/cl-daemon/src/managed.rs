@@ -128,15 +128,23 @@ fn remove_chains() -> Result<()> {
 
 fn apply(input: &ManagedInput, routes: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<()> {
     let plan = managed_plan(input);
-    if plan.chains.is_empty() {
-        remove_chains()?;
-    } else {
-        // Forwarding is what lets a node carry a client to a container.
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1")
-            .context("enabling ipv4 forwarding")?;
-        apply_plan(&plan)?;
-    }
-    apply_routes(routes)?;
+    // The routes do not depend on the firewall: a failing chain must not leave
+    // a remote container unreachable (its address would be ARPed on the local
+    // bridge, where nobody answers).
+    let firewall = (|| -> Result<()> {
+        if plan.chains.is_empty() {
+            remove_chains()?;
+        } else {
+            // Forwarding is what lets a node carry a client to a container.
+            std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1")
+                .context("enabling ipv4 forwarding")?;
+            apply_plan(&plan)?;
+        }
+        Ok(())
+    })();
+    let routed = apply_routes(routes);
+    firewall?;
+    routed?;
     Ok(())
 }
 

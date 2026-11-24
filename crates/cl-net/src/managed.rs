@@ -255,6 +255,37 @@ pub fn route_commands(diff: &RouteDiff) -> Vec<Vec<String>> {
     out
 }
 
+/// The device `ip route get ADDR` reports (`10.10.0.2 dev eth1 src ...`).
+pub fn parse_route_get_dev(listing: &str) -> Option<String> {
+    let tokens: Vec<&str> = listing.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .find(|w| w[0] == "dev")
+        .map(|w| w[1].to_string())
+}
+
+/// The same route as [`route_commands`] gives for `dst`, pinned to `dev` and
+/// marked on-link so the kernel does not re-validate the next hop against the
+/// main table (a next hop only a policy-routing table knows, as with tailscale,
+/// is otherwise refused with "Nexthop has invalid gateway").
+pub fn onlink_route_command(dst: Ipv4Addr, via: Ipv4Addr, dev: &str) -> Vec<String> {
+    [
+        "route",
+        "replace",
+        &format!("{dst}/32"),
+        "via",
+        &via.to_string(),
+        "dev",
+        dev,
+        "onlink",
+        "proto",
+        ROUTE_PROTO,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 fn ip(args: &[String]) -> Result<String> {
     let out = Command::new("ip")
         .arg("-4")
@@ -291,7 +322,24 @@ pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<usize> {
         // is retried by the next pass.
         match ip(&command) {
             Ok(_) => changed += 1,
-            Err(e) => failed.push(e.to_string()),
+            Err(e) => {
+                // A `replace` that the kernel refuses for its next hop is
+                // retried pinned to the device that reaches it.
+                let retried = diff
+                    .set
+                    .iter()
+                    .find(|(dst, _)| command.get(2).is_some_and(|c| *c == format!("{dst}/32")))
+                    .filter(|_| command.get(1).is_some_and(|c| c == "replace"))
+                    .and_then(|(dst, via)| {
+                        let got = ip(&["route".into(), "get".into(), via.to_string()]).ok()?;
+                        let dev = parse_route_get_dev(&got)?;
+                        ip(&onlink_route_command(*dst, *via, &dev)).ok()
+                    });
+                match retried {
+                    Some(_) => changed += 1,
+                    None => failed.push(e.to_string()),
+                }
+            }
         }
     }
     // Without these routes a forwarded connection to a container on another
@@ -442,6 +490,36 @@ mod tests {
                 "201"
             ]
         );
+    }
+
+    #[test]
+    fn onlink_fallback_is_pinned_to_the_device() {
+        assert_eq!(
+            parse_route_get_dev("10.10.0.2 dev tailscale0 table 52 src 10.10.0.1 uid 0 \n"),
+            Some("tailscale0".to_string())
+        );
+        assert_eq!(
+            parse_route_get_dev("RTNETLINK answers: Network is unreachable"),
+            None
+        );
+        assert_eq!(
+            onlink_route_command(a("192.168.32.5"), a("10.10.0.2"), "tailscale0"),
+            [
+                "route",
+                "replace",
+                "192.168.32.5/32",
+                "via",
+                "10.10.0.2",
+                "dev",
+                "tailscale0",
+                "onlink",
+                "proto",
+                "201"
+            ]
+        );
+        // The pinned route still parses as a per-container route.
+        let routes = parse_routes("192.168.32.5 via 10.10.0.2 dev tailscale0 proto 201 onlink");
+        assert_eq!(routes[&a("192.168.32.5")], a("10.10.0.2"));
     }
 
     #[test]
