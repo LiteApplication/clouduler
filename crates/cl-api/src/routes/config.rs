@@ -181,7 +181,8 @@ pub(crate) fn managed_network_conflict(
                 .nodes
                 .get(node)
                 .is_some_and(|n| n.network.contains_key(name));
-            let has = spec.network.contains_key(name);
+            // An address-less listing no longer lets the node host instances.
+            let has = spec.ip_on(name).is_some();
             if had && !has {
                 for assignment in cluster_state.assignments.values() {
                     if assignment.node != *node {

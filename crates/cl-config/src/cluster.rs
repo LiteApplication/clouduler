@@ -724,10 +724,15 @@ fn default_rpc_port() -> u16 {
 }
 
 /// A node address on one network. Bare IP on subnetted networks, an address
-/// block on public ones, a host interface name on egress networks.
+/// block on public ones, a host interface name on egress networks. An empty
+/// value (`net:` or `net: null`) on a private network means the node
+/// implements it for access only: it routes into it but holds no address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum NodeAddress {
+    /// No address; only valid on a private network. Listed first so a null
+    /// is never offered to the other variants.
+    None,
     Ip(IpAddr),
     // Tried after `Ip`, so a bare IP string still parses as one; only a
     // non-IP bare string falls through to here.
@@ -739,28 +744,28 @@ impl NodeAddress {
     pub fn as_ip(&self) -> Option<IpAddr> {
         match self {
             NodeAddress::Ip(ip) => Some(*ip),
-            NodeAddress::Interface(_) | NodeAddress::Public(_) => None,
+            NodeAddress::None | NodeAddress::Interface(_) | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_interface(&self) -> Option<&str> {
         match self {
             NodeAddress::Interface(addr) => Some(&addr.interface),
-            NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
+            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_interface_address(&self) -> Option<&InterfaceAddress> {
         match self {
             NodeAddress::Interface(addr) => Some(addr),
-            NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
+            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_public(&self) -> Option<&PublicAddress> {
         match self {
             NodeAddress::Public(p) => Some(p),
-            NodeAddress::Ip(_) | NodeAddress::Interface(_) => None,
+            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Interface(_) => None,
         }
     }
 }
@@ -1587,6 +1592,11 @@ impl Node {
     /// The IP this node holds on a subnetted network.
     pub fn ip_on(&self, network: &str) -> Option<IpAddr> {
         self.network.get(network)?.as_ip()
+    }
+
+    /// Whether this node lists `network` without an address (access only).
+    pub fn is_addressless_on(&self, network: &str) -> bool {
+        matches!(self.network.get(network), Some(NodeAddress::None))
     }
 
     /// The address block this node holds on a public network.

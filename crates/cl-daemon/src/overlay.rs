@@ -97,15 +97,16 @@ fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
 pub struct ManagedLocal {
     pub name: String,
     pub subnet: ipnet::Ipv4Net,
-    /// This node's own address on the network, a secondary address of its bridge.
-    pub node_addr: Ipv4Addr,
+    /// This node's own address on the network, a secondary address of its
+    /// bridge. `None` for an access-only node (listed without an address).
+    pub node_addr: Option<Ipv4Addr>,
     /// Every node address on the network, for docker's IPAM to leave alone.
     pub reserved: Vec<Ipv4Addr>,
     /// Internal addresses of the other nodes implementing the network: its tunnel peers.
     pub peers: BTreeSet<Ipv4Addr>,
 }
 
-/// The managed networks `node` implements (it lists an address on them).
+/// The managed networks `node` implements (it lists them, with or without an address).
 pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
     let Some(me) = cfg.node(node) else {
         return Vec::new();
@@ -113,8 +114,10 @@ pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
     cfg.managed_networks()
         .into_iter()
         .filter_map(|(name, _, subnet)| {
-            let IpAddr::V4(node_addr) = me.ip_on(name)? else {
-                return None;
+            let node_addr = match me.network.get(name)? {
+                cl_config::NodeAddress::Ip(IpAddr::V4(ip)) => Some(*ip),
+                cl_config::NodeAddress::None => None,
+                _ => return None,
             };
             let gateway = cl_config::managed_gateway(subnet);
             let mut reserved: Vec<Ipv4Addr> = cfg
@@ -130,7 +133,7 @@ pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
             let peers = cfg
                 .nodes
                 .iter()
-                .filter(|(other, n)| other.as_str() != node && n.ip_on(name).is_some())
+                .filter(|(other, n)| other.as_str() != node && n.network.contains_key(name))
                 .filter_map(|(_, n)| match cfg.internal_ip(n) {
                     Some(IpAddr::V4(ip)) => Some(ip),
                     _ => None,
@@ -750,7 +753,7 @@ impl Context_ {
             .reconcile_bridge_addresses(
                 &bridge,
                 gateway,
-                &BTreeSet::from([local.node_addr]),
+                &local.node_addr.into_iter().collect::<BTreeSet<_>>(),
                 subnet.prefix_len(),
             )
             .await?;
@@ -1150,7 +1153,7 @@ mod tests {
         let m = &local[0];
         assert_eq!(m.name, "mgd");
         assert_eq!(m.subnet.to_string(), "192.168.32.0/24");
-        assert_eq!(m.node_addr, Ipv4Addr::new(192, 168, 32, 2));
+        assert_eq!(m.node_addr, Some(Ipv4Addr::new(192, 168, 32, 2)));
         assert_eq!(
             m.reserved,
             vec![
@@ -1164,6 +1167,19 @@ mod tests {
             other => panic!("n2 has no internal address: {other:?}"),
         };
         assert_eq!(m.peers, BTreeSet::from([n2_internal]));
+        // An access-only listing implements the network with no node address.
+        let mut access = cfg.clone();
+        access
+            .nodes
+            .get_mut("n1")
+            .unwrap()
+            .network
+            .insert("mgd".into(), cl_config::NodeAddress::None);
+        let local = managed_local(&access, "n1");
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].node_addr, None);
+        assert_eq!(local[0].reserved, vec![Ipv4Addr::new(192, 168, 32, 3)]);
+        assert_eq!(local[0].peers.len(), 1);
         // A node with no address on it, and an unknown node, implement nothing.
         let mut bare = cfg.clone();
         bare.nodes.get_mut("n1").unwrap().network.remove("mgd");

@@ -128,13 +128,19 @@ export function managedNetworkError(cfg: ClusterConfig, name: string): string | 
 export function managedNodeAddressError(cfg: ClusterConfig, node: string, network: string): string | null {
   const c = managedSubnet(cfg.networks[network]);
   const addr = cfg.nodes[node]?.network[network];
-  if (!c || typeof addr !== 'string' || addr === '') return null;
+  if (!c || (addr !== null && (typeof addr !== 'string' || addr === ''))) return null;
+  const internal = Object.entries(cfg.networks).find(([, n]) => n.type === 'internal')?.[0];
+  const internalAddr = internal === undefined ? undefined : cfg.nodes[node]?.network[internal];
+  const internalBad = typeof internalAddr === 'string' && ipv4ToInt(internalAddr) === null;
+  if (addr === null) {
+    return internalBad
+      ? `node ${node} has no IPv4 address on the internal network ${internal}, which a managed network needs for its tunnel; give it one or remove ${network} from the node`
+      : null;
+  }
   const ip = ipv4ToInt(addr);
   if (ip === null) return 'a managed network takes an IPv4 address';
   if (!contains4(c, ip)) return `${addr} is outside the subnet ${intToIpv4(c.base)}/${c.prefix}`;
-  const internal = Object.entries(cfg.networks).find(([, n]) => n.type === 'internal')?.[0];
-  const internalAddr = internal === undefined ? undefined : cfg.nodes[node]?.network[internal];
-  if (typeof internalAddr === 'string' && ipv4ToInt(internalAddr) === null) {
+  if (internalBad) {
     return `node ${node} has no IPv4 address on the internal network ${internal}, which a managed network needs for its tunnel; give it one or remove its address on ${network}`;
   }
   if (ip === c.base || ip === c.base + size4(c) - 1) return `${addr} is the network or broadcast address`;

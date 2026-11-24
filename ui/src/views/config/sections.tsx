@@ -769,7 +769,8 @@ function netKind(net: NetworkConfig): string {
 /** One-line address and port list of a node's address on a network, for the
  *  collapsed row. */
 function netSummary(addr: NodeAddress | undefined): { address: string; ports: string } {
-  if (addr === undefined || addr === null) return { address: '', ports: '' };
+  if (addr === undefined) return { address: '', ports: '' };
+  if (addr === null) return { address: 'access only', ports: '' };
   if (typeof addr === 'string') return { address: addr, ports: '' };
   const ports = (addr.open_ports ?? []).map((p) => `${p.port}/${p.protocol}`).join(', ');
   if ('interface' in addr) {
@@ -893,7 +894,7 @@ export function NodeCard({
         );
       }
       if (net.type === 'public') {
-        const pub = (typeof addr === 'object' ? addr : {}) as Partial<PublicAddress>;
+        const pub = (addr !== null && typeof addr === 'object' ? addr : {}) as Partial<PublicAddress>;
         const update = (patch: Partial<PublicAddress>) => {
           const merged: PublicAddress = {
             ipv4: pub.ipv4 ?? null,
@@ -980,10 +981,25 @@ export function NodeCard({
         );
       }
       const ip = typeof addr === 'string' ? addr : '';
+      // A private network can be listed with no address: the node routes into
+      // it for access but hosts no containers there (serialized as null).
+      const accessOnly = net.type === 'private' && addr === null;
       return (
         <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}>
-            <IpField
+            {net.type === 'private' && (
+              <CheckboxField
+                id={`node-${name}-${netName}-access-only`}
+                label="Access only (no address)"
+                value={accessOnly}
+                onChange={(v) => onChange({ network: { ...node.network, [netName]: v ? null : (isManaged(net) ? (nextFreeNodeAddress(fullDraft, netName) ?? '') : '') } })}
+                hint="Route into this network without an address of its own."
+                help="The node implements the network (it routes and NATs traffic into it, and for a managed network joins the tunnel) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
+                configKey={`nodes.${name}.network.${netName}`}
+                disabled={disabled}
+              />
+            )}
+            {!accessOnly && <IpField
               id={`node-${name}-${netName}-ip`}
               label={`Address on ${netName}`}
               hint={
@@ -1004,7 +1020,7 @@ export function NodeCard({
               value={ip}
               onChange={(v) => setAddress(netName, v || null)}
               disabled={disabled}
-            />
+            />}
           </div>
           {!disabled && net.type !== 'internal' && (
             <button

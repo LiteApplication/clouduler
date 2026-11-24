@@ -569,6 +569,33 @@ impl ClusterConfig {
                             }
                         }
                     }
+                    (NetworkKind::Private, NodeAddress::None) => {
+                        if net.subnet.is_none() {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!("network {net_name} has no subnet"),
+                            ));
+                        }
+                        if net.is_managed()
+                            && !matches!(
+                                node.network.get(&internal).and_then(|a| a.as_ip()),
+                                Some(std::net::IpAddr::V4(_))
+                            )
+                        {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!(
+                                    "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for its tunnel; give it one or remove {net_name} from the node"
+                                ),
+                            ));
+                        }
+                    }
+                    (NetworkKind::Internal, NodeAddress::None) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            "the internal network needs an IP address on every node",
+                        ))
+                    }
                     (NetworkKind::Internal | NetworkKind::Private, _) => {
                         return Err(ConfigError::invalid(
                             at,
@@ -2449,6 +2476,52 @@ cloudflare:
         assert!(err.contains("gateway"), "{err}");
         let err = managed_err("192.168.32.0/24", "192.168.32.2", "192.168.32.2");
         assert!(err.contains("used by another node"), "{err}");
+    }
+
+    #[test]
+    fn a_private_network_may_be_listed_without_an_address() {
+        let cfg = parse(&[("lan: 192.168.1.1", "lan:")]).expect("valid");
+        let n1 = &cfg.nodes["n1"];
+        assert_eq!(n1.network.get("lan"), Some(&NodeAddress::None));
+        assert!(n1.ip_on("lan").is_none());
+        assert!(n1.is_addressless_on("lan"));
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        let again: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(again.nodes["n1"].network.get("lan"), Some(&NodeAddress::None));
+        parse(&[("lan: 192.168.1.1", "lan: null")]).expect("explicit null");
+    }
+
+    #[test]
+    fn only_a_private_network_may_be_listed_without_an_address() {
+        let err = parse(&[("tailscale: 10.10.0.1", "tailscale:")]).unwrap_err();
+        assert!(err.to_string().contains("needs an IP address on every node"), "{err}");
+        let err = parse(&[("wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }", "wan:")]).unwrap_err();
+        assert!(err.to_string().contains("public network takes"), "{err}");
+    }
+
+    #[test]
+    fn a_managed_network_may_be_listed_without_an_address_for_access() {
+        let cfg = managed("192.168.32.0/24", "~", "192.168.32.3").expect("valid");
+        assert!(cfg.nodes["n1"].is_addressless_on("mgd"));
+        // Not reserved, and the free-address search ignores it.
+        let reserved = cfg.managed_reserved("mgd");
+        assert!(reserved.contains(&"192.168.32.3".parse().unwrap()));
+        assert!(!reserved.contains(&"192.168.32.2".parse().unwrap()));
+        assert_eq!(cfg.next_free_node_address("mgd"), Some("192.168.32.2".parse().unwrap()));
+        // Still needs an IPv4 internal address for the tunnel.
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  mgd:       { type: private, subnet: 192.168.32.0/24, managed: true }",
+            ),
+            ("tailscale: { type: internal, subnet: 10.10.0.0/24", "tailscale: { type: internal, subnet: fd00::/64"),
+            ("      lan: 192.168.1.1\n", "      lan: 192.168.1.1\n      mgd:\n"),
+            ("tailscale: 10.10.0.1", "tailscale: fd00::1"),
+            ("tailscale: 10.10.0.2", "tailscale: fd00::2"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no IPv4 address on the internal network"), "{err}");
     }
 
     #[test]

@@ -240,6 +240,7 @@ export function NodeDetail() {
 }
 
 export function describeAddress(addr: NodeAddress): string {
+  if (addr === null) return '(no address, access only)';
   if (typeof addr === 'string') return addr;
   const ports = addr.open_ports.map((p) => `${p.port}/${p.protocol}`).join(', ');
   if ('interface' in addr) return ports ? `${addr.interface} (open: ${ports})` : addr.interface;

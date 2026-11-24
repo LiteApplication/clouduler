@@ -589,7 +589,12 @@ impl StackFile {
                 ) {
                     continue;
                 }
-                if !cluster.nodes.values().any(|n| n.network.contains_key(net)) {
+                // An address-less listing routes into the network but hosts nothing on it.
+                if !cluster.nodes.values().any(|n| {
+                    n.network
+                        .get(net)
+                        .is_some_and(|a| *a != crate::cluster::NodeAddress::None)
+                }) {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.networks"),
                         format!(
@@ -796,7 +801,8 @@ impl StackFile {
                                 crate::cluster::NodeAddress::Interface(i) => {
                                     i.open_ports.contains(&wanted)
                                 }
-                                crate::cluster::NodeAddress::Ip(_) => false,
+                                crate::cluster::NodeAddress::None
+                                | crate::cluster::NodeAddress::Ip(_) => false,
                             })
                     });
                     if !reachable {

@@ -71,7 +71,7 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> ManagedInput {
         .filter(|n| {
             cfg.managed_networks()
                 .iter()
-                .any(|(name, _, _)| n.ip_on(name).is_some())
+                .any(|(name, _, _)| n.network.contains_key(*name))
         })
         .filter_map(internal)
         .collect();

@@ -246,7 +246,9 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   key `@NET` (`cl_net::managed_key`) for ipam, VNI and device names, docker
   network `MNG_NET`. It exists only on nodes that list an address on the
   network (`nodes.N.network.NET`: a bare IPv4 inside the subnet, not the
-  network, broadcast or gateway address, unique per node). Peers are those
+  network, broadcast or gateway address, unique per node; or empty, `NET:`,
+  for an access-only node that builds the overlay and routes into it but
+  holds no address and is never a placement candidate for it). Peers are those
   nodes' internal addresses; MTU is the underlay's minus 50. Built by
   `cl_daemon::overlay` (`ensure_managed`), never swept as a stack orphan,
   torn down when a node stops implementing it or the network goes away.

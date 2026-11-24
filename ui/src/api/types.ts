@@ -916,7 +916,9 @@ export interface InterfaceAddress {
   fallback?: EgressFallback | null;
 }
 
-export type NodeAddress = string | PublicAddress | InterfaceAddress;
+/** A bare IP, a public block, an interface, or null: a private network the node
+ *  implements for access only (routes into it, holds no address). */
+export type NodeAddress = string | null | PublicAddress | InterfaceAddress;
 
 /** An open port on a `container` network: the router side reaches
  *  `port` on the host, forwarded to `target_port` (absent = same as `port`). */

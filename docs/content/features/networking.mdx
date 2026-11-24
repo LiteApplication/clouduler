@@ -33,7 +33,7 @@ flowchart LR
 | Kind | In one sentence | Subnet | Domain | Per-node setting |
 |---|---|---|---|---|
 | `internal` | The one trusted network nodes use for raft, drive sync and the container overlay. Exactly one is required. | required | optional | an IP, on every node |
-| `private` | An extra trusted LAN-style network with a subnet. With `managed: true` Clouduler builds its own overlay over the subnet, see [Managed private networks](#managed-private-networks). | required | optional | an IP, on nodes that use it |
+| `private` | An extra trusted LAN-style network with a subnet. With `managed: true` Clouduler builds its own overlay over the subnet, see [Managed private networks](#managed-private-networks). | required | optional | an IP, or empty for access only, on nodes that use it |
 | `public` | Reachable from the internet. No subnet. Hostnames resolve to each node's public address. | none | needed for web routes and DNS | an `ipv4` / `ipv6` / `domain` block and optional `open_ports` |
 | `egress` | Forces a service's outbound traffic out of one named host interface (for example a VPN), with a kill-switch. | none | not allowed | the host interface name |
 | `wireguard` | Like egress, but Clouduler creates the WireGuard tunnel from a config you import. **Pending deprecation**, see [WireGuard networks](#wireguard-networks). | none | not allowed | set by importing a config |
@@ -454,10 +454,10 @@ nodes:
 
 <OptionTable rows={[
   {"key": "networks.NAME.managed", "type": "bool", "default": "false", "reload": "live", "description": "Clouduler builds a cluster-wide VXLAN overlay over the subnet and allocates container addresses from it.", "quirks": "Only on a private network with an IPv4 subnet. Errors: only a private network can be managed, this one is KIND; a managed network needs an IPv4 subnet. Prefix length /16 to /29. No host bits. The subnet may not overlap any other network's subnet, the overlay pool 10.244.0.0/16, the egress pool 10.245.0.0/16 or the nat pool 10.246.0.0/16."},
-  {"key": "nodes.N.network.NET (managed)", "type": "IPv4", "reload": "live", "description": "The node's address on the managed network. Listing one makes the node implement the network: only these nodes build the overlay and may run services that list it.", "quirks": "Errors: ADDRESS is outside the NET subnet SUBNET; ADDRESS is the network or broadcast address of SUBNET; ADDRESS is the gateway of the managed network NET, pick another address; ADDRESS is used by another node on NET; node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel. The gateway is the first host address."}
+  {"key": "nodes.N.network.NET (managed)", "type": "IPv4 or empty", "reload": "live", "description": "The node's address on the managed network. Listing one makes the node implement the network: only these nodes build the overlay and may run services that list it. Leave the value empty (`NET:` or `NET: null`) for an access-only node: it joins the overlay and tunnel and routes and NATs traffic into the subnet, but holds no address and never hosts a service on it.", "quirks": "Errors: ADDRESS is outside the NET subnet SUBNET; ADDRESS is the network or broadcast address of SUBNET; ADDRESS is the gateway of the managed network NET, pick another address; ADDRESS is used by another node on NET; node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel. The gateway is the first host address."}
 ]} />
 
-In **Settings > Network**, a private network has a **Managed (VXLAN)** toggle. Adding the network to a node prefills the next free address (the lowest host address that is not the network, broadcast or gateway address or another node's address). The CLI has no command for it: edit `cluster.yaml`, and `clouduler check` reports the errors.
+In **Settings > Network**, a private network has a **Managed (VXLAN)** toggle, and each node's entry for a private network has an **Access only (no address)** checkbox. Adding the network to a node prefills the next free address (the lowest host address that is not the network, broadcast or gateway address or another node's address). The CLI has no command for it: edit `cluster.yaml`, and `clouduler check` reports the errors.
 
 ### Addresses
 
@@ -499,7 +499,7 @@ services:
 
 If a stack lists no non-managed overlay candidate (no internal or private network that is not managed, and no public network), the service's **primary** network is the alphabetically first managed network it lists: its gateway is the resolver and the container gets DNS from it. Otherwise the stack overlay stays primary.
 
-A service on a managed network can only be placed on nodes that list an address on it (`does not implement network NET` otherwise), like any other private network. The internal DNS answers `SERVICE.STACK` and the bare service name on a managed network too, with the address on a network the asking container shares (its primary network first); when it shares none, the target's primary address.
+A service on a managed network can only be placed on nodes that list an address on it (`does not implement network NET` otherwise), like any other private network. A node listed without an address (access only) counts as not implementing it for placement. The internal DNS answers `SERVICE.STACK` and the bare service name on a managed network too, with the address on a network the asking container shares (its primary network first); when it shares none, the target's primary address.
 
 ### Reaching it from other networks
 
@@ -539,14 +539,14 @@ A config update (UI or `clouduler config reload`) is refused when:
 
 - a newly managed network, or one whose subnet changed, overlaps an overlay subnet already allocated to a stack or pinned by a stack's `x-clouduler.subnet`;
 - `managed` is turned on or off, or a managed network's subnet is changed, while a deployed stack lists the network (`changing whether it is managed for network NET would break the stacks that list it (...): remove the network from those stacks (or undeploy them) first`);
-- a node drops its address on a managed network while it runs instances attached to it (`node N still runs ... attached to managed network NET: move or stop it before removing the node's address on NET`);
+- a node drops its address on a managed network (removes the entry, or makes it access only) while it runs instances attached to it (`node N still runs ... attached to managed network NET: move or stop it before removing the node's address on NET`);
 - a node takes an address that an instance already holds (`ADDRESS is held by instance ID on managed network NET, pick another address for node N`).
 
 If the subnet or the node addresses of a managed network change, each node recreates its Docker network `MNG_NET` to match, but only while no container is attached to it; with containers attached it is left as it is and a warning is logged (the config update itself is refused while a deployed stack lists the network).
 
 **Rolling upgrade.** Every node must run a release with managed network support **before** you set `managed: true`. An older daemon rejects a config that has the field, and an older leader drops the managed address allocations from the replicated state. Upgrade all nodes first, then enable it.
 
-A node that lists an address on a managed network also needs an IPv4 address on the internal network (the tunnel and the forwarding NAT use it), otherwise the config is refused: `node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel`.
+A node that lists a managed network, with an address or without one, also needs an IPv4 address on the internal network (the tunnel and the forwarding NAT use it), otherwise the config is refused: `node N has no IPv4 address on the internal network NET, which a managed network needs for its tunnel`.
 
 Renaming a managed network works live: the overlay is rebuilt under the new name, its containers are recreated on it, and **they keep their addresses**. Expect a short outage for those containers. The same checks as for a config update run first.
 

@@ -1719,7 +1719,14 @@ fn to_state(
             .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
             .map(|(name, _)| name.clone())
             .collect(),
-        networks: node.network.keys().cloned().collect(),
+        // An address-less private network is routed into for access only: the
+        // node hosts no containers on it, so it is not a placement candidate.
+        networks: node
+            .network
+            .iter()
+            .filter(|(_, addr)| !matches!(addr, cl_config::NodeAddress::None))
+            .map(|(name, _)| name.clone())
+            .collect(),
         // Public networks declare open ports on the router address; wireguard
         // ones on the tunnel interface address (a VPN provider's port
         // forwarding, e.g. AirVPN). Either way, this is the set of ports the
@@ -1731,7 +1738,7 @@ fn to_state(
                 let open_ports = match addr {
                     cl_config::NodeAddress::Public(p) => &p.open_ports,
                     cl_config::NodeAddress::Interface(i) => &i.open_ports,
-                    cl_config::NodeAddress::Ip(_) => return None,
+                    cl_config::NodeAddress::None | cl_config::NodeAddress::Ip(_) => return None,
                 };
                 if open_ports.is_empty() {
                     return None;
