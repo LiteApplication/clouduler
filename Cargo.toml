@@ -118,4 +118,9 @@ strip = true
 # part of a debug build to emit; line tables alone still give useful panic
 # backtraces.
 debug = "line-tables-only"
-split-debuginfo = "unpacked"
+split-debuginfo = "off"
+incremental = false
+
+# Dependencies get no debug info at all.
+[profile.dev.package."*"]
+debug = 0
