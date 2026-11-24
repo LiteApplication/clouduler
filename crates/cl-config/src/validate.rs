@@ -587,7 +587,7 @@ impl ClusterConfig {
                                 return Err(ConfigError::invalid(
                                     at,
                                     format!(
-                                        "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for its tunnel; give it one or remove its address on {net_name}"
+                                        "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for the VXLAN underlay; give it one or remove its address on {net_name}"
                                     ),
                                 ));
                             }
@@ -627,7 +627,7 @@ impl ClusterConfig {
                             return Err(ConfigError::invalid(
                                 at,
                                 format!(
-                                    "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for its tunnel; give it one or remove {net_name} from the node"
+                                    "node {name} has no IPv4 address on the internal network {internal}, which a managed network needs for the VXLAN underlay; give it one or remove {net_name} from the node"
                                 ),
                             ));
                         }
