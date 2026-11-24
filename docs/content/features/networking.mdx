@@ -529,7 +529,7 @@ Access is decided on the **source side**, with the normal [`access`](#network-ac
 
 - sources in a `container` network are accepted through its routed range under the same rule (no `access` list, or one that names the managed network). A range such as `0.0.0.0/0` therefore admits everything, so give such a network an `access` list.
 
-A stack's [`allowed` list](#allowed-hosts-and-ports) is checked **before** `CLDR-MNG` (`CLDR-ALLOW` and `CLDR-NETF` are hooked ahead of it): a stack with an `allowed` list can only reach destinations in a managed subnet that the list names, and the managed network's own rules then still apply. Stacks without a list are unaffected. The list does not filter what a container sends directly out of its own managed interface.
+A stack's [`allowed` list](#allowed-hosts-and-ports) is checked **before** `CLDR-MNG` (`CLDR-ALLOW` and `CLDR-NETF` are hooked ahead of it; `CLDR-NETF` lets the hop from one node's internal address into a managed subnet through, because the node that received the client already applied the access rules to the real source): a stack with an `allowed` list can only reach destinations in a managed subnet that the list names, and the managed network's own rules then still apply. Stacks without a list are unaffected. The list does not filter what a container sends directly out of its own managed interface.
 
 Traffic to a node's own address on the network keeps the normal [network access](#network-access) rules. Containers on a managed network are subject to the same host-input restrictions as every container (`CLDR-IN`): DNS to the gateway, the proxy and `expose` ports.
 

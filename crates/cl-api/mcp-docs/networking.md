@@ -315,7 +315,7 @@ removed), and two chains:
 The direction is the existing one: `networks.SRC.access: [media]` says SRC may
 reach `media`; an absent list reaches everything. `container` networks count as
 sources through their routed range. Per-stack `allowed` lists (`CLDR-ALLOW`)
-and `CLDR-NETF` are jumped before `CLDR-MNG` (`Jump::before`), so a restricted
+and `CLDR-NETF` are jumped before `CLDR-MNG` (`Jump::before`; `CLDR-NETF` RETURNs the node-to-managed-subnet hop from a node's internal address, already checked on the entry node), so a restricted
 stack only reaches managed destinations its list names. Managed subnets are CLDR-IN
 container sources (DNS to the gateway allowed) and are excluded from the
 proxy's internal peer subnets, since outside clients arrive from the gateway.

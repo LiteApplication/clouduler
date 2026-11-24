@@ -285,12 +285,26 @@ pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<usize> {
     ])?;
     let diff = diff_routes(wanted, &parse_routes(&listing));
     let mut changed = 0;
+    let mut failed: Vec<String> = Vec::new();
     for command in route_commands(&diff) {
         // A route that vanished meanwhile, or a next hop that is not up yet,
         // is retried by the next pass.
         match ip(&command) {
             Ok(_) => changed += 1,
-            Err(e) => tracing::debug!(error = %e, "managed network route not applied"),
+            Err(e) => failed.push(e.to_string()),
+        }
+    }
+    // Without these routes a forwarded connection to a container on another
+    // node leaves through the local bridge instead, so say so, once per
+    // distinct set of failures rather than every pass.
+    {
+        static LAST: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if *last != failed {
+            if !failed.is_empty() {
+                tracing::warn!(errors = ?failed, "managed network routes not applied");
+            }
+            *last = failed;
         }
     }
     Ok(changed)

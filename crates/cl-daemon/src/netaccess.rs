@@ -71,9 +71,26 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> NetAccessInput {
             });
         }
     }
+    let managed = cfg.managed_networks();
+    let managed_subnets = managed.iter().map(|(_, _, subnet)| *subnet).collect();
+    let managed_nodes = cfg
+        .nodes
+        .values()
+        .filter(|n| {
+            managed
+                .iter()
+                .any(|(name, _, _)| n.network.contains_key(*name))
+        })
+        .filter_map(|n| match cfg.internal_ip(n) {
+            Some(std::net::IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        })
+        .collect();
     NetAccessInput {
         web_port: cfg.web.port,
         sources,
+        managed_subnets,
+        managed_nodes,
     }
 }
 
