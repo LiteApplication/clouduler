@@ -37,6 +37,7 @@ use cl_raft::state::{
 use cl_sched::run::{overlay_name, overlay_network_name};
 use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
+use crate::supervisor::Supervisor;
 use tracing::{info, warn};
 
 /// Restricts a route to clients on `network`, when that network is subnetted
@@ -247,15 +248,27 @@ fn desired_of(cfg: &ClusterConfig, node: &str) -> Desired {
     }
 }
 
+/// What the proxy's task builders share, so none of them takes a dozen
+/// separate arguments.
+struct TaskCtx {
+    cluster: Arc<ClusterNode>,
+    data_dir: PathBuf,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    health: cl_proxy::HealthTable,
+    http01: Arc<Http01Store>,
+    dialer: Dialer,
+    shared_routes: cl_proxy::SharedRoutes,
+    nudges: cl_api::Nudges,
+}
+
 struct Group {
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Supervisor,
 }
 
 impl Group {
-    fn teardown(self) {
-        for task in self.tasks {
-            task.abort();
-        }
+    fn teardown(mut self) {
+        self.tasks.abort_all();
     }
 }
 
@@ -368,24 +381,22 @@ pub fn start(args: StartProxyArgs<'_>) -> Proxy {
 
     let mut config_rx = config_rx;
     let supervisor = tokio::spawn(async move {
-        let health = task_health;
-        let shared_routes = task_routes;
+        let ctx = TaskCtx {
+            cluster,
+            data_dir,
+            config_rx: config_rx.clone(),
+            key_rx,
+            health: task_health,
+            http01,
+            dialer,
+            shared_routes: task_routes,
+            nudges,
+        };
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg, &node);
-        let mut listen = build_listen(
-            &desired,
-            &cluster,
-            &config_rx,
-            &key_rx,
-            &health,
-            &http01,
-            &dialer,
-            &shared_routes,
-        );
-        let mut acme = build_acme(
-            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
-        );
-        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx, &nudges);
+        let mut listen = build_listen(&desired, &ctx);
+        let mut acme = build_acme(&desired, &cfg, &ctx);
+        let mut dns = build_dns(&desired, &ctx);
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
@@ -413,8 +424,8 @@ pub fn start(args: StartProxyArgs<'_>) -> Proxy {
             }
             if live.zones != desired.zones {
                 info!("cloudflare zones changed, waking the dns and certificate loops");
-                nudges.dns.notify_one();
-                nudges.acme.notify_one();
+                ctx.nudges.dns.notify_one();
+                ctx.nudges.acme.notify_one();
             }
             if live.listen == desired.listen
                 && live.v6 == desired.v6
@@ -430,30 +441,19 @@ pub fn start(args: StartProxyArgs<'_>) -> Proxy {
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
-                listen = build_listen(
-                    &live,
-                    &cluster,
-                    &config_rx,
-                    &key_rx,
-                    &health,
-                    &http01,
-                    &dialer,
-                    &shared_routes,
-                );
+                listen = build_listen(&live, &ctx);
             }
             if live.acme != desired.acme {
                 if let Some(group) = acme.take() {
                     group.teardown();
                 }
-                acme = build_acme(
-                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
-                );
+                acme = build_acme(&live, &cfg, &ctx);
             }
             if live.dns != desired.dns {
                 if let Some(group) = dns.take() {
                     group.teardown();
                 }
-                dns = build_dns(&live, &cluster, &config_rx, &key_rx, &nudges);
+                dns = build_dns(&live, &ctx);
             }
             desired = live;
         }
@@ -469,17 +469,17 @@ pub fn start(args: StartProxyArgs<'_>) -> Proxy {
 
 /// The two listeners plus the routing table/certificate reconcile loop.
 /// `None` when the proxy is disabled.
-#[allow(clippy::too_many_arguments)]
-fn build_listen(
-    desired: &Desired,
-    cluster: &Arc<ClusterNode>,
-    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
-    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    health: &cl_proxy::HealthTable,
-    http01: &Arc<Http01Store>,
-    dialer: &Dialer,
-    shared_routes: &cl_proxy::SharedRoutes,
-) -> Option<Group> {
+fn build_listen(desired: &Desired, ctx: &TaskCtx) -> Option<Group> {
+    let TaskCtx {
+        cluster,
+        config_rx,
+        key_rx,
+        health,
+        http01,
+        dialer,
+        shared_routes,
+        ..
+    } = ctx;
     let Some((http_port, https_port)) = desired.listen else {
         shared_routes.clear();
         return None;
@@ -507,7 +507,7 @@ fn build_listen(
         .with_dialer(dialer.clone())
         .with_peer_policies(peers.clone()),
     );
-    let mut tasks = Vec::new();
+    let mut tasks = Supervisor::new();
     // Flipped by `reconcile_loop` once the first full route set is in place.
     let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
 
@@ -525,7 +525,7 @@ fn build_listen(
         let mut ready = ready_rx.clone();
         // Bound here, synchronously, so the port is held from now on.
         let listener = take_listener(port, v6);
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn("proxy-listener", async move {
             // Connections made before the routes load wait in the backlog
             // rather than being answered 404 for every host. Bounded, so a
             // reconcile that never finishes cannot keep the proxy dark.
@@ -539,75 +539,71 @@ fn build_listen(
                 // Ports below 1024 need root, and that is the usual reason.
                 warn!(%addr, tls, error = %e, "proxy listener stopped");
             }
-        }));
+        });
         info!(%addr, tls, "proxy listening");
     }
 
-    tasks.push(tokio::spawn(reconcile_loop(
-        config_rx.clone(),
-        cluster.clone(),
-        routes.clone(),
-        peers,
-        certs,
-        ready_tx,
-    )));
-    tasks.push(tokio::spawn(cl_proxy::run_health_checks(
-        routes,
-        health.clone(),
-        cl_proxy::HEALTH_CHECK_INTERVAL,
-        dialer.clone(),
-    )));
+    tasks.spawn(
+        "proxy-reconcile",
+        reconcile_loop(
+            config_rx.clone(),
+            cluster.clone(),
+            routes.clone(),
+            peers,
+            certs,
+            ready_tx,
+        ),
+    );
+    tasks.spawn(
+        "proxy-health-checks",
+        cl_proxy::run_health_checks(
+            routes,
+            health.clone(),
+            cl_proxy::HEALTH_CHECK_INTERVAL,
+            dialer.clone(),
+        ),
+    );
 
     Some(Group { tasks })
 }
 
 /// The certificate issuance/renewal loop. `None` when ACME issuance is
 /// turned off in config, or there is no Cloudflare section to issue against.
-#[allow(clippy::too_many_arguments)]
-fn build_acme(
-    desired: &Desired,
-    cfg: &ClusterConfig,
-    data_dir: &Path,
-    cluster: &Arc<ClusterNode>,
-    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
-    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    http01: &Arc<Http01Store>,
-    nudges: &cl_api::Nudges,
-) -> Option<Group> {
+fn build_acme(desired: &Desired, cfg: &ClusterConfig, ctx: &TaskCtx) -> Option<Group> {
     desired.acme.as_ref()?;
-    let acme = acme_setup(cfg, data_dir)?;
-    Some(Group {
-        tasks: vec![tokio::spawn(run_acme(
+    let acme = acme_setup(cfg, &ctx.data_dir)?;
+    let mut tasks = Supervisor::new();
+    tasks.spawn(
+        "proxy-acme",
+        run_acme(
             acme,
-            cluster.clone(),
-            config_rx.clone(),
-            key_rx.clone(),
-            http01.clone(),
-            nudges.acme.clone(),
-        ))],
-    })
+            ctx.cluster.clone(),
+            ctx.config_rx.clone(),
+            ctx.key_rx.clone(),
+            ctx.http01.clone(),
+            ctx.nudges.acme.clone(),
+        ),
+    );
+    Some(Group { tasks })
 }
 
 /// The Cloudflare DNS record reconcile loop. `None` when there is no
 /// Cloudflare section at all.
-fn build_dns(
-    desired: &Desired,
-    cluster: &Arc<ClusterNode>,
-    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
-    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    nudges: &cl_api::Nudges,
-) -> Option<Group> {
+fn build_dns(desired: &Desired, ctx: &TaskCtx) -> Option<Group> {
     if !desired.dns {
         return None;
     }
-    Some(Group {
-        tasks: vec![tokio::spawn(run_dns_reconcile(
-            cluster.clone(),
-            config_rx.clone(),
-            key_rx.clone(),
-            nudges.dns.clone(),
-        ))],
-    })
+    let mut tasks = Supervisor::new();
+    tasks.spawn(
+        "proxy-dns-reconcile",
+        run_dns_reconcile(
+            ctx.cluster.clone(),
+            ctx.config_rx.clone(),
+            ctx.key_rx.clone(),
+            ctx.nudges.dns.clone(),
+        ),
+    );
+    Some(Group { tasks })
 }
 
 async fn reconcile_loop(

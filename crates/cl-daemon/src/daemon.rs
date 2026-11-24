@@ -17,6 +17,7 @@ use cl_sched::Scheduler;
 use cl_secret::ClusterKey;
 use openraft::BasicNode;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use crate::supervisor::Supervisor;
 use tracing::{debug, info, warn};
 
 /// Process exit status for a node that was removed from the cluster (`EX_CONFIG`).
@@ -167,7 +168,9 @@ pub async fn run(
     form_cluster(&cfg, &node_name, &cluster).await?;
 
     let failover = cfg.failover.clone();
-    let detector = tokio::spawn(
+    let mut background = Supervisor::new();
+    background.spawn(
+        "failure-detector",
         cluster
             .clone()
             .run_failure_detector(failover.probe_interval, failover.node_timeout),
@@ -175,7 +178,10 @@ pub async fn run(
 
     // Re-checked whenever the replicated config changes, and against the
     // longest per-service `stop_grace_period` as well as the default.
-    tokio::spawn(warn_fence_margin(cluster.clone(), config_rx.clone()));
+    background.spawn(
+        "warn-fence-margin",
+        warn_fence_margin(cluster.clone(), config_rx.clone()),
+    );
 
     // Closed to begin with unless this is a quick restart: see `Fence::new`
     // and `Fence::resume`. The scheduler's first sweep lands about a second
@@ -204,7 +210,7 @@ pub async fn run(
     // only to restart them a sweep later.
     let observed = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(tokio::sync::Notify::new());
-    let fencing = tokio::spawn(run_fence(
+    background.spawn("fence", run_fence(
         cluster.clone(),
         failover.clone(),
         fence,
@@ -317,7 +323,12 @@ pub async fn run(
     // bounced gets a working `Docker` handle again without a restart. Every
     // subsystem holds the same handle, so this is the one place that has to
     // notice.
-    let docker_reconnect = tokio::spawn(run_docker_reconnect(docker.clone()));
+    {
+        let docker = docker.clone();
+        background.spawn_restarting("docker-reconnect", move || {
+            run_docker_reconnect(docker.clone())
+        });
+    }
 
     let materializer = Materializer::new(&data_dir, key_rx.clone());
     let docker_api = crate::docker_api::start(
@@ -344,11 +355,14 @@ pub async fn run(
     .with_wake(wake);
     let gate = fenced.clone();
     let gate_observed = observed.clone();
-    let scheduler = tokio::spawn(scheduler.run(move || {
-        gate_observed
-            .load(Ordering::Relaxed)
-            .then(|| FenceState::from_u8(gate.load(Ordering::Relaxed)))
-    }));
+    background.spawn(
+        "scheduler",
+        scheduler.run(move || {
+            gate_observed
+                .load(Ordering::Relaxed)
+                .then(|| FenceState::from_u8(gate.load(Ordering::Relaxed)))
+        }),
+    );
 
     // Built before the scheduler needs it, but idempotent and on a loop, so
     // ordering against a stack deploy does not matter.
@@ -375,7 +389,8 @@ pub async fn run(
         internal_http.clone(),
         key_rx.clone(),
         config_rx.clone(),
-    );
+    )
+    .await;
 
     if probation {
         tokio::spawn(cl_update::rollback::watch(
@@ -400,7 +415,7 @@ pub async fn run(
         key_rx.clone(),
     );
 
-    let config_writer = tokio::spawn(watch_cluster_config(
+    background.spawn("watch-cluster-config", watch_cluster_config(
         cluster.clone(),
         config_path.clone(),
         failover.probe_interval,
@@ -409,7 +424,7 @@ pub async fn run(
     ));
 
     let cfg_for_restore = cfg.clone();
-    let watcher = tokio::spawn(watch_leadership(
+    background.spawn("watch-leadership", watch_leadership(
         cfg,
         config_path,
         cluster.clone(),
@@ -417,16 +432,22 @@ pub async fn run(
     ));
     cl_api::node_metrics::spawn();
     let (gpus_tx, gpus_rx) = tokio::sync::watch::channel(None);
-    let gpu_detector = tokio::spawn(crate::gpu::run(docker.clone(), gpus_tx));
-    let self_report = tokio::spawn(report_self(
+    background.spawn("gpu", crate::gpu::run(docker.clone(), gpus_tx));
+    background.spawn("report-self", report_self(
         node_name.clone(),
         cluster.clone(),
         node_pubkey,
         gpus_rx,
         docker.clone(),
     ));
-    let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
-    let git_backup = tokio::spawn(watch_git_backup(
+    {
+        let cluster = cluster.clone();
+        let interval = failover.probe_interval;
+        background.spawn_restarting("reap-removed-nodes", move || {
+            reap_removed_nodes(cluster.clone(), interval)
+        });
+    }
+    background.spawn("watch-git-backup", watch_git_backup(
         cluster.clone(),
         config_rx.clone(),
         key_rx.clone(),
@@ -446,8 +467,8 @@ pub async fn run(
     {
         warn!("restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed");
     }
-    let backup_due_checker = tokio::spawn(crate::backup_runner::start_due_checker(cluster.clone()));
-    let log_alerts = tokio::spawn(crate::log_alerts::run(
+    let backup_due_checker = crate::backup_runner::start_due_checker(cluster.clone());
+    background.spawn("log-alerts", crate::log_alerts::run(
         cluster.clone(),
         docker.clone(),
         node_name.clone(),
@@ -505,22 +526,12 @@ pub async fn run(
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
-    watcher.abort();
-    self_report.abort();
-    reaper.abort();
-    git_backup.abort();
+    background.abort_all();
     backup_due_checker.abort();
-    log_alerts.abort();
     backup_runner.abort();
     terraform_runner.abort();
     restore_watcher.abort();
-    config_writer.abort();
-    detector.abort();
-    fencing.abort();
-    docker_reconnect.abort();
-    gpu_detector.abort();
     docker_api.abort();
-    scheduler.abort();
     if let Some((orchestrator, worker)) = self_update {
         orchestrator.abort();
         worker.abort();
@@ -781,7 +792,7 @@ fn self_update_artifact_path(data_dir: &Path) -> PathBuf {
 /// self-update. Both hold a live `key_rx`, so a node started with no cluster key
 /// gets self-update once one is delivered. No docker connection needed:
 /// downloading a prebuilt binary and swapping it in are filesystem operations.
-fn start_self_update(
+async fn start_self_update(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
@@ -794,7 +805,9 @@ fn start_self_update(
 
     let artifact_path = self_update_artifact_path(data_dir);
     if let Some(parent) = artifact_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            warn!(error = %e, dir = %parent.display(), "cannot create the self-update directory");
+        }
     }
 
     let orchestrator = cl_update::orchestrator::Orchestrator {
@@ -1339,13 +1352,20 @@ async fn watch_cluster_config(
             }
         }
 
-        let current = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let current = match tokio::fs::read_to_string(&config_path).await {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                warn!(error = %e, path = %config_path.display(), "cannot read the local cluster config");
+                String::new()
+            }
+        };
         if current == entry.yaml {
             written = entry.generation;
             continue;
         }
 
-        match write_atomically(&config_path, entry.yaml.as_bytes()) {
+        match write_atomically(&config_path, entry.yaml.as_bytes()).await {
             Ok(()) => {
                 written = entry.generation;
                 info!(
@@ -1388,10 +1408,10 @@ fn reload_cluster_key(path: &Path, key_tx: &tokio::sync::watch::Sender<Option<Ar
 
 /// Write through a temp file in the same directory, so a reader never sees a
 /// half written config.
-fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+async fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, contents)?;
-    std::fs::rename(&temp, path)
+    tokio::fs::write(&temp, contents).await?;
+    tokio::fs::rename(&temp, path).await
 }
 
 /// The cluster config as replicated state currently has it, falling back to
