@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "cl-api"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "aho-corasick",
  "async-stream",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "cl-cli"
-version = "0.14.4"
+version = "0.16.0"
 dependencies = [
  "age",
  "anyhow",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "cl-config"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "hcl-rs",
  "humantime-serde",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "cl-daemon"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "age",
  "anyhow",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "cl-docker"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bollard",
  "bytes",
@@ -1280,7 +1280,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clouduler"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "cl-api",
