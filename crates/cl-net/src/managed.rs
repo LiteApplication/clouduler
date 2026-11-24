@@ -5,7 +5,8 @@
 //! any implementing node, so each of those nodes also has to:
 //!
 //! * know how to reach a container another node runs: a /32 route per such
-//!   container, via the hosting node's internal address ([`diff_routes`]);
+//!   container, through the tunnel to the hosting node (`managed_tunnel`), or
+//!   failing that via its internal address ([`diff_routes`]);
 //! * filter what is forwarded into the subnet ([`FORWARD_CHAIN`]): replies,
 //!   the implementing nodes, the networks allowed to reach it, nothing else;
 //! * source-NAT what it forwards ([`NAT_CHAIN`]). To another node it uses its own
@@ -61,6 +62,10 @@ pub struct ManagedInput {
     /// This node's own internal address; without one no connection can be
     /// handed to another node.
     pub own_addr: Option<Ipv4Addr>,
+    /// This node's source address towards another node through a tunnel (see
+    /// `managed_tunnel::inner_addr`) and the tunnel devices to the others.
+    pub own_inner: Option<Ipv4Addr>,
+    pub tunnel_devs: Vec<String>,
 }
 
 /// The filter and nat chains. Empty when no managed network is implemented
@@ -147,7 +152,29 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
             &net.gateway.to_string(),
         ]);
     }
-    // To another node: this node, so the reply returns here.
+    // Through a tunnel to another node: this node's inner address, which the
+    // other node routes back through the same tunnel.
+    if let Some(inner) = input.own_inner {
+        for net in &input.nets {
+            for dev in &input.tunnel_devs {
+                nat.push(&[
+                    "-d",
+                    &net.subnet.to_string(),
+                    "!",
+                    "-s",
+                    &net.subnet.to_string(),
+                    "-o",
+                    dev,
+                    "-j",
+                    "SNAT",
+                    "--to-source",
+                    &inner.to_string(),
+                ]);
+            }
+        }
+    }
+    // To another node by a plain route (no tunnel): this node, so the reply
+    // returns here.
     if let Some(own) = input.own_addr {
         for net in &input.nets {
             let subnet = net.subnet.to_string();
@@ -177,11 +204,22 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
     }
 }
 
+/// Where a route sends its destination.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Hop {
+    /// Through a tunnel device to the hosting node (see `managed_tunnel`).
+    Dev(String),
+    /// Via the hosting node's internal address: the fallback when no tunnel
+    /// could be built, which only works where that network carries any
+    /// destination (a LAN, not a WireGuard mesh).
+    Via(Ipv4Addr),
+}
+
 /// What to change in the per-container routes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RouteDiff {
-    /// Container address and the node to send it through, new or changed.
-    pub set: Vec<(Ipv4Addr, Ipv4Addr)>,
+    /// Destination address and where to send it, new or changed.
+    pub set: Vec<(Ipv4Addr, Hop)>,
     pub remove: Vec<Ipv4Addr>,
 }
 
@@ -191,17 +229,16 @@ impl RouteDiff {
     }
 }
 
-/// `wanted` and `actual` map a container address to the internal address of
-/// the node hosting it.
+/// `wanted` and `actual` map an address to its hop.
 pub fn diff_routes(
-    wanted: &BTreeMap<Ipv4Addr, Ipv4Addr>,
-    actual: &BTreeMap<Ipv4Addr, Ipv4Addr>,
+    wanted: &BTreeMap<Ipv4Addr, Hop>,
+    actual: &BTreeMap<Ipv4Addr, Hop>,
 ) -> RouteDiff {
     RouteDiff {
         set: wanted
             .iter()
-            .filter(|(dst, via)| actual.get(*dst) != Some(*via))
-            .map(|(dst, via)| (*dst, *via))
+            .filter(|(dst, hop)| actual.get(*dst) != Some(*hop))
+            .map(|(dst, hop)| (*dst, hop.clone()))
             .collect(),
         remove: actual
             .keys()
@@ -211,16 +248,21 @@ pub fn diff_routes(
     }
 }
 
-/// Parse `ip -4 -o route show proto 201`: `192.168.32.5 via 10.10.0.2 dev eth1 proto 201`.
-pub fn parse_routes(listing: &str) -> BTreeMap<Ipv4Addr, Ipv4Addr> {
+/// Parse `ip -4 -o route show proto 201`: `192.168.32.5 dev clt-ab proto 201` or
+/// `192.168.32.5 via 10.10.0.2 dev eth1 proto 201`.
+pub fn parse_routes(listing: &str) -> BTreeMap<Ipv4Addr, Hop> {
     listing
         .lines()
         .filter_map(|line| {
             let mut tokens = line.split_whitespace();
             let dst: Ipv4Addr = tokens.next()?.trim_end_matches("/32").parse().ok()?;
             let rest: Vec<&str> = tokens.collect();
-            let via = rest.windows(2).find(|w| w[0] == "via")?[1].parse().ok()?;
-            Some((dst, via))
+            let after = |key: &str| rest.windows(2).find(|w| w[0] == key).map(|w| w[1]);
+            let hop = match after("via") {
+                Some(via) => Hop::Via(via.parse().ok()?),
+                None => Hop::Dev(after("dev")?.to_string()),
+            };
+            Some((dst, hop))
         })
         .collect()
 }
@@ -236,12 +278,21 @@ pub fn route_commands(diff: &RouteDiff) -> Vec<Vec<String>> {
                 .collect(),
         );
     }
-    for (dst, via) in &diff.set {
-        out.push(
-            [
+    for (dst, hop) in &diff.set {
+        out.push(set_command(*dst, hop));
+    }
+    out
+}
+
+fn set_command(dst: Ipv4Addr, hop: &Hop) -> Vec<String> {
+    let dst = format!("{dst}/32");
+    let args: Vec<&str> = match hop {
+        Hop::Dev(dev) => vec!["route", "replace", &dst, "dev", dev, "proto", ROUTE_PROTO],
+        Hop::Via(via) => {
+            return [
                 "route",
                 "replace",
-                &format!("{dst}/32"),
+                &dst,
                 "via",
                 &via.to_string(),
                 "proto",
@@ -249,10 +300,10 @@ pub fn route_commands(diff: &RouteDiff) -> Vec<Vec<String>> {
             ]
             .iter()
             .map(|s| s.to_string())
-            .collect(),
-        );
-    }
-    out
+            .collect()
+        }
+    };
+    args.iter().map(|s| s.to_string()).collect()
 }
 
 /// The device `ip route get ADDR` reports (`10.10.0.2 dev eth1 src ...`).
@@ -286,15 +337,16 @@ pub fn onlink_route_command(dst: Ipv4Addr, via: Ipv4Addr, dev: &str) -> Vec<Stri
     .collect()
 }
 
-fn ip(args: &[String]) -> Result<String> {
-    let out = Command::new("ip")
-        .arg("-4")
-        .args(args)
-        .output()
-        .map_err(|e| NetError::Io {
-            context: "running ip".to_string(),
-            source: e,
-        })?;
+/// Run `ip`, with `-4` when `v4`.
+pub(crate) fn run_ip(args: &[&str], v4: bool) -> Result<String> {
+    let mut cmd = Command::new("ip");
+    if v4 {
+        cmd.arg("-4");
+    }
+    let out = cmd.args(args).output().map_err(|e| NetError::Io {
+        context: "running ip".to_string(),
+        source: e,
+    })?;
     if !out.status.success() {
         return Err(NetError::Io {
             context: format!("ip {}", args.join(" ")),
@@ -304,9 +356,14 @@ fn ip(args: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn ip(args: &[String]) -> Result<String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_ip(&refs, true)
+}
+
 /// Make the host's per-container routes exactly `wanted`. Returns how many
 /// were changed.
-pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<usize> {
+pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Hop>) -> Result<usize> {
     let listing = ip(&[
         "-o".into(),
         "route".into(),
@@ -317,24 +374,30 @@ pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<usize> {
     let diff = diff_routes(wanted, &parse_routes(&listing));
     let mut changed = 0;
     let mut failed: Vec<String> = Vec::new();
-    for command in route_commands(&diff) {
-        // A route that vanished meanwhile, or a next hop that is not up yet,
-        // is retried by the next pass.
+    // A route that vanished meanwhile, or a next hop that is not up yet, is
+    // retried by the next pass.
+    for command in route_commands(&RouteDiff {
+        set: Vec::new(),
+        remove: diff.remove.clone(),
+    }) {
         match ip(&command) {
             Ok(_) => changed += 1,
+            Err(e) => failed.push(e.to_string()),
+        }
+    }
+    for (dst, hop) in &diff.set {
+        match ip(&set_command(*dst, hop)) {
+            Ok(_) => changed += 1,
             Err(e) => {
-                // A `replace` that the kernel refuses for its next hop is
-                // retried pinned to the device that reaches it.
-                let retried = diff
-                    .set
-                    .iter()
-                    .find(|(dst, _)| command.get(2).is_some_and(|c| *c == format!("{dst}/32")))
-                    .filter(|_| command.get(1).is_some_and(|c| c == "replace"))
-                    .and_then(|(dst, via)| {
-                        let got = ip(&["route".into(), "get".into(), via.to_string()]).ok()?;
-                        let dev = parse_route_get_dev(&got)?;
-                        ip(&onlink_route_command(*dst, *via, &dev)).ok()
-                    });
+                // A `via` that the kernel refuses for its next hop is retried
+                // pinned to the device that reaches it.
+                let retried = match hop {
+                    Hop::Via(via) => ip(&["route".into(), "get".into(), via.to_string()])
+                        .ok()
+                        .and_then(|got| parse_route_get_dev(&got))
+                        .and_then(|dev| ip(&onlink_route_command(*dst, *via, &dev)).ok()),
+                    Hop::Dev(_) => None,
+                };
                 match retried {
                     Some(_) => changed += 1,
                     None => failed.push(e.to_string()),
@@ -377,6 +440,7 @@ mod tests {
             }],
             node_addrs: vec![a("10.10.0.2"), a("10.10.0.1")],
             own_addr: Some(a("10.10.0.1")),
+            ..Default::default()
         }
     }
 
@@ -455,20 +519,23 @@ mod tests {
 
     #[test]
     fn routes_diff_adds_changes_and_removes() {
+        let via = |s: &str| Hop::Via(a(s));
         let wanted = BTreeMap::from([
-            (a("192.168.32.5"), a("10.10.0.2")),
-            (a("192.168.32.6"), a("10.10.0.3")),
+            (a("192.168.32.5"), via("10.10.0.2")),
+            (a("192.168.32.6"), via("10.10.0.3")),
+            (a("192.168.32.8"), Hop::Dev("clt-1".into())),
         ]);
         let actual = BTreeMap::from([
-            (a("192.168.32.6"), a("10.10.0.2")),
-            (a("192.168.32.7"), a("10.10.0.2")),
+            (a("192.168.32.6"), via("10.10.0.2")),
+            (a("192.168.32.7"), via("10.10.0.2")),
         ]);
         let diff = diff_routes(&wanted, &actual);
         assert_eq!(
             diff.set,
             vec![
-                (a("192.168.32.5"), a("10.10.0.2")),
-                (a("192.168.32.6"), a("10.10.0.3"))
+                (a("192.168.32.5"), via("10.10.0.2")),
+                (a("192.168.32.6"), via("10.10.0.3")),
+                (a("192.168.32.8"), Hop::Dev("clt-1".into()))
             ]
         );
         assert_eq!(diff.remove, vec![a("192.168.32.7")]);
@@ -486,6 +553,18 @@ mod tests {
                 "192.168.32.5/32",
                 "via",
                 "10.10.0.2",
+                "proto",
+                "201"
+            ]
+        );
+        assert_eq!(
+            commands[3],
+            [
+                "route",
+                "replace",
+                "192.168.32.8/32",
+                "dev",
+                "clt-1",
                 "proto",
                 "201"
             ]
@@ -519,7 +598,7 @@ mod tests {
         );
         // The pinned route still parses as a per-container route.
         let routes = parse_routes("192.168.32.5 via 10.10.0.2 dev tailscale0 proto 201 onlink");
-        assert_eq!(routes[&a("192.168.32.5")], a("10.10.0.2"));
+        assert_eq!(routes[&a("192.168.32.5")], Hop::Via(a("10.10.0.2")));
     }
 
     #[test]
@@ -527,6 +606,28 @@ mod tests {
         let listing = "192.168.32.5 via 10.10.0.2 dev eth1 proto 201 \n192.168.32.6/32 via 10.10.0.3 dev eth1 proto 201\nbogus\n";
         let routes = parse_routes(listing);
         assert_eq!(routes.len(), 2);
-        assert_eq!(routes[&a("192.168.32.6")], a("10.10.0.3"));
+        assert_eq!(routes[&a("192.168.32.6")], Hop::Via(a("10.10.0.3")));
+        // A tunnel route has no next hop, only the device.
+        let routes = parse_routes("192.168.32.9 dev clt-0123abcd scope link proto 201\n169.254.0.2 dev clt-0123abcd scope link proto 201");
+        assert_eq!(routes[&a("192.168.32.9")], Hop::Dev("clt-0123abcd".into()));
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn tunnel_hops_are_natted_to_the_inner_address_before_the_plain_fallback() {
+        let mut input = input();
+        input.own_inner = Some(a("169.254.0.1"));
+        input.tunnel_devs = vec!["clt-1".into()];
+        let plan = managed_plan(&input);
+        let nat = &plan.chain(NAT_CHAIN).unwrap().rules;
+        assert_eq!(nat.len(), 3, "{nat:?}");
+        assert!(
+            nat[1].contains("-o clt-1") && nat[1].ends_with("--to-source 169.254.0.1"),
+            "{nat:?}"
+        );
+        assert!(
+            nat[2].contains("! -o") && nat[2].ends_with("--to-source 10.10.0.1"),
+            "{nat:?}"
+        );
     }
 }

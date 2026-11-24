@@ -85,6 +85,9 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> NetAccessInput {
             Some(std::net::IpAddr::V4(ip)) => Some(ip),
             _ => None,
         })
+        // The hop through a tunnel comes from the node's inner address.
+        .flat_map(|ip| [Some(ip), cl_net::managed_tunnel::inner_addr(ip)])
+        .flatten()
         .collect();
     NetAccessInput {
         web_port: cfg.web.port,

@@ -18,6 +18,7 @@ pub mod expose;
 pub mod ipam;
 pub mod iptables;
 pub mod managed;
+pub mod managed_tunnel;
 pub mod netaccess;
 pub mod relay;
 pub mod restrict;

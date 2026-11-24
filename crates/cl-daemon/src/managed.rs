@@ -14,8 +14,9 @@ use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind};
 use cl_net::iptables::{apply_plan, list_chains, remove_chain};
 use cl_net::managed::{
-    apply_routes, managed_plan, ManagedInput, ManagedNetRules, FORWARD_CHAIN, NAT_CHAIN,
+    apply_routes, managed_plan, Hop, ManagedInput, ManagedNetRules, FORWARD_CHAIN, NAT_CHAIN,
 };
+use cl_net::managed_tunnel::{ensure_tunnels, hops, inner_addr, tunnel_name, TunnelSpec};
 use cl_net::vxlan::bridge_name;
 use cl_net::{managed_key, Allocations};
 use cl_raft::node::ClusterNode;
@@ -48,6 +49,42 @@ fn allowed_sources(cfg: &ClusterConfig, target: &str) -> Vec<Ipv4Net> {
         .collect()
 }
 
+/// The internal and inner address (see `cl_net::managed_tunnel::inner_addr`) of
+/// every other node implementing a managed network, when this node implements
+/// one too. Two nodes whose inner addresses would collide get no tunnel, with a
+/// warning.
+pub fn peers(cfg: &ClusterConfig, node: &str) -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    if crate::overlay::managed_local(cfg, node).is_empty() {
+        return Vec::new();
+    }
+    let managed = cfg.managed_networks();
+    let all: Vec<(&String, Ipv4Addr)> = cfg
+        .nodes
+        .iter()
+        .filter(|(_, n)| {
+            managed
+                .iter()
+                .any(|(name, _, _)| n.network.contains_key(*name))
+        })
+        .filter_map(|(name, n)| match cfg.internal_ip(n) {
+            Some(IpAddr::V4(ip)) => Some((name, ip)),
+            _ => None,
+        })
+        .collect();
+    all.iter()
+        .filter(|(name, _)| name.as_str() != node)
+        .filter_map(|(name, internal)| {
+            let inner = inner_addr(*internal)?;
+            let clash = all.iter().any(|(other, ip)| other != name && inner_addr(*ip) == Some(inner));
+            if clash {
+                warn!(node = %name, "the managed network tunnel address of this node collides with another's, no tunnel to it");
+                return None;
+            }
+            Some((*internal, inner))
+        })
+        .collect()
+}
+
 /// What this node must enforce for the managed networks it implements.
 pub fn input_for(cfg: &ClusterConfig, node: &str) -> ManagedInput {
     let local = crate::overlay::managed_local(cfg, node);
@@ -65,7 +102,9 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> ManagedInput {
         Some(IpAddr::V4(ip)) => Some(ip),
         _ => None,
     };
-    let node_addrs = cfg
+    let own = cfg.node(node).and_then(internal);
+    let peers = peers(cfg, node);
+    let mut node_addrs: Vec<Ipv4Addr> = cfg
         .nodes
         .values()
         .filter(|n| {
@@ -75,10 +114,24 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> ManagedInput {
         })
         .filter_map(internal)
         .collect();
+    // Another node's connections arrive from its inner address when they come
+    // through a tunnel.
+    node_addrs.extend(peers.iter().map(|(_, inner)| *inner));
+    let own_inner = own.and_then(inner_addr).filter(|_| !nets.is_empty());
+    let tunnel_devs = own
+        .map(|own| {
+            peers
+                .iter()
+                .map(|(remote, _)| tunnel_name(own, *remote))
+                .collect()
+        })
+        .unwrap_or_default();
     ManagedInput {
         nets,
         node_addrs,
-        own_addr: cfg.node(node).and_then(internal),
+        own_addr: own,
+        own_inner,
+        tunnel_devs,
     }
 }
 
@@ -126,8 +179,48 @@ fn remove_chains() -> Result<()> {
     Ok(())
 }
 
-fn apply(input: &ManagedInput, routes: &BTreeMap<Ipv4Addr, Ipv4Addr>) -> Result<()> {
+/// The tunnels this node needs: one to every peer.
+fn tunnel_specs(cfg: &ClusterConfig, node: &str) -> Vec<TunnelSpec> {
+    let Some(own) = cfg.node(node).and_then(|n| match cfg.internal_ip(n) {
+        Some(IpAddr::V4(ip)) => Some(ip),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    peers(cfg, node)
+        .into_iter()
+        .map(|(remote, _)| TunnelSpec::new(own, remote))
+        .collect()
+}
+
+fn apply(
+    input: &ManagedInput,
+    routes: &BTreeMap<Ipv4Addr, Ipv4Addr>,
+    peers: &[(Ipv4Addr, Ipv4Addr)],
+    specs: &[TunnelSpec],
+) -> Result<()> {
     let plan = managed_plan(input);
+    // Tunnels first: the routes go through them. A peer whose tunnel cannot be
+    // built keeps the plain route via its internal address, which only a
+    // network that carries any destination (not a WireGuard mesh) delivers.
+    let (devs, errors) = ensure_tunnels(specs);
+    {
+        static LAST: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if *last != errors {
+            if !errors.is_empty() {
+                warn!(errors = ?errors, "managed network tunnels not (all) built, falling back to plain routes via the internal address");
+            }
+            *last = errors;
+        }
+    }
+    let tunnels: BTreeMap<Ipv4Addr, String> = specs
+        .iter()
+        .filter(|s| devs.contains(&s.dev))
+        .map(|s| (s.remote, s.dev.clone()))
+        .collect();
+    let routes: BTreeMap<Ipv4Addr, Hop> = hops(routes, peers, &tunnels);
+    let routes = &routes;
     // The routes do not depend on the firewall: a failing chain must not leave
     // a remote container unreachable (its address would be ARPed on the local
     // bridge, where nobody answers).
@@ -171,11 +264,14 @@ pub fn start(
                 continue;
             }
             let routes = wanted_routes(&state, &cfg, &node_name);
+            let peers = peers(&cfg, &node_name);
+            let specs = tunnel_specs(&cfg, &node_name);
             let idle = input.nets.is_empty();
-            let result = tokio::task::spawn_blocking(move || apply(&input, &routes))
-                .await
-                .context("managed network task panicked")
-                .and_then(|r| r);
+            let result =
+                tokio::task::spawn_blocking(move || apply(&input, &routes, &peers, &specs))
+                    .await
+                    .context("managed network task panicked")
+                    .and_then(|r| r);
             match result {
                 Ok(()) => clean = idle,
                 Err(e) => {
@@ -213,7 +309,10 @@ mod tests {
         let on = input_for(&cfg, names[0]);
         assert_eq!(on.nets.len(), 1);
         assert!(on.own_addr.is_some());
-        assert_eq!(on.node_addrs.len(), 2);
+        // Both nodes' internal addresses and the other's tunnel address.
+        assert_eq!(on.node_addrs.len(), 3);
+        assert!(on.own_inner.is_some());
+        assert_eq!(on.tunnel_devs.len(), 1);
         let off = input_for(&cfg, names[2]);
         assert!(off.nets.is_empty());
     }
@@ -296,7 +395,7 @@ mod tests {
         let (filter, nat) = accepted(&cfg, &names[0]);
         assert!(accepts(&filter, &lan_src), "{filter:?}");
         assert!(filter.last().unwrap().ends_with("DROP"));
-        assert_eq!(nat.len(), 2);
+        assert_eq!(nat.len(), 3);
 
         // An access list that omits the network: denied, the default DROP remains.
         cfg.networks.get_mut(&lan).unwrap().access = Some(vec![]);
@@ -333,7 +432,9 @@ mod tests {
         let IpAddr::V4(own) = cfg.internal_ip(cfg.node(&names[0]).unwrap()).unwrap() else {
             unreachable!()
         };
-        assert!(nat[1].ends_with(&format!("--to-source {own}")), "{nat:?}");
+        assert!(nat[2].ends_with(&format!("--to-source {own}")), "{nat:?}");
+        // Through a tunnel it is the inner address.
+        assert!(nat[1].contains("--to-source 169.254."), "{nat:?}");
         assert!(nat[0].ends_with("--to-source 192.168.32.1"), "{nat:?}");
         // A node implementing nothing renders no chain at all.
         let (filter, nat) = accepted(&cfg, &names[2]);

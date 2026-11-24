@@ -510,10 +510,10 @@ Clouduler does not advertise the subnet anywhere. A client reaches a managed net
 - On Tailscale, run `tailscale up --advertise-routes=192.168.32.0/24` on **each** implementing node and approve the routes in the admin console (or your Headscale). Advertising from several nodes gives high availability, because Tailscale fails over between subnet routers.
 - On a LAN, add a static route for the subnet whose next hop is a node address.
 
-Whichever node receives the traffic delivers it: to a local container directly, or, for a container on another node, over the internal network. Each entry node keeps a `/32` route for every remote container (routing protocol `201`, via the hosting node's internal address), refreshed from raft and placement every 5 seconds. If a node dies, clients use another one and the routes of the survivors adapt.
+Whichever node receives the traffic delivers it: to a local container directly, or, for a container on another node, through a **tunnel** to the hosting node. Each implementing node builds one IPIP tunnel per other implementing node (device `clt-XXXXXXXX`), wrapped in UDP (FOU, port 7390) between the two nodes' internal addresses. That works over whatever carries the internal network (a LAN, plain WireGuard or Tailscale), which would otherwise drop a packet addressed to a container instead of to a peer. It needs the `ipip` and `fou` kernel modules and UDP 7390 allowed between nodes; the tunnel MTU is 1252. Each entry node keeps a `/32` route through the tunnel for every remote container (routing protocol `201`), refreshed from raft and placement every 5 seconds. If a tunnel cannot be built, the daemon logs a warning and uses a plain route via the hosting node's internal address instead, which only works where the internal network carries any destination. If a node dies, clients use another one and the routes of the survivors adapt.
 
 <Quirk title="The container sees the gateway, not the client" severity="warn">
-Forwarded-in connections are source-NATed, twice when they cross nodes: the entry node rewrites the source to its own internal address when forwarding to another node (so replies come back through it), and the node that hosts the container rewrites any source outside the subnet to the network's gateway, so the container answers through its managed interface whatever its default route is. The cost is that the container's own logs show the gateway as the client. Clients that go through the Clouduler proxy keep their address: HTTP routes through `X-Forwarded-For`, TCP routes (`proxy_protocol`) through the PROXY protocol header.
+Forwarded-in connections are source-NATed, twice when they cross nodes: the entry node rewrites the source to its own tunnel address (`169.254.A.B`, from the last two bytes of its internal address, so those must differ between nodes) when forwarding to another node (so replies come back through the tunnel to it), and the node that hosts the container rewrites any source outside the subnet to the network's gateway, so the container answers through its managed interface whatever its default route is. The cost is that the container's own logs show the gateway as the client. Clients that go through the Clouduler proxy keep their address: HTTP routes through `X-Forwarded-For`, TCP routes (`proxy_protocol`) through the PROXY protocol header.
 </Quirk>
 
 ### Who may reach it
@@ -523,7 +523,7 @@ Access is decided on the **source side**, with the normal [`access`](#network-ac
 `CLDR-MNG` enforces this for traffic routed into a managed subnet from outside its bridge:
 
 - replies to connections already open are accepted;
-- the internal addresses of the implementing nodes are accepted (that is the hop between nodes);
+- the internal and tunnel addresses of the implementing nodes are accepted (that is the hop between nodes);
 - sources inside an internal or private cluster network that reaches the managed network are accepted;
 - everything else is **dropped**, including sources that belong to no cluster network, such as the public internet or an unlisted LAN.
 
