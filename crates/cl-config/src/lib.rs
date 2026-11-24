@@ -4,6 +4,7 @@
 mod bundle;
 mod cluster;
 mod error;
+mod names;
 mod netalloc;
 mod stack;
 mod terraform;

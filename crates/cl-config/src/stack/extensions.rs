@@ -670,25 +670,7 @@ impl TfOutputBinding {
     }
 }
 
-/// Same rules as raft's object names (they become file names): 1-253 characters of
-/// letters, digits, `.`, `-`, `_`, not starting with a dot.
-pub fn check_object_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > 253 {
-        return Err(format!("{name:?} must be between 1 and 253 characters"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    {
-        return Err(format!(
-            "{name:?} may only contain letters, digits, dot, dash and underscore"
-        ));
-    }
-    if name.starts_with('.') {
-        return Err(format!("{name:?} must not start with a dot"));
-    }
-    Ok(())
-}
+pub use crate::names::check_object_name;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

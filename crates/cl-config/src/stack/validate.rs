@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cluster::{ClusterConfig, MAX_STOP_GRACE};
 use crate::error::{ConfigError, Result};
+use crate::names::is_dns_label;
+pub use crate::names::validate_stack_name;
 
 use super::deploy::{parse_memory_bytes, MAX_REPLICAS};
 use super::devices::DeviceMapping;
@@ -1160,36 +1162,6 @@ fn memory_overflows(raw: &str) -> bool {
         && digits.trim().chars().all(|c| c.is_ascii_digit())
 }
 
-/// A stack name ends up in container names, overlay network names and the git
-/// backup's `stacks/<name>.yaml`: lowercase letters, digits, `-` and `_`,
-/// starting and ending alphanumeric, at most 63 bytes. `_` is allowed for
-/// existing stacks; the `<stack>_<network>` ambiguity is handled by
-/// `cl_sched::run::overlay_collision`.
-pub fn validate_stack_name(name: &str) -> std::result::Result<(), String> {
-    let invalid = |why: &str| Err(format!("invalid stack name {name:?}: {why}"));
-    if name.is_empty() || name.len() > 63 {
-        return invalid("must be 1 to 63 bytes long");
-    }
-    let edge_ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    if !name.starts_with(edge_ok) || !name.ends_with(edge_ok) {
-        return invalid("must start and end with a lowercase letter or digit");
-    }
-    if !name.chars().all(|c| edge_ok(c) || c == '-' || c == '_') {
-        return invalid("only lowercase letters, digits, `-` and `_` are allowed");
-    }
-    Ok(())
-}
-
-fn is_dns_label(s: &str) -> bool {
-    if s.is_empty() || s.len() > 63 {
-        return false;
-    }
-    if s.starts_with('-') || s.ends_with('-') {
-        return false;
-    }
-    s.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
 
 #[cfg(test)]
 mod tests {

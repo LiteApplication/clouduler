@@ -1165,12 +1165,7 @@ impl ClusterConfig {
     }
 }
 
-/// True when `name` is the domain itself or a subdomain of it.
-pub(crate) fn is_within(name: &str, domain: &str) -> bool {
-    let name = name.trim_end_matches('.').to_ascii_lowercase();
-    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-    name == domain || name.ends_with(&format!(".{domain}"))
-}
+pub(crate) use crate::names::is_within;
 
 #[cfg(test)]
 mod tests {
