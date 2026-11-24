@@ -917,7 +917,8 @@ export interface InterfaceAddress {
 }
 
 /** A bare IP, a public block, an interface, or null: a private network the node
- *  implements for access only (routes into it, holds no address). */
+ *  implements for access only (routes into it, holds no address); on a
+ *  managed network null means an automatic node address. */
 export type NodeAddress = string | null | PublicAddress | InterfaceAddress;
 
 /** An open port on a `container` network: the router side reaches
@@ -926,6 +927,18 @@ export interface ContainerOpenPort {
   port: number;
   protocol: PortProtocol;
   target_port?: number | null;
+}
+
+/** One port a managed network exposes on the node address of the node
+ *  holding the container of `stack`/`service`. */
+export interface ManagedOpenPort {
+  port: number;
+  /** Default tcp. */
+  protocol: PortProtocol;
+  /** Port in the container; absent = same as `port`. */
+  target_port?: number | null;
+  stack: string;
+  service: string;
 }
 
 /** Only meaningful on a `container`-kind network: traffic to the network's `subnet` is
@@ -957,9 +970,16 @@ export interface NetworkConfig {
    *  implicitly reachable. */
   access?: string[] | null;
   /** Private networks only. Clouduler builds one cluster-wide VXLAN overlay
-   *  over `subnet` between the nodes that list an address on it. Absent =
-   *  false. */
+   *  over `subnet` between the nodes that list it, each with a node address
+   *  on it. Absent = false. */
   managed?: boolean;
+  /** Managed networks only: ports exposed on the address of the node holding
+   *  the container. Absent = none. */
+  open_ports?: ManagedOpenPort[];
+  /** Managed networks only: the reverse proxy serves 80/443 for the network's
+   *  hostnames on any node and their DNS is published for the network.
+   *  Absent = false. */
+  proxy?: boolean;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';

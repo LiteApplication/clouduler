@@ -1,9 +1,12 @@
 // Managed private networks (networks.NET.managed: true): clouduler builds one
-// cluster-wide VXLAN overlay over the subnet between the nodes that list an
-// address on it. These helpers mirror ClusterConfig::managed_reserved
-// (cl-config cluster.rs) and the managed rules of
-// cl-config validate.rs, so the form can flag mistakes before a
-// save round-trips. The server stays the authority.
+// cluster-wide VXLAN overlay over the subnet between the nodes that list the
+// network. Every such node holds a node address on it (explicit, or null =
+// automatic from the top of the subnet; containers fill the pool from the
+// bottom) and outside clients reach containers only through those addresses.
+// These helpers mirror ClusterConfig::managed_node_addresses and
+// managed_reserved (cl-config cluster.rs) and the managed rules of
+// cl-config validate.rs, so the form can flag mistakes before a save
+// round-trips. The server stays the authority.
 
 import type { ClusterConfig, NetworkConfig } from '../api/types';
 import { isValidIpv4 } from './validate';
@@ -63,11 +66,76 @@ export function managedNetworkNames(cfg: ClusterConfig): string[] {
     .map(([name]) => name);
 }
 
-/** Nodes holding an IPv4 address on `network` (ClusterConfig::addressed_nodes_on). */
+/**
+ * Nodes holding an IPv4 address on `network` (ClusterConfig::addressed_nodes_on).
+ * On a managed network a node that lists it with `null` has an automatic address.
+ */
 export function addressedNodesOn(cfg: ClusterConfig, network: string): string[] {
+  const managed = isManaged(cfg.networks[network]);
   return Object.entries(cfg.nodes)
-    .filter(([, node]) => typeof node.network[network] === 'string' && node.network[network] !== '')
+    .filter(([, node]) => {
+      const a = node.network[network];
+      return (typeof a === 'string' && a !== '') || (managed && a === null);
+    })
     .map(([name]) => name);
+}
+
+/** FNV-1a 64 bit, like cl-config netalloc::fnv1a. */
+function fnv1a(s: string): bigint {
+  const mask = (1n << 64n) - 1n;
+  let h = 0xcbf29ce484222325n;
+  for (const b of new TextEncoder().encode(s)) {
+    h ^= BigInt(b);
+    h = (h * 0x100000001b3n) & mask;
+  }
+  return h;
+}
+
+/**
+ * Address of every node that lists managed network `network`
+ * (ClusterConfig::managed_node_addresses): explicit ones as typed, `null`
+ * ones automatic from the top of the subnet downward, picked by a stable hash
+ * of the node name and probed past the gateway and addresses already taken.
+ * A node the subnet has no room for is absent.
+ */
+export function managedNodeAddresses(cfg: ClusterConfig, network: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const c = managedSubnet(cfg.networks[network]);
+  if (!c) return out;
+  const first = c.base;
+  const last = c.base + size4(c) - 1;
+  const taken = new Set<number>([first, last, managedGateway(c)]);
+  const auto: string[] = [];
+  for (const name of Object.keys(cfg.nodes).sort()) {
+    const a = cfg.nodes[name].network[network];
+    if (typeof a === 'string' && a !== '') {
+      const n = ipv4ToInt(a);
+      if (n !== null) {
+        taken.add(n);
+        out.set(name, a);
+      }
+    } else if (a === null) {
+      auto.push(name);
+    }
+  }
+  const hosts = Math.max(last - first - 1, 0);
+  for (const name of auto) {
+    const start = hosts === 0 ? 0 : Number(fnv1a(name) % BigInt(hosts));
+    for (let i = 0; i < hosts; i++) {
+      const ip = last - 1 - ((start + i) % hosts);
+      if (!taken.has(ip)) {
+        taken.add(ip);
+        out.set(name, intToIpv4(ip));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** The address `node` holds on managed network `network`, or null. */
+export function nodeAddressOn(cfg: ClusterConfig, node: string, network: string): string | null {
+  return managedNodeAddresses(cfg, network).get(node) ?? null;
 }
 
 /**
@@ -79,10 +147,10 @@ export function addressedNodesOn(cfg: ClusterConfig, network: string): string[] 
 export function managedPortalError(cfg: ClusterConfig, network: string, what: string): string | null {
   if (!isManaged(cfg.networks[network])) return null;
   if (addressedNodesOn(cfg, network).length > 0) return null;
-  return `${network} is a managed network and no node has an IP address on it; ${what} is served from node addresses, so give at least one node an address there`;
+  return `${network} is a managed network and no node lists it; ${what} is served from node addresses, so add the network to at least one node`;
 }
 
-/** Network, broadcast, gateway and every node address on `network`. */
+/** Network, broadcast, gateway and every node address (explicit or automatic) on `network`. */
 export function managedReserved(cfg: ClusterConfig, network: string): Set<number> {
   const out = new Set<number>();
   const c = managedSubnet(cfg.networks[network]);
@@ -90,12 +158,9 @@ export function managedReserved(cfg: ClusterConfig, network: string): Set<number
   out.add(c.base);
   out.add(c.base + size4(c) - 1);
   out.add(managedGateway(c));
-  for (const node of Object.values(cfg.nodes)) {
-    const a = node.network[network];
-    if (typeof a === 'string') {
-      const n = ipv4ToInt(a);
-      if (n !== null) out.add(n);
-    }
+  for (const a of managedNodeAddresses(cfg, network).values()) {
+    const n = ipv4ToInt(a);
+    if (n !== null) out.add(n);
   }
   return out;
 }
@@ -103,7 +168,11 @@ export function managedReserved(cfg: ClusterConfig, network: string): Set<number
 /** Problem with a managed network's own settings, or null. */
 export function managedNetworkError(cfg: ClusterConfig, name: string): string | null {
   const net = cfg.networks[name];
-  if (!net?.managed) return null;
+  if (!net?.managed) {
+    if (net?.proxy) return 'proxy is only allowed on a managed network';
+    if (net?.open_ports?.length) return 'open_ports is only allowed on a managed network';
+    return null;
+  }
   if (net.type !== 'private') return `only a private network can be managed, this one is ${net.type}`;
   if (!net.subnet) return 'a managed network needs an IPv4 subnet';
   const c = parseCidr4(net.subnet);
@@ -128,28 +197,44 @@ export function managedNetworkError(cfg: ClusterConfig, name: string): string | 
     if (o.type === 'container' && contains4(oc, c.base) && !(oc.base === c.base && oc.prefix === c.prefix)) continue;
     if (overlaps4(c, oc)) return `${net.subnet} overlaps the subnet ${o.subnet} of network ${other}`;
   }
+  return managedOpenPortsError(net) ?? managedRoomError(cfg, name, c);
+}
+
+/** Problem with a managed network's open_ports list, or null (validate.rs). */
+export function managedOpenPortsError(net: NetworkConfig): string | null {
+  const seen = new Set<string>();
+  for (const p of net.open_ports ?? []) {
+    const id = `${p.port}/${p.protocol}`;
+    if (!p.port || p.target_port === 0) return 'port 0 is not valid';
+    if (seen.has(id)) return `${id} is listed more than once`;
+    seen.add(id);
+    if (!p.stack.trim() || !p.service.trim()) return `${id} must name the stack and service it maps to`;
+    if (net.proxy && p.protocol === 'tcp' && (p.port === 80 || p.port === 443)) {
+      return `${id} is served by the reverse proxy (proxy: true) and cannot also be an open port`;
+    }
+  }
   return null;
 }
 
-/** Problem with node `node`'s address on managed network `network`, or null. */
+/** Every implementing node needs room for an address next to the gateway, and the pool some for containers. */
+function managedRoomError(cfg: ClusterConfig, name: string, c: Cidr4): string | null {
+  const implementing = Object.values(cfg.nodes).filter((n) => name in n.network).length;
+  const hosts = size4(c) - 2;
+  if (implementing + 1 >= hosts) {
+    return `${intToIpv4(c.base)}/${c.prefix} is too small for the gateway, ${implementing} node addresses and any containers`;
+  }
+  return null;
+}
+
+/** Problem with node `node`'s explicit address on managed network `network`, or null. Automatic (null) addresses cannot be wrong. */
 export function managedNodeAddressError(cfg: ClusterConfig, node: string, network: string): string | null {
   const c = managedSubnet(cfg.networks[network]);
   const addr = cfg.nodes[node]?.network[network];
-  if (!c || (addr !== null && (typeof addr !== 'string' || addr === ''))) return null;
-  const internal = Object.entries(cfg.networks).find(([, n]) => n.type === 'internal')?.[0];
-  const internalAddr = internal === undefined ? undefined : cfg.nodes[node]?.network[internal];
-  const internalBad = typeof internalAddr === 'string' && ipv4ToInt(internalAddr) === null;
-  if (addr === null) {
-    return internalBad
-      ? `node ${node} has no IPv4 address on the internal network ${internal}, which a managed network needs for its tunnel; give it one or remove ${network} from the node`
-      : null;
-  }
+  if (!c || typeof addr !== 'string') return null;
+  if (addr === '') return 'enter an address or tick automatic';
   const ip = ipv4ToInt(addr);
   if (ip === null) return 'a managed network takes an IPv4 address';
   if (!contains4(c, ip)) return `${addr} is outside the subnet ${intToIpv4(c.base)}/${c.prefix}`;
-  if (internalBad) {
-    return `node ${node} has no IPv4 address on the internal network ${internal}, which a managed network needs for its tunnel; give it one or remove its address on ${network}`;
-  }
   if (ip === c.base || ip === c.base + size4(c) - 1) return `${addr} is the network or broadcast address`;
   if (ip === managedGateway(c)) return `${addr} is the gateway of the managed network, pick another address`;
   for (const [other, n] of Object.entries(cfg.nodes)) {

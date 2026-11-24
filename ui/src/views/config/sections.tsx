@@ -12,6 +12,7 @@ import type {
   ClusterConfig,
   ContainerNetwork,
   ContainerOpenPort,
+  ManagedOpenPort,
   EgressFallback,
   GitBackupStatus,
   GitBackupWebhookSecretStatus,
@@ -46,7 +47,7 @@ import {
   TextField,
 } from '../../components/FormFields';
 import { fenceMarginWarning } from '../../lib/validate';
-import { addressedNodesOn, isManaged, managedNetworkError, managedNodeAddressError, managedPortalError } from '../../lib/managedNetwork';
+import { addressedNodesOn, isManaged, managedNetworkError, managedNodeAddressError, managedPortalError, nodeAddressOn } from '../../lib/managedNetwork';
 
 export interface SectionProps {
   draft: ClusterConfig;
@@ -379,7 +380,7 @@ function NetworkForm({
                 value={net.managed === true}
                 onChange={(v) => updateNetwork(name, { managed: v ? true : undefined })}
                 hint="Clouduler builds the overlay and hands out container addresses. Needs an IPv4 subnet."
-                help="Clouduler builds one cluster-wide VXLAN overlay over the address range, between the nodes that list an address on this network (each node's address is an entry point for outside clients). Containers get addresses from the range; the first host address is the shared gateway and cannot be a node address. Internet access needs a separate nat, egress or wireguard network. Reach it from other networks by routing the whole subnet via any node that implements it (for example advertise it as a Tailscale subnet route); access is decided on the source side, in the source network's 'Can reach' list. The flag and the subnet cannot be changed while a deployed stack uses the network."
+                help="Clouduler builds one cluster-wide VXLAN overlay over the address range, between the nodes that list this network. Containers talk to each other over it and keep their addresses from the bottom of the range; the first host address is the shared gateway. Every node that lists the network gets a node address on it (automatic from the top of the range, or set explicitly on the node). Outside clients never reach container addresses and those are never published in DNS: they reach the services through the node addresses, via the open ports below or the reverse proxy. Your router must route the subnet to the nodes; clouduler admits a source only when its own network lists this one in 'Can reach'. Internet access for the containers needs a separate nat, egress or wireguard network. The flag and the subnet cannot be changed while a deployed stack uses the network."
                 configKey={`networks.${name}.managed`}
                 disabled={disabled}
               />
@@ -391,6 +392,27 @@ function NetworkForm({
                   </p>
                 ) : null;
               })()}
+              {net.managed === true && (
+                <>
+                  <CheckboxField
+                    id={`net-${name}-proxy`}
+                    label="Reverse proxy"
+                    value={net.proxy === true}
+                    onChange={(v) => updateNetwork(name, { proxy: v ? true : undefined })}
+                    hint="Serve 80/443 for this network's hostnames on any node."
+                    help="The reverse proxy answers 80 and 443 for the hostnames of stacks on this network on every node that lists it, relaying to the node holding the container (preferring that node). DNS for those hostnames is published for this network instead of following the global proxy DNS publish mode. Without it, only the open ports below are reachable, on the owning node's address."
+                    configKey={`networks.${name}.proxy`}
+                    disabled={disabled}
+                  />
+                  <ManagedOpenPortsEditor
+                    idPrefix={`net-${name}`}
+                    ports={net.open_ports ?? []}
+                    onChange={(open_ports) => updateNetwork(name, { open_ports: open_ports.length > 0 ? open_ports : undefined })}
+                    proxy={net.proxy === true}
+                    disabled={disabled}
+                  />
+                </>
+              )}
             </>
           )}
           {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
@@ -839,8 +861,8 @@ export function NodeCard({
       setPendingWireguard((prev) => (prev.includes(netName) ? prev : [...prev, netName]));
       return;
     }
-    // A managed network starts as "access only" (no address): the node address
-    // there is an optional node-local endpoint, never something to fill in.
+    // A managed network starts with an automatic node address (null); an
+    // explicit one is optional.
     const value: NodeAddress | null =
       net.type === 'public'
         ? { ipv4: null, ipv6: null, domain: null, open_ports: [] }
@@ -985,46 +1007,56 @@ export function NodeCard({
       const ip = typeof addr === 'string' ? addr : '';
       // A private network can be listed with no address: the node routes into
       // it for access but hosts no containers there (serialized as null).
-      const accessOnly = net.type === 'private' && addr === null;
+      const managedNet = isManaged(net);
+      const accessOnly = net.type === 'private' && !managedNet && addr === null;
+      const autoAddr = managedNet && addr === null ? nodeAddressOn(fullDraft, name, netName) : null;
       return (
         <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}>
-            {net.type === 'private' && (
+            {net.type === 'private' && managedNet && (
+              <CheckboxField
+                id={`node-${name}-${netName}-auto-address`}
+                label="Automatic address"
+                value={addr === null}
+                onChange={(v) => onChange({ network: { ...node.network, [netName]: v ? null : '' } })}
+                hint={autoAddr ? `Currently ${autoAddr} (picked from the top of the subnet).` : 'Picked from the top of the subnet, stable per node.'}
+                help="Every node that lists a managed network holds a node address on it: this is where outside clients reach the services of containers running on this node (open ports, and the reverse proxy when enabled), and where DNS points for them. Automatic picks a stable address from the top of the subnet (containers use the bottom, the first host address is the gateway). Untick it to choose the address yourself."
+                configKey={`nodes.${name}.network.${netName}`}
+                disabled={disabled}
+              />
+            )}
+            {net.type === 'private' && !managedNet && (
               <CheckboxField
                 id={`node-${name}-${netName}-access-only`}
                 label="Access only (no address)"
                 value={accessOnly}
                 onChange={(v) => onChange({ network: { ...node.network, [netName]: v ? null : '' } })}
-                hint={isManaged(net) ? 'No node address on this network (the default).' : 'Route into this network without an address of its own.'}
-                help={
-                  isManaged(net)
-                    ? "The node implements the managed network (it joins the tunnel and routes and NATs clients into it) without a node address of its own, which is the default. Containers still run on it. A node's own address on a managed network is only reachable through that node, so no DNS provider record or route ever publishes it; give one only if you want a node-local endpoint, or if the dashboard or login page is served on this network (they need at least one addressed node)."
-                    : "The node implements the network (it routes and NATs traffic into it) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
-                }
+                hint="Route into this network without an address of its own."
+                help="The node implements the network (it routes and NATs traffic into it) but holds no address on it and never hosts containers on it. Use it for a node that only gives clients access to the network."
                 configKey={`nodes.${name}.network.${netName}`}
                 disabled={disabled}
               />
             )}
-            {!accessOnly && <IpField
+            {!accessOnly && !autoAddr && !(managedNet && addr === null) && <IpField
               id={`node-${name}-${netName}-ip`}
               label={`Address on ${netName}`}
               hint={
                 net.type === 'internal'
                   ? 'Required, inside the subnet.'
                   : isManaged(net)
-                    ? 'Inside the subnet; not the network, broadcast or gateway address.'
+                    ? 'Inside the subnet; not the network, broadcast or gateway address, and not a container address.'
                     : 'Inside the subnet.'
               }
               help={
                 net.type === 'internal'
                   ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
                   : isManaged(net)
-                    ? "An optional node-local endpoint on the managed network. It is only reachable through this node (containers on other nodes use the gateway, the first host address, instead), so clouduler never publishes it to the DNS provider or uses it for routes; leave it off unless something on this node needs it, such as serving the dashboard or login page on this network."
+                    ? "This node's fixed address on the managed network, inside its subnet. It is where outside clients reach the services of containers on this node and where DNS for them points. Must not be the network, broadcast or gateway address."
                     : "This node's fixed address on this network, inside its subnet."
               }
               configKey={`nodes.${name}.network.${netName}`}
               value={ip}
-              onChange={(v) => setAddress(netName, v || null)}
+              onChange={(v) => setAddress(netName, v || (managedNet ? '' : null))}
               disabled={disabled}
             />}
           </div>
@@ -1376,6 +1408,110 @@ function ContainerNetworkForm({
         disabled={disabled}
       />
     </>
+  );
+}
+
+/**
+ * A managed network's open ports: each is exposed on the node address of the
+ * node holding the container of `stack`/`service`, forwarded to `target_port`.
+ */
+function ManagedOpenPortsEditor({
+  idPrefix,
+  ports,
+  onChange,
+  proxy,
+  disabled,
+}: {
+  idPrefix: string;
+  ports: ManagedOpenPort[];
+  onChange: (ports: ManagedOpenPort[]) => void;
+  proxy: boolean;
+  disabled: boolean;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [port, setPort] = useState(0);
+  const [targetPort, setTargetPort] = useState(0);
+  const [protocol, setProtocol] = useState<PortProtocol>('tcp');
+  const [stack, setStack] = useState('');
+  const [service, setService] = useState('');
+  const dup = ports.some((p) => p.port === port && p.protocol === protocol);
+  const webClash = proxy && protocol === 'tcp' && (port === 80 || port === 443);
+  const valid = port > 0 && stack.trim() !== '' && service.trim() !== '' && !dup && !webClash;
+
+  const add = () => {
+    if (!valid) return;
+    const entry: ManagedOpenPort = {
+      port,
+      protocol,
+      ...(targetPort && targetPort !== port ? { target_port: targetPort } : {}),
+      stack: stack.trim(),
+      service: service.trim(),
+    };
+    onChange([...ports, entry].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol)));
+    setPort(0);
+    setTargetPort(0);
+    setStack('');
+    setService('');
+    setAdding(false);
+  };
+
+  return (
+    <div className="field">
+      <div className="fld__head">
+        <label>Open ports</label>
+        <HelpTip label="Open ports">
+          Ports exposed on the node address of the node that holds the container of the named stack and service, forwarded to the
+          container (to the target port when set). Raw ports are reached through DNS pointing at that node, so a client's network
+          must reach it. Nothing else of the network is reachable from outside; stopped containers expose nothing.
+        </HelpTip>
+      </div>
+      {ports.length === 0 && <p className="field-hint">No open ports.</p>}
+      {ports.map((p) => (
+        <div key={`${p.protocol}-${p.port}`} className="flex-row" style={{ gap: 8, marginBottom: 4 }}>
+          <span className="mono">
+            {p.port}/{p.protocol}
+            {p.target_port && p.target_port !== p.port ? ` → ${p.target_port}` : ''} → {p.stack}/{p.service}
+          </span>
+          {!disabled && (
+            <button type="button" onClick={() => onChange(ports.filter((q) => q !== p))} aria-label={`remove ${p.port}/${p.protocol}`}>
+              <Icon name="trash" />
+            </button>
+          )}
+        </div>
+      ))}
+      {!disabled && !adding && (
+        <button type="button" onClick={() => setAdding(true)}>
+          <Icon name="plus" /> Add port
+        </button>
+      )}
+      {!disabled && adding && (
+        <div className="flex-row" style={{ gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <PortField id={`${idPrefix}-mop-port`} label="Port" value={port} onChange={setPort} disabled={disabled} />
+          <SelectField
+            id={`${idPrefix}-mop-protocol`}
+            label="Protocol"
+            value={protocol}
+            onChange={setProtocol}
+            options={[
+              { value: 'tcp', label: 'TCP' },
+              { value: 'udp', label: 'UDP' },
+            ]}
+            disabled={disabled}
+          />
+          <PortField id={`${idPrefix}-mop-target`} label="Target port (blank = same)" value={targetPort} onChange={setTargetPort} disabled={disabled} />
+          <TextField id={`${idPrefix}-mop-stack`} label="Stack" value={stack} onChange={setStack} disabled={disabled} />
+          <TextField id={`${idPrefix}-mop-service`} label="Service" value={service} onChange={setService} disabled={disabled} />
+          <button type="button" onClick={add} disabled={!valid}>
+            <Icon name="check" /> Add
+          </button>
+          <button type="button" onClick={() => setAdding(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {adding && dup && <p className="field-error">{port}/{protocol} is already listed.</p>}
+      {adding && webClash && <p className="field-error">{port}/tcp is served by the reverse proxy and cannot also be an open port.</p>}
+    </div>
   );
 }
 
@@ -1796,7 +1932,7 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
           label: n,
         }))}
         hint="Which node address DNS points at."
-        help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use. A managed network works when at least one node has an address on it: only those nodes answer, and only the client DNS server hands the address out (never public DNS), so it opens from clients that reach the managed subnet."
+        help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use. A managed network works when at least one node lists it: only those nodes answer, using their node address there, so it opens from clients whose network may reach the managed network."
         configKey="web.network"
         disabled={disabled}
       />
@@ -2607,14 +2743,14 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
               const checked = a.networks.includes(name);
               const portalErr = managedPortalError(draft, name, 'the login page');
               const managedNote = isManaged(net) && !portalErr
-                ? `served from the nodes with an address on it (${addressedNodesOn(draft, name).join(', ')}); only the client DNS server resolves it, never public DNS`
+                ? `served from the nodes that list it (${addressedNodesOn(draft, name).join(', ')}); only the client DNS server resolves it, never public DNS`
                 : null;
               return (
                 <div key={name}>
                   <CheckOption
                     checked={checked}
                     disabled={disabled || (!hasDomain && !checked) || (!!portalErr && !checked)}
-                    hint={(!hasDomain && '(no DNS domain, set one on the Networks page)') || (portalErr && '(managed network: no node has an address on it)') || (managedNote && `(${managedNote})`)}
+                    hint={(!hasDomain && '(no DNS domain, set one on the Networks page)') || (portalErr && '(managed network: no node lists it)') || (managedNote && `(${managedNote})`)}
                     onChange={(on) =>
                       patch({
                         networks: on ? [...a.networks, name] : a.networks.filter((n) => n !== name),

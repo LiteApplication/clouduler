@@ -52,6 +52,8 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
       domain: nullable(net.domain),
       // serde skip-if-false: absent means unmanaged.
       managed: net.managed ?? false,
+      open_ports: net.open_ports ?? [],
+      proxy: net.proxy ?? false,
     })),
     drives: mapValues(cfg.drives, (drive) => ({
       ...drive,

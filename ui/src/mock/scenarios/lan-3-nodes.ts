@@ -14,11 +14,11 @@ export default function lan3Nodes() {
     .network('lan', { type: 'private', subnet: '192.168.1.0/24', domain: 'home.example.com', access: ['guest', 'iot'] })
     .network('iot', { type: 'private', subnet: '192.168.20.0/24', access: ['lan'] })
     .network('guest', { type: 'private', subnet: '192.168.30.0/24', access: [] })
-    .network('media', { type: 'private', subnet: '192.168.32.0/24', managed: true, access: ['lan'] })
+    .network('media', { type: 'private', subnet: '192.168.32.0/24', managed: true, access: ['lan'], proxy: true, open_ports: [{ port: 2222, protocol: 'tcp', target_port: 22, stack: 'nextcloud', service: 'app' }] })
     .drive('fast', { mode: 'replicated', syncInterval: '15m' })
     .drive('bulk', { mode: 'served', servedBy: ['atlas', 'boreas'], syncInterval: '1h' })
     .node({ name: 'atlas', ip: '192.168.1.10', extraNetworks: { media: '192.168.32.2' }, cpus: 8, memGiB: 32, cpuPercent: 14, memUsedPercent: 46, drives: { fast: '/mnt/fast', bulk: '/mnt/bulk' } })
-    .node({ name: 'boreas', ip: '192.168.1.11', extraNetworks: { media: '192.168.32.3' }, cpus: 8, memGiB: 16, cpuPercent: 22, memUsedPercent: 58, drives: { fast: '/mnt/fast', bulk: '/mnt/bulk' } })
+    .node({ name: 'boreas', ip: '192.168.1.11', extraNetworks: { media: null }, cpus: 8, memGiB: 16, cpuPercent: 22, memUsedPercent: 58, drives: { fast: '/mnt/fast', bulk: '/mnt/bulk' } })
     .node({ name: 'cirrus', ip: '192.168.1.12', cpus: 4, memGiB: 16, cpuPercent: 9, memUsedPercent: 31, drives: { fast: '/mnt/fast' } })
     .stack('vaultwarden', vaultwarden('lan'), { placement: { app: 'cirrus' } })
     .stack('nextcloud', nextcloud('lan'), {

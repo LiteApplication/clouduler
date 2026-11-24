@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClusterConfig } from '../api/types';
-import { addressedNodesOn, managedNetworkError, managedNodeAddressError, managedPortalError } from './managedNetwork';
+import { addressedNodesOn, managedNetworkError, managedNodeAddresses, managedNodeAddressError, managedPortalError, managedReserved, nodeAddressOn } from './managedNetwork';
 
 function cfg(subnet: string, addrs: Record<string, string>, extra: Record<string, unknown> = {}): ClusterConfig {
   return {
@@ -31,22 +31,50 @@ describe('managed networks', () => {
     }
     expect(managedNodeAddressError(cfg('192.168.32.0/24', { a: '192.168.32.9' }), 'a', 'mgd')).toBeNull();
   });
-  it('needs an IPv4 internal address on the node', () => {
-    const c = cfg('192.168.32.0/24', { a: '192.168.32.9' }, { ts: { type: 'internal', subnet: 'fd00::/64', domain: null } });
-    (c.nodes.a.network as Record<string, unknown>).ts = 'fd00::1';
-    expect(managedNodeAddressError(c, 'a', 'mgd')).toMatch(/no IPv4 address on the internal network ts/);
-    (c.nodes.a.network as Record<string, unknown>).ts = '10.10.0.1';
+  it('allocates stable automatic node addresses from the top of the subnet', () => {
+    const c = cfg('192.168.32.0/24', {});
+    (c.nodes as Record<string, unknown>).a = { network: { mgd: null } };
+    (c.nodes as Record<string, unknown>).b = { network: { mgd: null } };
+    (c.nodes as Record<string, unknown>).c = { network: { mgd: '192.168.32.254' } };
+    (c.nodes as Record<string, unknown>).d = { network: {} };
+    const all = managedNodeAddresses(c, 'mgd');
+    expect([...all.keys()].sort()).toEqual(['a', 'b', 'c']);
+    expect(all.get('c')).toBe('192.168.32.254');
+    const ips = [...all.values()];
+    expect(new Set(ips).size).toBe(3);
+    for (const ip of ips) expect(ip).not.toMatch(/\.(0|1|255)$/);
+    expect(nodeAddressOn(c, 'a', 'mgd')).toBe(all.get('a'));
+    expect(nodeAddressOn(c, 'd', 'mgd')).toBeNull();
+    expect(managedNodeAddresses(c, 'lan').size).toBe(0);
+    // Same config, same answer; automatic addresses are reserved.
+    expect(managedNodeAddresses(c, 'mgd')).toEqual(all);
+    expect(managedReserved(c, 'mgd').has(192 * 16777216 + 168 * 65536 + 32 * 256 + 254)).toBe(true);
     expect(managedNodeAddressError(c, 'a', 'mgd')).toBeNull();
+    (c.nodes as Record<string, unknown>).e = { network: { mgd: '' } };
+    expect(managedNodeAddressError(c, 'e', 'mgd')).toMatch(/tick automatic/);
   });
-  it('lets the dashboard and login sit on a managed network with an addressed node', () => {
+  it('checks open ports and proxy', () => {
+    const p = (extra: Record<string, unknown>) => {
+      const c = cfg('192.168.32.0/24', {});
+      (c.networks as Record<string, unknown>).mgd = { type: 'private', subnet: '192.168.32.0/24', domain: null, managed: true, ...extra };
+      return managedNetworkError(c, 'mgd');
+    };
+    const port = { port: 22, protocol: 'tcp', stack: 'git', service: 'ssh' };
+    expect(p({ open_ports: [port], proxy: true })).toBeNull();
+    expect(p({ open_ports: [port, { ...port, target_port: 2 }] })).toMatch(/more than once/);
+    expect(p({ open_ports: [{ ...port, port: 0 }] })).toMatch(/port 0/);
+    expect(p({ open_ports: [{ ...port, service: '' }] })).toMatch(/stack and service/);
+    expect(p({ proxy: true, open_ports: [{ ...port, port: 443 }] })).toMatch(/reverse proxy/);
+    expect(p({ open_ports: [{ ...port, port: 443 }] })).toBeNull();
+  });
+  it('lets the dashboard and login sit on a managed network a node lists', () => {
     const c = cfg('192.168.32.0/24', { a: '192.168.32.2' });
     (c.nodes as Record<string, unknown>).b = { network: { mgd: null } };
-    expect(addressedNodesOn(c, 'mgd')).toEqual(['a']);
+    expect(addressedNodesOn(c, 'mgd')).toEqual(['a', 'b']);
     expect(managedPortalError(c, 'mgd', 'the login page')).toBeNull();
     expect(managedPortalError(c, 'lan', 'the login page')).toBeNull();
     const none = cfg('192.168.32.0/24', {});
-    (none.nodes as Record<string, unknown>).b = { network: { mgd: null } };
-    expect(managedPortalError(none, 'mgd', 'the dashboard')).toMatch(/no node has an IP address/);
+    expect(managedPortalError(none, 'mgd', 'the dashboard')).toMatch(/no node lists it/);
     expect(managedPortalError(none, 'lan', 'the dashboard')).toBeNull();
   });
 });
