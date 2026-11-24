@@ -106,12 +106,7 @@ async fn run(
                 .find(|node| cl_raft::node_id(node.id) == id)
         });
         let no_private = crate::proxy::private_shortcut_denied_hosts(&cfg, &state);
-        let mut views = views_for(&cfg, &allocations, &hosts, &no_private, leader);
-        add_managed_containers(
-            &cfg,
-            &mut views,
-            &crate::proxy::managed_container_hosts(&cfg, &state),
-        );
+        let views = views_for(&cfg, &allocations, &hosts, &no_private, leader);
         let live = Arc::new(cfg.clone());
         let segments = segments_of(&cfg, &allocations);
         let classify: Classifier = Arc::new(move |ip| {
@@ -227,10 +222,6 @@ struct Entry {
     nodes: Vec<String>,
     /// False when the route opted out of the per-network address shortcut.
     private_shortcut: bool,
-    /// The login portal or the dashboard: answered by a node's own address
-    /// even on a managed network, which `nodes` already limits to the nodes
-    /// holding one. Any other name there is answered by container addresses.
-    node_served: bool,
 }
 
 /// One view per network a client can be in (every subnetted and public
@@ -255,9 +246,6 @@ fn views_for(
                 network: network.clone(),
                 nodes: nodes.iter().cloned().collect(),
                 private_shortcut: !no_private.contains(&(host.clone(), network.clone())),
-                node_served: cfg.proxy.auth.as_ref().is_some_and(|auth| {
-                    auth.host == *host && auth.covers(network) && cfg.is_managed_network(network)
-                }),
             });
     }
     // Writes only land on the leader, so the dashboard names no other node.
@@ -266,10 +254,11 @@ fn views_for(
             // On a managed network only a node holding an address there can
             // answer: the leader if it does, otherwise any that does (reads
             // work on every node, a write on a follower is redirected).
-            let nodes = if net.is_managed() && leader.ip_on(&cfg.web.network).is_none() {
-                cfg.addressed_nodes_on(&cfg.web.network)
-                    .into_iter()
-                    .cloned()
+            let nodes = if net.is_managed() && cfg.node_address_on(name, &cfg.web.network).is_none()
+            {
+                cfg.managed_node_addresses(&cfg.web.network)
+                    .into_keys()
+                    .map(str::to_string)
                     .collect()
             } else {
                 vec![name.clone()]
@@ -281,7 +270,6 @@ fn views_for(
                     network: cfg.web.network.clone(),
                     nodes,
                     private_shortcut: true,
-                    node_served: net.is_managed(),
                 });
         }
     }
@@ -329,44 +317,28 @@ fn views_for(
     views
 }
 
-/// A stack route on a managed network is answered with its containers' own
-/// addresses (the same ones the DNS provider gets), never a node's address
-/// there. Clients on the managed network itself always get them; any other
-/// client that can reach the network gets them only for a name it would
-/// otherwise be refused, since a node address on its own network still works
-/// for it. A route with no running container adds nothing.
-fn add_managed_containers(
-    cfg: &ClusterConfig,
-    views: &mut BTreeMap<String, View>,
-    hosts: &BTreeMap<(String, String), BTreeSet<std::net::Ipv4Addr>>,
-) {
-    for ((host, network), ips) in hosts {
-        let Some(net) = cfg.networks.get(network) else {
-            continue;
-        };
-        if ips.is_empty() {
-            continue;
-        }
-        let fqdn = qualify(host, net.domain.as_deref());
-        for (client_net, view) in views.iter_mut() {
-            if !cfg.reaches(client_net, network) {
-                continue;
-            }
-            let existing = view.records.iter().position(|r| r.name == fqdn);
-            if existing.is_some() && client_net != network {
-                continue;
-            }
-            let answers: Vec<ViewAnswer> = ips.iter().copied().map(ViewAnswer::A).collect();
-            view.refused.remove(&fqdn);
-            match existing {
-                Some(i) => view.records[i].answers = answers,
-                None => view.records.push(ViewRecord {
-                    name: fqdn.clone(),
-                    answers,
-                }),
-            }
-        }
+/// The answers for a hostname on a managed network: the node address of each
+/// node in `entry.nodes` (the nodes holding a healthy container, so a stopped
+/// service answers nothing), one A record per owner. When the client's network
+/// cannot reach any owner's address and the network is served by the proxy
+/// (`proxy: true`), any node's address on it that the client can reach is an
+/// entry node that relays to the owner.
+fn managed_answers(cfg: &ClusterConfig, client_net: &str, entry: &Entry) -> Vec<ViewAnswer> {
+    let reachable = |ip: &std::net::Ipv4Addr| client_can_reach(cfg, client_net, IpAddr::V4(*ip));
+    let owners: Vec<std::net::Ipv4Addr> = entry
+        .nodes
+        .iter()
+        .filter_map(|node| cfg.node_address_on(node, &entry.network))
+        .filter(reachable)
+        .collect();
+    if !owners.is_empty() || entry.nodes.is_empty() || !cfg.managed_proxy(&entry.network) {
+        return owners.into_iter().map(ViewAnswer::A).collect();
     }
+    cfg.managed_node_addresses(&entry.network)
+        .into_values()
+        .filter(reachable)
+        .map(ViewAnswer::A)
+        .collect()
 }
 
 /// Whether a client on `client_net` can route to `ip`. A network with an
@@ -403,6 +375,16 @@ fn answers_for(
     let mut records: Vec<DesiredRecord> = Vec::new();
     let mut segment: Vec<ViewAnswer> = Vec::new();
     for entry in entries {
+        // A managed network's hostname is answered by the owning node's
+        // address there, never a container address.
+        if cfg.is_managed_network(&entry.network) {
+            for answer in managed_answers(cfg, client_net, entry) {
+                if !segment.contains(&answer) {
+                    segment.push(answer);
+                }
+            }
+            continue;
+        }
         for node_name in &entry.nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
@@ -445,9 +427,9 @@ fn answers_for(
                 &entry.network
             };
             let node_records = |net: &str| {
-                if cfg.is_managed_network(net) && !entry.node_served {
+                if cfg.is_managed_network(net) {
                     Err(cl_dns::DnsError::Invalid(format!(
-                        "a node's address on the managed network {net} is not handed out"
+                        "a node's address on the managed network {net} only names its own containers"
                     )))
                 } else {
                     records_for(cfg, fqdn, net, node)
@@ -592,45 +574,61 @@ mod tests {
         cfg
     }
 
-    /// A node's address on a managed network is never an answer; the
-    /// container addresses of the route are, for clients on that network.
+    /// A managed route is answered with the owning node's address on the
+    /// network, one per owner and never a container address; a service with
+    /// no healthy owner (empty node set) has no answer.
     #[test]
-    fn a_managed_network_route_is_answered_with_container_addresses() {
-        let cfg = managed_cfg();
+    fn a_managed_network_route_is_answered_with_the_owning_node_address() {
+        let mut cfg = managed_cfg();
+        cfg.nodes.get_mut("n2").unwrap().network.insert(
+            "mgd".into(),
+            cl_config::NodeAddress::Ip("192.168.32.3".parse().unwrap()),
+        );
         let rows = hosts(&[("files", "mgd", &["n1"])]);
-        let mut views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
-        for (name, view) in &views {
-            assert!(
-                view.records
-                    .iter()
-                    .all(|r| !r.answers.contains(&a([192, 168, 32, 2]))),
-                "{name}: {view:?}"
-            );
-        }
-        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
-        assert!(views["mgd"].refused.contains("files.m.example.com"));
-
-        let ips = BTreeMap::from([(
-            ("files".to_string(), "mgd".to_string()),
-            BTreeSet::from([Ipv4Addr::new(192, 168, 32, 7)]),
-        )]);
-        add_managed_containers(&cfg, &mut views, &ips);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
         assert_eq!(
             answer(&views, "mgd", "files.m.example.com"),
-            Some(&[a([192, 168, 32, 7])][..])
+            Some(&[a([192, 168, 32, 2])][..])
         );
-        assert!(!views["mgd"].refused.contains("files.m.example.com"));
-
-        // No running container, nothing to add.
-        let mut empty = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
-        let none = BTreeMap::from([(("files".to_string(), "mgd".to_string()), BTreeSet::new())]);
-        add_managed_containers(&cfg, &mut empty, &none);
-        assert!(answer(&empty, "mgd", "files.m.example.com").is_none());
+        // Replicas on both nodes: one address per owner.
+        let rows = hosts(&[("files", "mgd", &["n1", "n2"])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "mgd", "files.m.example.com"),
+            Some(&[a([192, 168, 32, 2]), a([192, 168, 32, 3])][..])
+        );
+        // A client network that does not reach mgd is refused.
+        assert!(answer(&views, "wan", "files.m.example.com").is_none());
+        assert!(views["wan"].refused.contains("files.m.example.com"));
+        // No healthy owner, no record.
+        let rows = hosts(&[("files", "mgd", &[])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
     }
 
-    /// The login portal and the dashboard are the exception on a managed
-    /// network: they are served from a node's own address there, so they name
-    /// only the nodes holding one, while any other name stays refused.
+    /// A node with no address on the managed network (the owner here) gives a
+    /// client nothing; with `proxy: true` any addressed node is an entry node.
+    #[test]
+    fn a_client_that_cannot_reach_the_owner_falls_back_to_an_entry_node() {
+        let mut cfg = managed_cfg();
+        cfg.nodes.get_mut("n2").unwrap().network.remove("mgd");
+        let rows = hosts(&[("files", "mgd", &["n2"])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
+        cfg.networks.get_mut("mgd").unwrap().proxy = true;
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "mgd", "files.m.example.com"),
+            Some(&[a([192, 168, 32, 2])][..])
+        );
+        // Nothing runs it: still no record, even with the proxy on.
+        let rows = hosts(&[("files", "mgd", &[])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
+    }
+
+    /// The login portal and the dashboard name only the nodes holding an
+    /// address on a managed network.
     #[test]
     fn the_portal_and_dashboard_on_a_managed_network_name_addressed_nodes() {
         let mut cfg = managed_cfg();
@@ -641,19 +639,13 @@ mod tests {
             .unwrap(),
         );
         cfg.web.network = "mgd".into();
-        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
 
-        // As desired_dns_hosts builds it: only the addressed node.
-        let rows = hosts(&[("login", "mgd", &["n1"]), ("files", "mgd", &["n1", "n2"])]);
+        let rows = hosts(&[("login", "mgd", &["n1"])]);
         let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
         assert_eq!(
             answer(&views, "mgd", "login.m.example.com"),
             Some(&[a([192, 168, 32, 2])][..])
         );
-        // An ordinary route there is still never answered with a node address.
-        assert!(answer(&views, "mgd", "files.m.example.com").is_none());
-        assert!(views["mgd"].refused.contains("files.m.example.com"));
-        // A network that does not reach mgd is refused the portal.
         assert!(answer(&views, "wan", "login.m.example.com").is_none());
 
         // The dashboard goes to the leader when it holds an address there.

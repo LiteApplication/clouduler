@@ -288,21 +288,20 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   Neither is allowed on a non-managed network.
 * Masquerade is off: the internet needs a nat, egress or wireguard network.
 
-DNS: a stack route hostname on a managed network is published (Cloudflare) as the
-containers' own addresses (`proxy::managed_container_hosts`), since a node's own
-address there is only reachable via that node; the `/32` routes make container
-addresses reachable from any entry node. Static routes and redirects on a
-managed network are refused by the API (`check_not_managed`); stored ones
-publish nothing and set a DNS status error (`unaddressed_hosts`). `web.network`
-and `proxy.auth.networks` may be managed only if at least one node has an IP
-address there (validation, `ClusterConfig::addressed_nodes_on`): the portal and
-dashboard hostnames are then answered, by the client DNS server only (never
-published to the provider), with just the addressed nodes' addresses
-(`proxy::desired_dns_hosts`, `client_dns::Entry::node_served`), so they work
-for clients that reach the managed subnet and not for public-DNS clients. The
-client DNS server (`client_dns::add_managed_containers`) answers any other
-managed route with the container addresses to clients on that network, and
-never with a node address on one.
+DNS: a stack route hostname on a managed network is published (Cloudflare, TTL
+60) as the owning node's address on that network, one A record per node holding
+a healthy container (`proxy::desired_dns_hosts`, `proxy::healthy_nodes`: wanted
+running and `container_status.running`), never a container address; no healthy
+container, no record. `dns_publish` does not apply to them. The client DNS
+server (`client_dns::managed_answers`) answers the same node addresses to
+clients whose network reaches the managed network and, when none of the owners'
+addresses is reachable for the client and `proxy: true`, any node's address
+there (an entry node that relays to the owner). With `proxy: false` the proxy
+serves none of the network's hostnames (`routes_for`); static routes and
+redirects on it publish nothing and set a DNS status error
+(`unaddressed_hosts`), with `proxy: true` they name every addressed node.
+`web.network` and `proxy.auth.networks` may be managed (validation); the
+portal and dashboard hostnames then name the nodes holding an address there.
 
 Access is by routing. Clouduler advertises nothing: clients route the whole
 subnet via any implementing node (for example `tailscale up

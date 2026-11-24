@@ -163,8 +163,8 @@ fn internal_peer_subnets(cfg: &ClusterConfig, state: &ClusterState) -> Vec<IpNet
         // outside traffic and masquerades it to an address inside the segment,
         // so trusting the segment would let that traffic skip authentication.
         // Its client containers are covered by their own stack overlay. A
-        // managed network is left out too: outside clients are routed in and
-        // arrive from its gateway address, so it cannot vouch for its source.
+        // managed network is left out too: its subnet is also reachable from
+        // outside, so it cannot vouch for its source.
         subnets.extend(
             allocations
                 .subnets_of_overlays(allocations.network_names().filter(|name| {
@@ -665,6 +665,11 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
     for placement in crate::placement::service_placements(state, cfg) {
         let instance = format!("{}.{}", placement.stack, placement.service);
         for entry in &placement.extensions.proxy {
+            // A managed network without `proxy: true` only exposes its raw
+            // open_ports; the proxy serves none of its hostnames.
+            if cfg.is_managed_network(&entry.network) && !cfg.managed_proxy(&entry.network) {
+                continue;
+            }
             let domain = cfg
                 .networks
                 .get(&entry.network)
@@ -1249,22 +1254,34 @@ pub fn desired_dns_hosts(
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
 
     for placement in crate::placement::service_placements(state, cfg) {
-        let nodes = if owning_node_only {
-            crate::placement::service_nodes(state, &placement.stack, &placement.service)
-        } else {
-            all_nodes.clone()
-        };
+        let owners = crate::placement::service_nodes(state, &placement.stack, &placement.service);
+        let healthy = healthy_nodes(state, &placement.stack, &placement.service);
         for entry in &placement.extensions.proxy {
+            // A managed network names the nodes holding a healthy container,
+            // whatever `proxy.dns_publish` says: its node addresses are only
+            // reached through the owner (or, with `proxy: true`, any node
+            // that relays to it).
+            let nodes = if cfg.is_managed_network(&entry.network) {
+                healthy.clone()
+            } else if owning_node_only {
+                owners.clone()
+            } else {
+                all_nodes.clone()
+            };
             hosts
                 .entry((entry.host.clone(), entry.network.clone()))
                 .or_default()
-                .extend(nodes.clone());
+                .extend(nodes);
         }
     }
     for entry in StaticRouteStore::load(state).routes {
-        let nodes = match entry.node {
-            Some(node) => BTreeSet::from([node]),
-            None => all_nodes.clone(),
+        let nodes = if cfg.is_managed_network(&entry.network) {
+            managed_entry_nodes(cfg, &entry.network)
+        } else {
+            match entry.node {
+                Some(node) => BTreeSet::from([node]),
+                None => all_nodes.clone(),
+            }
         };
         hosts
             .entry((entry.host, entry.network))
@@ -1272,10 +1289,15 @@ pub fn desired_dns_hosts(
             .extend(nodes);
     }
     for rule in RedirectStore::load(state).rules {
+        let nodes = if cfg.is_managed_network(&rule.network) {
+            managed_entry_nodes(cfg, &rule.network)
+        } else {
+            all_nodes.clone()
+        };
         hosts
             .entry((rule.host, rule.network))
             .or_default()
-            .extend(all_nodes.clone());
+            .extend(nodes);
     }
     // Any node can answer the login portal, except on a managed network,
     // where a client is pointed at a node's own address there: only the nodes
@@ -1283,9 +1305,9 @@ pub fn desired_dns_hosts(
     if let Some(auth) = &cfg.proxy.auth {
         for network in &auth.networks {
             let nodes: BTreeSet<String> = if cfg.is_managed_network(network) {
-                cfg.addressed_nodes_on(network)
-                    .into_iter()
-                    .cloned()
+                cfg.managed_node_addresses(network)
+                    .into_keys()
+                    .map(str::to_string)
                     .collect()
             } else {
                 all_nodes.clone()
@@ -1299,43 +1321,64 @@ pub fn desired_dns_hosts(
     hosts
 }
 
-/// The addresses running containers hold on a managed network, per
-/// `(host, network)` of a stack route there. A managed network's subnet is
-/// routed to every implementing node (`/32` routes via the hosting node), so
-/// the container's own address is reachable from anywhere that reaches the
-/// subnet and names the right node whichever one a client enters from. Empty
-/// set (kept as a key) while no instance of the service is running.
-pub(crate) fn managed_container_hosts(
+/// The nodes holding a healthy container of `stack`/`service`: wanted
+/// running and reported running by the node that owns it. A stopped or failing
+/// container names no node, so its hostname gets no record at all.
+pub(crate) fn healthy_nodes(state: &ClusterState, stack: &str, service: &str) -> BTreeSet<String> {
+    state
+        .assignments
+        .iter()
+        .filter(|(id, a)| {
+            id.stack == stack
+                && id.service == service
+                && a.desired == cl_raft::state::DesiredState::Running
+                && state
+                    .container_status
+                    .get(*id)
+                    .is_some_and(|s| s.running && s.node == a.node)
+        })
+        .map(|(_, a)| a.node.clone())
+        .collect()
+}
+
+/// The nodes a static route or redirect on managed network `network` names:
+/// every node holding an address there when the proxy serves the network
+/// (`proxy: true`), none otherwise since nothing would answer on 80/443.
+pub(crate) fn managed_entry_nodes(cfg: &ClusterConfig, network: &str) -> BTreeSet<String> {
+    if !cfg.managed_proxy(network) {
+        return BTreeSet::new();
+    }
+    cfg.managed_node_addresses(network)
+        .into_keys()
+        .map(str::to_string)
+        .collect()
+}
+
+/// TTL of the records published for a managed network: the owner moves with
+/// its container, so resolvers must not keep an answer long.
+const MANAGED_RECORD_TTL: u32 = 60;
+
+/// `fqdn` -> the owning node's address on managed network `network`, one A
+/// record. Empty when the node holds no address there.
+fn managed_node_records(
     cfg: &ClusterConfig,
-    state: &ClusterState,
-) -> BTreeMap<(String, String), BTreeSet<std::net::Ipv4Addr>> {
-    let mut out: BTreeMap<(String, String), BTreeSet<std::net::Ipv4Addr>> = BTreeMap::new();
-    if cfg.managed_networks().is_empty() {
-        return out;
-    }
-    let held = crate::placement::managed_addresses(state, cfg);
-    for placement in crate::placement::service_placements(state, cfg) {
-        for entry in &placement.extensions.proxy {
-            if !cfg.is_managed_network(&entry.network) {
-                continue;
-            }
-            let ips = out
-                .entry((entry.host.clone(), entry.network.clone()))
-                .or_default();
-            for (instance, addrs) in &held {
-                if instance.stack != placement.stack || instance.service != placement.service {
-                    continue;
-                }
-                ips.extend(
-                    addrs
-                        .iter()
-                        .filter(|(network, _)| *network == entry.network)
-                        .map(|(_, ip)| *ip),
-                );
-            }
-        }
-    }
-    out
+    host: &str,
+    network: &str,
+    node: &str,
+) -> Vec<DesiredRecord> {
+    let (Some(net), Some(ip)) = (
+        cfg.networks.get(network),
+        cfg.node_address_on(node, network),
+    ) else {
+        return Vec::new();
+    };
+    vec![DesiredRecord {
+        fqdn: cl_config::qualify(host, net.domain.as_deref()),
+        kind: cl_dns::RecordType::A,
+        content: ip.to_string(),
+        ttl: MANAGED_RECORD_TTL,
+        proxied: false,
+    }]
 }
 
 /// Fully qualified hostnames whose DNS records go out with Cloudflare's proxy
@@ -1401,11 +1444,11 @@ pub fn private_shortcut_denied_hosts(
 fn leader_node(
     cfg: &ClusterConfig,
     leader_id: Option<cl_raft::NodeId>,
-) -> Option<&cl_config::Node> {
+) -> Option<(&String, &cl_config::Node)> {
     let leader_id = leader_id?;
     cfg.nodes
-        .values()
-        .find(|node| cl_raft::node_id(node.id) == leader_id)
+        .iter()
+        .find(|(_, node)| cl_raft::node_id(node.id) == leader_id)
 }
 
 /// Whether hostnames on `network` go to the DNS provider. A network switched
@@ -1429,48 +1472,38 @@ fn desired_records(
     let mut out: Vec<DesiredRecord> = Vec::new();
     let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
 
-    // A node's address on a managed network is only reachable through that
-    // node, so it never goes to the provider. That covers the dashboard and the
-    // login page too: on a managed network they are answered by the client dns
-    // server alone (stored routes and redirects that predate the ban are
-    // reported by `unaddressed_hosts`).
-    if let Some(leader) = leader_node(cfg, leader_id).filter(|_| {
-        publishes_dns(cfg, &cfg.web.network) && !cfg.is_managed_network(&cfg.web.network)
-    }) {
-        if let Ok(records) = cl_dns::records_for(cfg, &cfg.web.address, &cfg.web.network, leader) {
-            push_new(&mut out, &mut seen, records);
-        }
+    // A managed network's hostname names the node's address there, short
+    // lived: the dashboard on the leader, everything else on the nodes holding
+    // a healthy container (`desired_dns_hosts`).
+    if let Some((leader_name, leader)) =
+        leader_node(cfg, leader_id).filter(|_| publishes_dns(cfg, &cfg.web.network))
+    {
+        let records = if cfg.is_managed_network(&cfg.web.network) {
+            managed_node_records(cfg, &cfg.web.address, &cfg.web.network, leader_name)
+        } else {
+            cl_dns::records_for(cfg, &cfg.web.address, &cfg.web.network, leader).unwrap_or_default()
+        };
+        push_new(&mut out, &mut seen, records);
     }
 
     let proxied = cloudflare_proxied_hosts(cfg, state);
-    for ((host, network), ips) in managed_container_hosts(cfg, state) {
+    for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
         if !publishes_dns(cfg, &network) {
             continue;
         }
-        let Some(net) = cfg.networks.get(&network) else {
-            continue;
-        };
-        let fqdn = cl_config::qualify(&host, net.domain.as_deref());
-        let records = ips
-            .iter()
-            .map(|ip| DesiredRecord {
-                fqdn: fqdn.clone(),
-                kind: cl_dns::RecordType::A,
-                content: ip.to_string(),
-                ttl: 1,
-                proxied: false,
-            })
-            .collect();
-        push_new(&mut out, &mut seen, records);
-    }
-    for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
-        if !publishes_dns(cfg, &network) || cfg.is_managed_network(&network) {
-            continue;
-        }
+        let managed = cfg.is_managed_network(&network);
         for node_name in &nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
             };
+            if managed {
+                push_new(
+                    &mut out,
+                    &mut seen,
+                    managed_node_records(cfg, &host, &network, node_name),
+                );
+                continue;
+            }
             let Ok(mut records) = cl_dns::records_for(cfg, &host, &network, node) else {
                 continue;
             };
@@ -1516,9 +1549,8 @@ fn unaddressed_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<Stri
             ),
         );
     }
-    // A static route or redirect stored on a network that is managed now (the
-    // API refuses new ones) has only node addresses to publish, and those are
-    // only reachable through their node.
+    // A static route or redirect on a managed network whose proxy is off has
+    // nothing answering 80/443 and no container to point at.
     let stored = StaticRouteStore::load(state)
         .routes
         .into_iter()
@@ -1530,7 +1562,10 @@ fn unaddressed_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<Stri
                 .map(|r| (r.host, r.network, "redirect")),
         );
     for (host, network, what) in stored {
-        if !publishes_dns(cfg, &network) || !cfg.is_managed_network(&network) {
+        if !publishes_dns(cfg, &network)
+            || !cfg.is_managed_network(&network)
+            || cfg.managed_proxy(&network)
+        {
             continue;
         }
         let Some(net) = cfg.networks.get(&network) else {
@@ -1539,8 +1574,8 @@ fn unaddressed_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<Stri
         out.insert(
             cl_config::qualify(&host, net.domain.as_deref()),
             format!(
-                "this {what} is on the managed network {network}, where a node's address is only \
-                 reachable through that node, so no record is published; move it to another network"
+                "this {what} is on the managed network {network}, which has proxy: false, so no \
+                 record is published; set proxy: true on the network or move it to another network"
             ),
         );
     }
@@ -2489,58 +2524,96 @@ services:
         (cfg, state)
     }
 
+    fn mark_running(state: &mut ClusterState, id: &cl_raft::InstanceId, node: &str) {
+        state.container_status.insert(
+            id.clone(),
+            cl_raft::state::ContainerStatus {
+                node: node.to_string(),
+                running: true,
+                secret_revisions: Default::default(),
+                config_revisions: Default::default(),
+            },
+        );
+    }
+
     #[test]
-    fn a_managed_network_hostname_publishes_the_container_address_not_the_node() {
-        let (cfg, mut state) = managed_published();
+    fn a_managed_network_hostname_publishes_the_owning_node_address() {
+        let (mut cfg, mut state) = managed_published();
         let solo = cl_raft::InstanceId::new("media", "solo", 0);
-        let ip = Allocations::decode(state.overlay.as_deref())
+        let published = |cfg: &ClusterConfig, state: &ClusterState| -> Vec<DesiredRecord> {
+            desired_records(cfg, None, state)
+                .into_iter()
+                .filter(|r| r.fqdn == "files.example.com")
+                .collect()
+        };
+
+        // Wanted running but not reported running yet: nothing is published.
+        assert!(published(&cfg, &state).is_empty());
+
+        mark_running(&mut state, &solo, "n1");
+        let mine = published(&cfg, &state);
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        assert_eq!(mine[0].kind, cl_dns::RecordType::A);
+        assert_eq!(
+            mine[0].content, "192.168.32.2",
+            "the node address, never the container's"
+        );
+        assert!(
+            mine[0].ttl <= 60 && mine[0].ttl > 1,
+            "short ttl: {}",
+            mine[0].ttl
+        );
+        assert!(unaddressed_hosts(&cfg, &state).is_empty());
+
+        // The global dns_publish toggle does not apply to a managed network.
+        cfg.proxy.dns_publish = cl_config::DnsPublishMode::AllNodes;
+        assert_eq!(published(&cfg, &state).len(), 1);
+
+        // The record goes once nothing runs it.
+        state.assignments.get_mut(&solo).unwrap().desired = cl_raft::state::DesiredState::Stopped;
+        assert!(published(&cfg, &state).is_empty());
+        assert!(unaddressed_hosts(&cfg, &state).is_empty());
+    }
+
+    /// A node's auto-allocated address on a managed network is what is
+    /// published when the config leaves it unset.
+    #[test]
+    fn an_auto_allocated_node_address_is_published() {
+        let (mut cfg, mut state) = managed_published();
+        cfg.nodes
+            .get_mut("n1")
             .unwrap()
-            .instance_ip(&cl_net::managed_key("mgd"), &solo)
-            .unwrap()
-            .to_string();
+            .network
+            .insert("mgd".into(), cl_config::NodeAddress::None);
+        let solo = cl_raft::InstanceId::new("media", "solo", 0);
+        mark_running(&mut state, &solo, "n1");
+        let auto = cfg.node_address_on("n1", "mgd").unwrap().to_string();
         let records = desired_records(&cfg, None, &state);
         let mine: Vec<_> = records
             .iter()
             .filter(|r| r.fqdn == "files.example.com")
             .collect();
         assert_eq!(mine.len(), 1, "{records:?}");
-        assert_eq!(mine[0].kind, cl_dns::RecordType::A);
-        assert_eq!(mine[0].content, ip);
-        assert_ne!(mine[0].content, "192.168.32.2", "not the node address");
-        assert!(unaddressed_hosts(&cfg, &state).is_empty());
+        assert_eq!(mine[0].content, auto);
+    }
 
-        // An entry node other than the host can deliver to it: it holds a /32
-        // route to that address via the hosting node. It could not for n1's
-        // own node address.
-        let mut cfg2 = cfg.clone();
-        let mut n2 = cfg.nodes["n1"].clone();
-        n2.id = uuid::Uuid::new_v4();
-        n2.network.insert(
-            "default".into(),
-            cl_config::NodeAddress::Ip("10.10.0.2".parse().unwrap()),
-        );
-        n2.network.insert(
-            "mgd".into(),
-            cl_config::NodeAddress::Ip("192.168.32.3".parse().unwrap()),
-        );
-        cfg2.nodes.insert("n2".into(), n2);
-        let routes = crate::managed::wanted_routes(&state, &cfg2, "n2");
-        let published: std::net::Ipv4Addr = mine[0].content.parse().unwrap();
-        assert!(routes.contains_key(&published), "{routes:?}");
-        assert!(!routes.contains_key(&"192.168.32.2".parse().unwrap()));
-
-        // The record goes once nothing runs it.
-        state.assignments.get_mut(&solo).unwrap().desired = cl_raft::state::DesiredState::Stopped;
-        let records = desired_records(&cfg, None, &state);
-        assert!(
-            records.iter().all(|r| r.fqdn != "files.example.com"),
-            "{records:?}"
-        );
-        assert!(unaddressed_hosts(&cfg, &state).is_empty());
+    /// Without `proxy: true` a managed network's routes are not in the proxy's
+    /// table; with it they are.
+    #[test]
+    fn the_proxy_serves_a_managed_network_only_when_asked() {
+        let (mut cfg, state) = managed_published();
+        let has = |cfg: &ClusterConfig| {
+            routes_for(cfg, &state)
+                .iter()
+                .any(|r| r.host == "files.example.com")
+        };
+        assert!(!has(&cfg));
+        cfg.networks.get_mut("mgd").unwrap().proxy = true;
+        assert!(has(&cfg));
     }
 
     /// The login portal on a managed network is served only by the nodes that
-    /// hold an address there, and its record never reaches the provider.
+    /// hold an address there, and published as theirs.
     #[test]
     fn the_login_portal_on_a_managed_network_names_only_addressed_nodes() {
         let (mut cfg, state) = managed_published();
@@ -2559,7 +2632,6 @@ services:
             cl_config::NodeAddress::Ip("10.10.0.2".parse().unwrap()),
         );
         cfg.nodes.insert("n2".into(), n2);
-        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
 
         let hosts = desired_dns_hosts(&cfg, &state);
         assert_eq!(
@@ -2573,20 +2645,18 @@ services:
         );
 
         let records = desired_records(&cfg, None, &state);
-        assert!(
-            records.iter().all(|r| r.fqdn != "login.m.example.com"),
-            "{records:?}"
-        );
-        assert!(
-            records.iter().all(|r| r.content != "192.168.32.2"),
-            "{records:?}"
-        );
+        let login: Vec<_> = records
+            .iter()
+            .filter(|r| r.fqdn == "login.m.example.com")
+            .collect();
+        assert_eq!(login.len(), 1, "{records:?}");
+        assert_eq!(login[0].content, "192.168.32.2");
         assert!(!unaddressed_hosts(&cfg, &state).contains_key("login.m.example.com"));
     }
 
     #[test]
-    fn a_static_route_on_a_managed_network_publishes_no_node_address() {
-        let (cfg, state) = managed_published();
+    fn a_static_route_on_a_managed_network_needs_the_proxy() {
+        let (mut cfg, state) = managed_published();
         let state = with_static_routes(
             state,
             vec![static_route(
@@ -2595,22 +2665,23 @@ services:
                 "192.168.32.50:80",
             )],
         );
-        let records = desired_records(&cfg, None, &state);
-        assert!(
-            records.iter().all(|r| r.fqdn != "printer.example.com"),
-            "{records:?}"
-        );
-        assert!(
-            records.iter().all(|r| r.content != "192.168.32.2"),
-            "{records:?}"
-        );
+        let printer = |cfg: &ClusterConfig| -> Vec<DesiredRecord> {
+            desired_records(cfg, None, &state)
+                .into_iter()
+                .filter(|r| r.fqdn == "printer.example.com")
+                .collect()
+        };
+        assert!(printer(&cfg).is_empty());
         let warned = unaddressed_hosts(&cfg, &state);
         assert!(
             warned["printer.example.com"].contains("managed network mgd"),
             "{warned:?}"
         );
-        // The stack route keeps its container address and draws no warning.
-        assert!(!warned.contains_key("files.example.com"), "{warned:?}");
+        cfg.networks.get_mut("mgd").unwrap().proxy = true;
+        let records = printer(&cfg);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].content, "192.168.32.2");
+        assert!(!unaddressed_hosts(&cfg, &state).contains_key("printer.example.com"));
     }
 
     /// A network switched to `publish_dns: false` keeps its hostnames out of
