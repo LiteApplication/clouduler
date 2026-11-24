@@ -52,9 +52,12 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> NetAccessInput {
             .filter(|b| *b != name && !cfg.reaches(name, b))
             .filter_map(|b| {
                 let target = subnetted_v4(cfg, b)?;
-                let node_addr = me.and_then(|n| match n.ip_on(b) {
-                    Some(std::net::IpAddr::V4(ip)) => Some(ip),
-                    _ => None,
+                // A managed network's address may be automatic.
+                let node_addr = cfg.node_address_on(node, b).or_else(|| {
+                    me.and_then(|n| match n.ip_on(b) {
+                        Some(std::net::IpAddr::V4(ip)) => Some(ip),
+                        _ => None,
+                    })
                 });
                 Some(Denied {
                     network: b.clone(),
@@ -71,29 +74,9 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> NetAccessInput {
             });
         }
     }
-    let managed = cfg.managed_networks();
-    let managed_subnets = managed.iter().map(|(_, _, subnet)| *subnet).collect();
-    let managed_nodes = cfg
-        .nodes
-        .values()
-        .filter(|n| {
-            managed
-                .iter()
-                .any(|(name, _, _)| n.network.contains_key(*name))
-        })
-        .filter_map(|n| match cfg.internal_ip(n) {
-            Some(std::net::IpAddr::V4(ip)) => Some(ip),
-            _ => None,
-        })
-        // The hop through a tunnel comes from the node's inner address.
-        .flat_map(|ip| [Some(ip), cl_net::managed_tunnel::inner_addr(ip)])
-        .flatten()
-        .collect();
     NetAccessInput {
         web_port: cfg.web.port,
         sources,
-        managed_subnets,
-        managed_nodes,
     }
 }
 

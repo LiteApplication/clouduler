@@ -52,15 +52,6 @@ pub struct NetAccessInput {
     /// The dashboard's direct listener, always reachable.
     pub web_port: u16,
     pub sources: Vec<SourceRules>,
-    /// Subnets of the managed networks this node implements.
-    pub managed_subnets: Vec<Ipv4Net>,
-    /// Internal addresses of the nodes implementing a managed network. A
-    /// connection one of them hands to this node (see `crate::managed`) has
-    /// already been checked against the real client's network there, and its
-    /// source is now the node's internal address: without an exemption a
-    /// restricted internal network would deny it here and only containers on
-    /// the entry node would be reachable.
-    pub managed_nodes: Vec<Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,22 +128,6 @@ pub fn net_access_plan(input: &NetAccessInput) -> NetAccessPlan {
         "-j",
         "RETURN",
     ]);
-    // Node to managed subnet hops are decided by `CLDR-MNG`, which accepts
-    // them: RETURN (never ACCEPT) so the later chains still apply.
-    let hop_nodes: BTreeSet<Ipv4Addr> = input.managed_nodes.iter().copied().collect();
-    let hop_subnets: BTreeSet<Ipv4Net> = input.managed_subnets.iter().copied().collect();
-    for subnet in &hop_subnets {
-        for node in &hop_nodes {
-            forward_chain.push(&[
-                "-s",
-                &format!("{node}/32"),
-                "-d",
-                &subnet.to_string(),
-                "-j",
-                "RETURN",
-            ]);
-        }
-    }
     forward_chain.rules.extend(forward_rules);
 
     NetAccessPlan {
@@ -194,7 +169,6 @@ mod tests {
         NetAccessInput {
             web_port: 8443,
             sources,
-            ..Default::default()
         }
     }
 
@@ -208,25 +182,6 @@ mod tests {
 
     fn is_drop(r: &str) -> bool {
         r.ends_with("DROP")
-    }
-
-    #[test]
-    fn a_node_handing_over_a_connection_to_a_managed_subnet_is_not_denied() {
-        let mut i = input(vec![SourceRules {
-            network: "tailnet".into(),
-            subnet: net("100.64.0.0/10"),
-            denied: vec![denied("fam", "192.168.64.0/24", None)],
-        }]);
-        i.managed_subnets = vec![net("192.168.64.0/24")];
-        i.managed_nodes = vec!["100.64.0.2".parse().unwrap()];
-        let plan = net_access_plan(&i).plan;
-        let rules = &plan.chain(FORWARD_CHAIN).unwrap().rules;
-        let ret = rules
-            .iter()
-            .position(|r| r == "-s 100.64.0.2/32 -d 192.168.64.0/24 -j RETURN")
-            .expect("the hop is exempt");
-        let drop = rules.iter().position(|r| is_drop(r)).unwrap();
-        assert!(ret < drop, "{rules:?}");
     }
 
     #[test]

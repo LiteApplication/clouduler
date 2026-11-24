@@ -1,44 +1,51 @@
-//! The host plumbing of managed private networks (see `cl_config::Network::managed`).
+//! The host firewall of managed private networks (see `cl_config::Network::managed`).
 //!
 //! A managed network is one cluster-wide L2 segment (built in `vxlan`) on the
-//! nodes that implement it. Clients outside it route its whole subnet through
-//! any implementing node, so each of those nodes also has to:
+//! nodes that implement it. Containers talk to each other over it and keep
+//! their addresses, but nothing routes the subnet to the outside: an outside
+//! client reaches a node `ADDRESS` on the network (a secondary address of the
+//! node's bridge) and only the ports the network opens, which a userspace
+//! forwarder hands to the container running on that very node.
 //!
-//! * know how to reach a container another node runs: a /32 route per such
-//!   container, through the tunnel to the hosting node (`managed_tunnel`), or
-//!   failing that via its internal address ([`diff_routes`]);
-//! * filter what is forwarded into the subnet ([`FORWARD_CHAIN`]): replies,
-//!   the implementing nodes, the networks allowed to reach it, nothing else;
-//! * source-NAT what it forwards ([`NAT_CHAIN`]). To another node it uses its own
-//!   internal address, so the replies come back through it (and its
-//!   conntrack undoes the translation). Into the bridge it uses the network's
-//!   gateway, so a container answers through its managed interface whatever
-//!   its default route is. A container therefore sees the gateway, not the
-//!   client, as the source of such a connection.
+//! Two chains, both data first and unit tested without root:
 //!
-//! Everything is data first and unit tested without root, like the other
-//! firewall modules. `FORWARD_CHAIN` accepts what it lets through (docker's
-//! own rules would otherwise drop traffic routed into a bridge it owns) and
-//! drops the rest of the subnet.
+//! * [`INPUT_CHAIN`] (filter `INPUT`): what may reach a node address. The
+//!   host's own and the bridge's traffic is left to the other chains, replies
+//!   pass, the open ports (and 80/443 when the network serves the proxy) are
+//!   let through for the source networks whose `access` lists this network,
+//!   everything else to that address is dropped. A source in no cluster network
+//!   is in nobody's list, so it is dropped too.
+//! * [`FORWARD_CHAIN`] (filter `DOCKER-USER`, else `FORWARD`): nothing is routed into
+//!   the subnet from outside its bridge, apart from replies.
+//!
+//! Neither chain ever accepts: a verdict of `ACCEPT` in a sub-chain would skip
+//! every later chain, so allowed traffic `RETURN`s and the others still apply.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
-use std::process::Command;
 
+use cl_config::Protocol;
 use ipnet::Ipv4Net;
 
-use crate::error::{NetError, Result};
+use crate::error::Result;
 use crate::iptables::{ChainSpec, IptablesPlan, Jump};
 
 /// Filter chain, first in `DOCKER-USER` (else `FORWARD`).
 pub const FORWARD_CHAIN: &str = "CLDR-MNG";
 
-/// Nat chain, appended to `POSTROUTING`.
-pub const NAT_CHAIN: &str = "CLDR-MNG-NAT";
+/// Filter chain, first in `INPUT`.
+pub const INPUT_CHAIN: &str = "CLDR-MNG-IN";
 
-/// Routing protocol the per-container routes carry, so the daemon only ever
-/// lists and removes its own.
-pub const ROUTE_PROTO: &str = "201";
+/// Nat chain of earlier versions (cross-node source NAT), removed when found.
+pub const LEGACY_NAT_CHAIN: &str = "CLDR-MNG-NAT";
+
+/// Routing protocol the per-container routes of earlier versions carried.
+const LEGACY_ROUTE_PROTO: &str = "201";
+
+/// Prefix of the IPIP tunnel devices of earlier versions.
+const LEGACY_TUNNEL_PREFIX: &str = "clt-";
+
+/// UDP port of the FOU receiver of earlier versions.
+const LEGACY_FOU_PORT: &str = "7390";
 
 /// One managed network this node implements, as far as the firewall cares.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,41 +54,34 @@ pub struct ManagedNetRules {
     pub subnet: Ipv4Net,
     /// The network's bridge on this node.
     pub bridge: String,
-    pub gateway: Ipv4Addr,
+    /// This node's address on the network; without one nothing can reach the node there.
+    pub node_addr: Option<Ipv4Addr>,
     /// Subnets of the cluster networks allowed to reach this one
     /// (`ClusterConfig::reaches`).
     pub sources: Vec<Ipv4Net>,
+    /// What is reachable on the node address: the open ports, plus 80/443 when
+    /// the network serves the reverse proxy.
+    pub ports: Vec<(Protocol, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ManagedInput {
     pub nets: Vec<ManagedNetRules>,
-    /// Internal addresses of every node implementing a managed network: the
-    /// source of a connection forwarded from another node.
-    pub node_addrs: Vec<Ipv4Addr>,
-    /// This node's own internal address; without one no connection can be
-    /// handed to another node.
-    pub own_addr: Option<Ipv4Addr>,
-    /// This node's source address towards another node through a tunnel (see
-    /// `managed_tunnel::inner_addr`) and the tunnel devices to the others.
-    pub own_inner: Option<Ipv4Addr>,
-    pub tunnel_devs: Vec<String>,
 }
 
-/// The filter and nat chains. Empty when no managed network is implemented
-/// here, which the daemon reads as "remove both".
+/// The filter chains. Empty when no managed network is implemented here, which
+/// the daemon reads as "remove both". The input chain is left out when no
+/// network has a node address on this node.
 pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
     if input.nets.is_empty() {
         return IptablesPlan::default();
     }
-    let nodes: BTreeSet<Ipv4Addr> = input.node_addrs.iter().copied().collect();
-
     let mut forward = ChainSpec::new("filter", FORWARD_CHAIN);
-    let mut nat = ChainSpec::new("nat", NAT_CHAIN);
+    let mut inbound = ChainSpec::new("filter", INPUT_CHAIN);
     for net in &input.nets {
         let subnet = net.subnet.to_string();
         let bridge = net.bridge.as_str();
-        // Replies to what a client opened, in both directions of the hop.
+        // Replies to what a container opened outwards.
         forward.push(&[
             "-d",
             &subnet,
@@ -93,262 +93,98 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
             "--ctstate",
             "ESTABLISHED,RELATED",
             "-j",
-            "ACCEPT",
+            "RETURN",
         ]);
-        forward.push(&[
-            "-s",
-            &subnet,
-            "!",
-            "-i",
-            bridge,
-            "-m",
-            "conntrack",
-            "--ctstate",
-            "ESTABLISHED,RELATED",
-            "-j",
-            "ACCEPT",
-        ]);
-        for node in &nodes {
-            forward.push(&[
-                "-d",
-                &subnet,
-                "!",
-                "-i",
-                bridge,
-                "-s",
-                &format!("{node}/32"),
-                "-j",
-                "ACCEPT",
-            ]);
-        }
-        let sources: BTreeSet<Ipv4Net> = net.sources.iter().copied().collect();
-        for source in sources {
-            forward.push(&[
-                "-d",
-                &subnet,
-                "!",
-                "-i",
-                bridge,
-                "-s",
-                &source.to_string(),
-                "-j",
-                "ACCEPT",
-            ]);
-        }
         forward.push(&["-d", &subnet, "!", "-i", bridge, "-j", "DROP"]);
 
-        // Into the bridge: the gateway, wherever the connection came from.
-        nat.push(&[
+        let Some(addr) = net.node_addr else {
+            continue;
+        };
+        let dst = format!("{addr}/32");
+        // The host itself and the containers of the network: other chains decide.
+        inbound.push(&["-d", &dst, "-i", bridge, "-j", "RETURN"]);
+        inbound.push(&["-d", &dst, "-i", "lo", "-j", "RETURN"]);
+        inbound.push(&[
             "-d",
-            &subnet,
-            "!",
-            "-s",
-            &subnet,
-            "-o",
-            bridge,
+            &dst,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
             "-j",
-            "SNAT",
-            "--to-source",
-            &net.gateway.to_string(),
+            "RETURN",
         ]);
-    }
-    // Through a tunnel to another node: this node's inner address, which the
-    // other node routes back through the same tunnel.
-    if let Some(inner) = input.own_inner {
-        for net in &input.nets {
-            for dev in &input.tunnel_devs {
-                nat.push(&[
-                    "-d",
-                    &net.subnet.to_string(),
-                    "!",
+        let mut sources = net.sources.clone();
+        sources.sort();
+        sources.dedup();
+        let mut ports = net.ports.clone();
+        ports.sort();
+        ports.dedup();
+        for source in &sources {
+            let source = source.to_string();
+            inbound.push(&[
+                "-s",
+                &source,
+                "-d",
+                &dst,
+                "-p",
+                "icmp",
+                "--icmp-type",
+                "echo-request",
+                "-j",
+                "RETURN",
+            ]);
+            for (protocol, port) in &ports {
+                inbound.push(&[
                     "-s",
-                    &net.subnet.to_string(),
-                    "-o",
-                    dev,
+                    &source,
+                    "-d",
+                    &dst,
+                    "-p",
+                    &protocol.to_string(),
+                    "--dport",
+                    &port.to_string(),
                     "-j",
-                    "SNAT",
-                    "--to-source",
-                    &inner.to_string(),
+                    "RETURN",
                 ]);
             }
         }
-    }
-    // To another node by a plain route (no tunnel): this node, so the reply
-    // returns here.
-    if let Some(own) = input.own_addr {
-        for net in &input.nets {
-            let subnet = net.subnet.to_string();
-            nat.push(&[
-                "-d",
-                &subnet,
-                "!",
-                "-s",
-                &subnet,
-                "!",
-                "-o",
-                &net.bridge,
-                "-j",
-                "SNAT",
-                "--to-source",
-                &own.to_string(),
-            ]);
-        }
+        inbound.push(&["-d", &dst, "-j", "DROP"]);
     }
 
-    IptablesPlan {
-        chains: vec![forward, nat],
-        jumps: vec![
-            Jump::new("filter", &["DOCKER-USER", "FORWARD"], FORWARD_CHAIN, true),
-            Jump::new("nat", &["POSTROUTING"], NAT_CHAIN, false),
-        ],
-    }
-}
-
-/// Where a route sends its destination.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Hop {
-    /// Through a tunnel device to the hosting node (see `managed_tunnel`).
-    Dev(String),
-    /// Via the hosting node's internal address: the fallback when no tunnel
-    /// could be built, which only works where that network carries any
-    /// destination (a LAN, not a WireGuard mesh).
-    Via(Ipv4Addr),
-}
-
-/// What to change in the per-container routes.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RouteDiff {
-    /// Destination address and where to send it, new or changed.
-    pub set: Vec<(Ipv4Addr, Hop)>,
-    pub remove: Vec<Ipv4Addr>,
-}
-
-impl RouteDiff {
-    pub fn is_empty(&self) -> bool {
-        self.set.is_empty() && self.remove.is_empty()
-    }
-}
-
-/// `wanted` and `actual` map an address to its hop.
-pub fn diff_routes(
-    wanted: &BTreeMap<Ipv4Addr, Hop>,
-    actual: &BTreeMap<Ipv4Addr, Hop>,
-) -> RouteDiff {
-    RouteDiff {
-        set: wanted
-            .iter()
-            .filter(|(dst, hop)| actual.get(*dst) != Some(*hop))
-            .map(|(dst, hop)| (*dst, hop.clone()))
-            .collect(),
-        remove: actual
-            .keys()
-            .filter(|dst| !wanted.contains_key(*dst))
-            .copied()
-            .collect(),
-    }
-}
-
-/// Parse `ip -4 -o route show proto 201`: `192.168.32.5 dev clt-ab proto 201` or
-/// `192.168.32.5 via 10.10.0.2 dev eth1 proto 201`.
-pub fn parse_routes(listing: &str) -> BTreeMap<Ipv4Addr, Hop> {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let mut tokens = line.split_whitespace();
-            let dst: Ipv4Addr = tokens.next()?.trim_end_matches("/32").parse().ok()?;
-            let rest: Vec<&str> = tokens.collect();
-            let after = |key: &str| rest.windows(2).find(|w| w[0] == key).map(|w| w[1]);
-            let hop = match after("via") {
-                Some(via) => Hop::Via(via.parse().ok()?),
-                None => Hop::Dev(after("dev")?.to_string()),
-            };
-            Some((dst, hop))
-        })
-        .collect()
-}
-
-/// The `ip` argument lists applying `diff`.
-pub fn route_commands(diff: &RouteDiff) -> Vec<Vec<String>> {
-    let mut out = Vec::new();
-    for dst in &diff.remove {
-        out.push(
-            ["route", "del", &format!("{dst}/32"), "proto", ROUTE_PROTO]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+    let mut plan = IptablesPlan {
+        chains: vec![forward],
+        jumps: vec![Jump::new(
+            "filter",
+            &["DOCKER-USER", "FORWARD"],
+            FORWARD_CHAIN,
+            true,
+        )],
+    };
+    if !inbound.rules.is_empty() {
+        plan.chains.push(inbound);
+        plan.jumps.push(
+            Jump::new("filter", &["INPUT"], INPUT_CHAIN, true)
+                .before(crate::egress::CONTAINER_INPUT_CHAIN),
         );
     }
-    for (dst, hop) in &diff.set {
-        out.push(set_command(*dst, hop));
-    }
-    out
+    plan
 }
 
-fn set_command(dst: Ipv4Addr, hop: &Hop) -> Vec<String> {
-    let dst = format!("{dst}/32");
-    let args: Vec<&str> = match hop {
-        Hop::Dev(dev) => vec!["route", "replace", &dst, "dev", dev, "proto", ROUTE_PROTO],
-        Hop::Via(via) => {
-            return [
-                "route",
-                "replace",
-                &dst,
-                "via",
-                &via.to_string(),
-                "proto",
-                ROUTE_PROTO,
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-        }
-    };
-    args.iter().map(|s| s.to_string()).collect()
-}
-
-/// The device `ip route get ADDR` reports (`10.10.0.2 dev eth1 src ...`).
-pub fn parse_route_get_dev(listing: &str) -> Option<String> {
-    let tokens: Vec<&str> = listing.split_whitespace().collect();
-    tokens
-        .windows(2)
-        .find(|w| w[0] == "dev")
-        .map(|w| w[1].to_string())
-}
-
-/// The same route as [`route_commands`] gives for `dst`, pinned to `dev` and
-/// marked on-link so the kernel does not re-validate the next hop against the
-/// main table (a next hop only a policy-routing table knows, as with tailscale,
-/// is otherwise refused with "Nexthop has invalid gateway").
-pub fn onlink_route_command(dst: Ipv4Addr, via: Ipv4Addr, dev: &str) -> Vec<String> {
-    [
-        "route",
-        "replace",
-        &format!("{dst}/32"),
-        "via",
-        &via.to_string(),
-        "dev",
-        dev,
-        "onlink",
-        "proto",
-        ROUTE_PROTO,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// Run `ip`, with `-4` when `v4`.
-pub(crate) fn run_ip(args: &[&str], v4: bool) -> Result<String> {
-    let mut cmd = Command::new("ip");
+fn ip(args: &[&str], v4: bool) -> Result<String> {
+    let mut cmd = std::process::Command::new("ip");
     if v4 {
         cmd.arg("-4");
     }
-    let out = cmd.args(args).output().map_err(|e| NetError::Io {
-        context: "running ip".to_string(),
-        source: e,
-    })?;
+    let out = cmd
+        .args(args)
+        .output()
+        .map_err(|e| crate::error::NetError::Io {
+            context: "running ip".to_string(),
+            source: e,
+        })?;
     if !out.status.success() {
-        return Err(NetError::Io {
+        return Err(crate::error::NetError::Io {
             context: format!("ip {}", args.join(" ")),
             source: std::io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_string()),
         });
@@ -356,69 +192,37 @@ pub(crate) fn run_ip(args: &[&str], v4: bool) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn ip(args: &[String]) -> Result<String> {
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_ip(&refs, true)
+/// The devices `ip -o link show type ipip` lists that earlier versions made
+/// (`7: clt-ab@NONE: <...>`).
+pub fn legacy_tunnels(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|l| {
+            let name = l.split_whitespace().nth(1)?;
+            let name = name.trim_end_matches(':').split('@').next()?;
+            name.starts_with(LEGACY_TUNNEL_PREFIX)
+                .then(|| name.to_string())
+        })
+        .collect()
 }
 
-/// Make the host's per-container routes exactly `wanted`. Returns how many
-/// were changed.
-pub fn apply_routes(wanted: &BTreeMap<Ipv4Addr, Hop>) -> Result<usize> {
-    let listing = ip(&[
-        "-o".into(),
-        "route".into(),
-        "show".into(),
-        "proto".into(),
-        ROUTE_PROTO.into(),
-    ])?;
-    let diff = diff_routes(wanted, &parse_routes(&listing));
-    let mut changed = 0;
-    let mut failed: Vec<String> = Vec::new();
-    // A route that vanished meanwhile, or a next hop that is not up yet, is
-    // retried by the next pass.
-    for command in route_commands(&RouteDiff {
-        set: Vec::new(),
-        remove: diff.remove.clone(),
-    }) {
-        match ip(&command) {
-            Ok(_) => changed += 1,
-            Err(e) => failed.push(e.to_string()),
-        }
+/// Remove what earlier versions left on the host: the per-container routes
+/// (protocol 201), the IPIP tunnels and their FOU receiver. Every step is
+/// best effort and silent when there is nothing to remove.
+pub fn remove_legacy_plumbing() {
+    let routes =
+        ip(&["-o", "route", "show", "proto", LEGACY_ROUTE_PROTO], true).unwrap_or_default();
+    if !routes.trim().is_empty() {
+        let _ = ip(&["route", "flush", "proto", LEGACY_ROUTE_PROTO], true);
     }
-    for (dst, hop) in &diff.set {
-        match ip(&set_command(*dst, hop)) {
-            Ok(_) => changed += 1,
-            Err(e) => {
-                // A `via` that the kernel refuses for its next hop is retried
-                // pinned to the device that reaches it.
-                let retried = match hop {
-                    Hop::Via(via) => ip(&["route".into(), "get".into(), via.to_string()])
-                        .ok()
-                        .and_then(|got| parse_route_get_dev(&got))
-                        .and_then(|dev| ip(&onlink_route_command(*dst, *via, &dev)).ok()),
-                    Hop::Dev(_) => None,
-                };
-                match retried {
-                    Some(_) => changed += 1,
-                    None => failed.push(e.to_string()),
-                }
-            }
-        }
+    let links = ip(&["-o", "link", "show", "type", "ipip"], false).unwrap_or_default();
+    let tunnels = legacy_tunnels(&links);
+    for dev in &tunnels {
+        let _ = ip(&["link", "del", "dev", dev], false);
     }
-    // Without these routes a forwarded connection to a container on another
-    // node leaves through the local bridge instead, so say so, once per
-    // distinct set of failures rather than every pass.
-    {
-        static LAST: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
-        if *last != failed {
-            if !failed.is_empty() {
-                tracing::warn!(errors = ?failed, "managed network routes not applied");
-            }
-            *last = failed;
-        }
+    if !tunnels.is_empty() {
+        let _ = ip(&["fou", "del", "port", LEGACY_FOU_PORT], false);
     }
-    Ok(changed)
 }
 
 #[cfg(test)]
@@ -435,12 +239,13 @@ mod tests {
                 name: "media".into(),
                 subnet: "192.168.32.0/24".parse().unwrap(),
                 bridge: "clbr-@media".into(),
-                gateway: a("192.168.32.1"),
-                sources: vec!["100.64.0.0/10".parse().unwrap()],
+                node_addr: Some(a("192.168.32.254")),
+                sources: vec![
+                    "100.64.0.0/10".parse().unwrap(),
+                    "192.168.1.0/24".parse().unwrap(),
+                ],
+                ports: vec![(Protocol::Tcp, 8096), (Protocol::Udp, 1900)],
             }],
-            node_addrs: vec![a("10.10.0.2"), a("10.10.0.1")],
-            own_addr: Some(a("10.10.0.1")),
-            ..Default::default()
         }
     }
 
@@ -453,181 +258,75 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_accepts_replies_nodes_and_allowed_networks_then_drops() {
+    fn nothing_is_routed_into_the_subnet_from_outside_but_replies() {
         let plan = managed_plan(&input());
         let rules = &plan.chain(FORWARD_CHAIN).unwrap().rules;
-        assert!(
-            rules[0].contains("-d 192.168.32.0/24 ! -i clbr-@media")
-                && rules[0].contains("ESTABLISHED")
-        );
-        assert!(rules[1].starts_with("-s 192.168.32.0/24") && rules[1].ends_with("ACCEPT"));
-        assert!(rules.contains(
-            &"-d 192.168.32.0/24 ! -i clbr-@media -s 10.10.0.1/32 -j ACCEPT".to_string()
-        ));
-        assert!(rules.contains(
-            &"-d 192.168.32.0/24 ! -i clbr-@media -s 10.10.0.2/32 -j ACCEPT".to_string()
-        ));
-        assert!(rules.contains(
-            &"-d 192.168.32.0/24 ! -i clbr-@media -s 100.64.0.0/10 -j ACCEPT".to_string()
-        ));
-        assert_eq!(
-            rules.last().unwrap(),
-            "-d 192.168.32.0/24 ! -i clbr-@media -j DROP"
-        );
-        // The default verdict is last, so no accept follows it.
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].contains("ESTABLISHED") && rules[0].ends_with("RETURN"));
+        assert_eq!(rules[1], "-d 192.168.32.0/24 ! -i clbr-@media -j DROP");
+        // Neither chain accepts.
+        for chain in &plan.chains {
+            assert!(
+                chain.rules.iter().all(|r| !r.ends_with("ACCEPT")),
+                "{chain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_node_address_answers_only_open_ports_for_listed_sources() {
+        let plan = managed_plan(&input());
+        let rules = &plan.chain(INPUT_CHAIN).unwrap().rules;
+        let dst = "192.168.32.254/32";
+        assert_eq!(rules[0], format!("-d {dst} -i clbr-@media -j RETURN"));
+        assert_eq!(rules[1], format!("-d {dst} -i lo -j RETURN"));
+        assert!(rules[2].contains("ESTABLISHED"));
+        for source in ["100.64.0.0/10", "192.168.1.0/24"] {
+            assert!(rules.contains(&format!(
+                "-s {source} -d {dst} -p tcp --dport 8096 -j RETURN"
+            )));
+            assert!(rules.contains(&format!(
+                "-s {source} -d {dst} -p udp --dport 1900 -j RETURN"
+            )));
+        }
+        assert!(!rules.iter().any(|r| r.contains("--dport 22")));
+        assert_eq!(rules.last().unwrap(), &format!("-d {dst} -j DROP"));
         assert!(rules[..rules.len() - 1]
             .iter()
             .all(|r| !r.ends_with("DROP")));
     }
 
     #[test]
-    fn a_source_nobody_listed_is_not_accepted() {
-        let plan = managed_plan(&input());
-        let rules = &plan.chain(FORWARD_CHAIN).unwrap().rules;
-        assert!(!rules.iter().any(|r| r.contains("192.168.1.0")));
-    }
-
-    #[test]
-    fn nat_uses_the_gateway_into_the_bridge_and_this_node_towards_the_others() {
-        let plan = managed_plan(&input());
-        let rules = &plan.chain(NAT_CHAIN).unwrap().rules;
-        assert_eq!(
-            rules[0],
-            "-d 192.168.32.0/24 ! -s 192.168.32.0/24 -o clbr-@media -j SNAT --to-source 192.168.32.1"
-        );
-        assert_eq!(
-            rules[1],
-            "-d 192.168.32.0/24 ! -s 192.168.32.0/24 ! -o clbr-@media -j SNAT --to-source 10.10.0.1"
-        );
-    }
-
-    #[test]
-    fn without_an_own_address_nothing_is_handed_to_another_node() {
+    fn no_listed_source_leaves_only_the_drop() {
         let mut i = input();
-        i.own_addr = None;
+        i.nets[0].sources.clear();
         let plan = managed_plan(&i);
-        assert_eq!(plan.chain(NAT_CHAIN).unwrap().rules.len(), 1);
+        let rules = &plan.chain(INPUT_CHAIN).unwrap().rules;
+        assert_eq!(rules.len(), 4, "{rules:?}");
+        assert!(rules[3].ends_with("DROP"));
     }
 
     #[test]
-    fn the_jumps_land_in_docker_user_first_and_postrouting() {
+    fn a_node_without_an_address_has_no_input_chain() {
+        let mut i = input();
+        i.nets[0].node_addr = None;
+        let plan = managed_plan(&i);
+        assert!(plan.chain(INPUT_CHAIN).is_none());
+        assert_eq!(plan.jumps.len(), 1);
+    }
+
+    #[test]
+    fn the_jumps_land_in_docker_user_and_input_first() {
         let plan = managed_plan(&input());
         assert_eq!(plan.jumps[0].parents, vec!["DOCKER-USER", "FORWARD"]);
         assert!(plan.jumps[0].first);
-        assert_eq!(plan.jumps[1].parents, vec!["POSTROUTING"]);
+        assert_eq!(plan.jumps[1].parents, vec!["INPUT"]);
+        assert!(plan.jumps[1].first);
     }
 
     #[test]
-    fn routes_diff_adds_changes_and_removes() {
-        let via = |s: &str| Hop::Via(a(s));
-        let wanted = BTreeMap::from([
-            (a("192.168.32.5"), via("10.10.0.2")),
-            (a("192.168.32.6"), via("10.10.0.3")),
-            (a("192.168.32.8"), Hop::Dev("clt-1".into())),
-        ]);
-        let actual = BTreeMap::from([
-            (a("192.168.32.6"), via("10.10.0.2")),
-            (a("192.168.32.7"), via("10.10.0.2")),
-        ]);
-        let diff = diff_routes(&wanted, &actual);
-        assert_eq!(
-            diff.set,
-            vec![
-                (a("192.168.32.5"), via("10.10.0.2")),
-                (a("192.168.32.6"), via("10.10.0.3")),
-                (a("192.168.32.8"), Hop::Dev("clt-1".into()))
-            ]
-        );
-        assert_eq!(diff.remove, vec![a("192.168.32.7")]);
-        assert!(diff_routes(&wanted, &wanted).is_empty());
-        let commands = route_commands(&diff);
-        assert_eq!(
-            commands[0],
-            ["route", "del", "192.168.32.7/32", "proto", "201"]
-        );
-        assert_eq!(
-            commands[1],
-            [
-                "route",
-                "replace",
-                "192.168.32.5/32",
-                "via",
-                "10.10.0.2",
-                "proto",
-                "201"
-            ]
-        );
-        assert_eq!(
-            commands[3],
-            [
-                "route",
-                "replace",
-                "192.168.32.8/32",
-                "dev",
-                "clt-1",
-                "proto",
-                "201"
-            ]
-        );
-    }
-
-    #[test]
-    fn onlink_fallback_is_pinned_to_the_device() {
-        assert_eq!(
-            parse_route_get_dev("10.10.0.2 dev tailscale0 table 52 src 10.10.0.1 uid 0 \n"),
-            Some("tailscale0".to_string())
-        );
-        assert_eq!(
-            parse_route_get_dev("RTNETLINK answers: Network is unreachable"),
-            None
-        );
-        assert_eq!(
-            onlink_route_command(a("192.168.32.5"), a("10.10.0.2"), "tailscale0"),
-            [
-                "route",
-                "replace",
-                "192.168.32.5/32",
-                "via",
-                "10.10.0.2",
-                "dev",
-                "tailscale0",
-                "onlink",
-                "proto",
-                "201"
-            ]
-        );
-        // The pinned route still parses as a per-container route.
-        let routes = parse_routes("192.168.32.5 via 10.10.0.2 dev tailscale0 proto 201 onlink");
-        assert_eq!(routes[&a("192.168.32.5")], Hop::Via(a("10.10.0.2")));
-    }
-
-    #[test]
-    fn route_listings_parse() {
-        let listing = "192.168.32.5 via 10.10.0.2 dev eth1 proto 201 \n192.168.32.6/32 via 10.10.0.3 dev eth1 proto 201\nbogus\n";
-        let routes = parse_routes(listing);
-        assert_eq!(routes.len(), 2);
-        assert_eq!(routes[&a("192.168.32.6")], Hop::Via(a("10.10.0.3")));
-        // A tunnel route has no next hop, only the device.
-        let routes = parse_routes("192.168.32.9 dev clt-0123abcd scope link proto 201\n169.254.0.2 dev clt-0123abcd scope link proto 201");
-        assert_eq!(routes[&a("192.168.32.9")], Hop::Dev("clt-0123abcd".into()));
-        assert_eq!(routes.len(), 2);
-    }
-
-    #[test]
-    fn tunnel_hops_are_natted_to_the_inner_address_before_the_plain_fallback() {
-        let mut input = input();
-        input.own_inner = Some(a("169.254.0.1"));
-        input.tunnel_devs = vec!["clt-1".into()];
-        let plan = managed_plan(&input);
-        let nat = &plan.chain(NAT_CHAIN).unwrap().rules;
-        assert_eq!(nat.len(), 3, "{nat:?}");
-        assert!(
-            nat[1].contains("-o clt-1") && nat[1].ends_with("--to-source 169.254.0.1"),
-            "{nat:?}"
-        );
-        assert!(
-            nat[2].contains("! -o") && nat[2].ends_with("--to-source 10.10.0.1"),
-            "{nat:?}"
-        );
+    fn old_tunnel_devices_are_recognised() {
+        let listing = "7: clt-0123abcd@NONE: <POINTOPOINT,NOARP,UP> mtu 1252 qdisc noqueue\n8: tunl0@NONE: <NOARP> mtu 1480\n9: other@NONE: <X>\n";
+        assert_eq!(legacy_tunnels(listing), ["clt-0123abcd"]);
     }
 }
