@@ -369,6 +369,23 @@ fn add_managed_containers(
     }
 }
 
+/// Whether a client on `client_net` can route to `ip`. A network with an
+/// `access` list is firewalled from every subnetted network it does not list
+/// (`CLDR-NETF`), so an address inside one is unreachable for it; a network
+/// without the list is unrestricted. Addresses in no configured subnet (public
+/// ones) are always reachable.
+fn client_can_reach(cfg: &ClusterConfig, client_net: &str, ip: IpAddr) -> bool {
+    if cfg.networks.get(client_net).is_none_or(|n| n.access.is_none()) {
+        return true;
+    }
+    !cfg.networks.iter().any(|(name, net)| {
+        net.kind.is_subnetted()
+            && name != client_net
+            && !cfg.reaches(client_net, name)
+            && cfg.ip_in_network(name, ip)
+    })
+}
+
 /// The answers a client on `client_net` gets for `fqdn`: each serving node's
 /// address on the client's own network, or failing that on the route's.
 fn answers_for(
@@ -432,9 +449,33 @@ fn answers_for(
                     records_for(cfg, fqdn, net, node)
                 }
             };
-            let found = node_records(own_net).or_else(|_| node_records(&entry.network));
-            if let Ok(found) = found {
-                records.extend(found);
+            // Only an address the client's own network can actually route to
+            // is handed out: the client's network, the route's, then any other
+            // network of the node the client's `access` list grants.
+            let mut candidates: Vec<&str> = vec![own_net, entry.network.as_str()];
+            if cfg.networks.get(client_net).is_some_and(|n| n.access.is_some()) {
+                candidates.extend(
+                    cfg.access_of(client_net)
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|net| cfg.networks.get(*net).is_some_and(|n| n.kind.is_subnetted())),
+                );
+            }
+            for net in candidates {
+                let Ok(found) = node_records(net) else {
+                    continue;
+                };
+                let found: Vec<DesiredRecord> = found
+                    .into_iter()
+                    .filter(|r| match r.content.parse::<IpAddr>() {
+                        Ok(ip) => client_can_reach(cfg, client_net, ip),
+                        Err(_) => true,
+                    })
+                    .collect();
+                if !found.is_empty() {
+                    records.extend(found);
+                    break;
+                }
             }
         }
     }
@@ -642,6 +683,46 @@ mod tests {
         let lan = answer(&views, "lan", "blog.example.com").expect("answered");
         assert_ne!(lan, &[a([192, 168, 1, 1])][..]);
         assert_eq!(lan, answer(&views, "wan", "blog.example.com").unwrap());
+    }
+
+    /// A client behind an `access` list never gets an address in a subnet it
+    /// is firewalled from: it falls back to the node's address on a network
+    /// it may reach.
+    #[test]
+    fn answers_skip_addresses_the_client_cannot_route_to() {
+        let mut cfg = cfg();
+        cfg.networks.insert(
+            "tmp".into(),
+            serde_yaml::from_str(
+                "{ type: private, subnet: 192.168.27.0/24, access: [lan], domain: tmp.example.com }",
+            )
+            .unwrap(),
+        );
+        // The route's public address sits inside the (denied) tailscale subnet.
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "wan".into(),
+            serde_yaml::from_str("{ ipv4: 10.10.0.1 }").unwrap(),
+        );
+        let rows = hosts(&[("blog", "wan", &["n1"])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "tmp", "blog.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
+        );
+        // A client with no access list is unrestricted and keeps the old answer.
+        assert_eq!(
+            answer(&views, "lan", "blog.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
+        );
+        assert_eq!(
+            answer(&views, "wan", "blog.example.com"),
+            Some(&[a([10, 10, 0, 1])][..])
+        );
+
+        // Nothing reachable at all: refused rather than an unroutable answer.
+        cfg.networks.get_mut("tmp").unwrap().access = Some(vec![]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert!(views["tmp"].refused.contains("blog.example.com"));
     }
 
     /// With no LAN address, a LAN client falls back to the node's public one.
