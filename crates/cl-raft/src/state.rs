@@ -2029,21 +2029,29 @@ impl ClusterState {
             }
 
             Request::DeployStack { name, spec, at } => {
-                let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
-                let previous = self.stacks.get(name);
+                let previous = self.stacks.remove(name);
+                let revision = previous.as_ref().map(|s| s.revision + 1).unwrap_or(1);
                 // A changed spec may have fixed the crash, so every node is worth retrying.
-                if previous.is_some_and(|p| p.spec != *spec) {
+                if previous.as_ref().is_some_and(|p| p.spec != *spec) {
                     self.crash_moves.retain(|id, _| &id.stack != name);
                 }
-                let configs = previous.map(|s| s.configs.clone()).unwrap_or_default();
-                let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
-                let used_configs = previous.map(|s| s.used_configs.clone()).unwrap_or_default();
-                let used_secrets = previous.map(|s| s.used_secrets.clone()).unwrap_or_default();
-                // An unchanged redeploy keeps the older "previous" so the diff shows the last real change.
-                let previous_spec = match previous {
-                    Some(p) if p.spec != *spec => Some(p.spec.clone()),
-                    Some(p) => p.previous_spec.clone(),
-                    None => None,
+                let (configs, secrets, used_configs, used_secrets, previous_spec) = match previous {
+                    // An unchanged redeploy keeps the older "previous" so the diff shows the last real change.
+                    Some(p) => {
+                        let previous_spec = if p.spec != *spec {
+                            Some(p.spec)
+                        } else {
+                            p.previous_spec
+                        };
+                        (
+                            p.configs,
+                            p.secrets,
+                            p.used_configs,
+                            p.used_secrets,
+                            previous_spec,
+                        )
+                    }
+                    None => Default::default(),
                 };
                 self.stacks.insert(
                     name.clone(),
