@@ -113,6 +113,12 @@ impl ClusterConfig {
             }
             if net.managed {
                 self.validate_managed_network(name, net)?;
+            } else if !net.open_ports.is_empty() || net.proxy {
+                let field = if net.proxy { "proxy" } else { "open_ports" };
+                return Err(ConfigError::invalid(
+                    format!("{at}.{field}"),
+                    format!("{field} is only allowed on a managed network (managed: true on a private network)"),
+                ));
             }
             if let Some(access) = &net.access {
                 self.validate_access(name, net.kind, access)?;
@@ -247,6 +253,42 @@ impl ClusterConfig {
                     format!("{subnet} overlaps {what} {pool}"),
                 ));
             }
+        }
+        let bad = |msg: String| ConfigError::invalid(format!("{at}.open_ports"), msg);
+        let mut seen = BTreeSet::new();
+        for p in &net.open_ports {
+            if p.port == 0 || p.target_port == Some(0) {
+                return Err(bad("port 0 is not valid".into()));
+            }
+            if !seen.insert((p.port, p.protocol)) {
+                return Err(bad(format!("{}/{} is listed more than once", p.port, p.protocol)));
+            }
+            if p.stack.trim().is_empty() || p.service.trim().is_empty() {
+                return Err(bad(format!(
+                    "{}/{} must name the stack and service it maps to",
+                    p.port, p.protocol
+                )));
+            }
+            if net.proxy && p.protocol == crate::stack::Protocol::Tcp && matches!(p.port, 80 | 443) {
+                return Err(bad(format!(
+                    "{}/tcp is served by the reverse proxy (proxy: true) and cannot also be an open port",
+                    p.port
+                )));
+            }
+        }
+        // Every implementing node needs room for an address next to the
+        // gateway, and the pool must keep some room for containers.
+        let implementing = self
+            .nodes
+            .values()
+            .filter(|n| n.network.contains_key(name))
+            .count() as u64;
+        let hosts = (1u64 << (32 - subnet.prefix_len())) - 2;
+        if implementing + 1 >= hosts {
+            return Err(ConfigError::invalid(
+                format!("{at}.subnet"),
+                format!("{subnet} is too small for the gateway, {implementing} node addresses and any containers"),
+            ));
         }
         for (other_name, other) in &self.networks {
             if other_name == name {
@@ -2528,10 +2570,11 @@ cloudflare:
     fn a_managed_network_may_be_listed_without_an_address_for_access() {
         let cfg = managed("192.168.32.0/24", "~", "192.168.32.3").expect("valid");
         assert!(cfg.nodes["n1"].is_addressless_on("mgd"));
-        // Not reserved: it holds no address.
+        // It gets an automatic address, reserved like an explicit one.
+        let auto = cfg.node_address_on("n1", "mgd").expect("auto address");
         let reserved = cfg.managed_reserved("mgd");
         assert!(reserved.contains(&"192.168.32.3".parse().unwrap()));
-        assert!(!reserved.contains(&"192.168.32.2".parse().unwrap()));
+        assert!(reserved.contains(&auto));
         // Still needs an IPv4 internal address for the tunnel.
         let err = parse(&[
             (
@@ -2549,6 +2592,100 @@ cloudflare:
             err.contains("no IPv4 address on the internal network"),
             "{err}"
         );
+    }
+
+    fn managed_with(net_extra: &str, n1: &str, n2: &str) -> Result<ClusterConfig> {
+        parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                &format!(
+                    "  wan:       {{ type: public,   domain: example.com }}\n  mgd:       {{ type: private, subnet: 192.168.32.0/24, managed: true{net_extra} }}"
+                ),
+            ),
+            ("      lan: 192.168.1.1\n", &format!("      lan: 192.168.1.1\n      mgd: {n1}\n")),
+            ("      tailscale: 10.10.0.2\n", &format!("      tailscale: 10.10.0.2\n      mgd: {n2}\n")),
+        ])
+    }
+
+    #[test]
+    fn managed_nodes_get_stable_automatic_addresses() {
+        let cfg = managed("192.168.32.0/24", "~", "~").expect("valid");
+        let all = cfg.managed_node_addresses("mgd");
+        assert_eq!(all.len(), 2);
+        let a1 = cfg.node_address_on("n1", "mgd").unwrap();
+        let a2 = cfg.node_address_on("n2", "mgd").unwrap();
+        assert_ne!(a1, a2);
+        let subnet: ipnet::Ipv4Net = "192.168.32.0/24".parse().unwrap();
+        for a in [a1, a2] {
+            assert!(subnet.contains(&a));
+            assert_ne!(a, managed_gateway(subnet));
+            assert_ne!(a, subnet.network());
+            assert_ne!(a, subnet.broadcast());
+        }
+        // Same config, same answer; an explicit address is left alone and avoided.
+        assert_eq!(cfg.node_address_on("n1", "mgd"), Some(a1));
+        let mixed = managed("192.168.32.0/24", &a2.to_string(), "~").expect("valid");
+        assert_eq!(mixed.node_address_on("n1", "mgd"), Some(a2));
+        assert_ne!(mixed.node_address_on("n2", "mgd"), Some(a2));
+        assert_eq!(cfg.node_address_on("n1", "lan"), None);
+        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1", "n2"]);
+    }
+
+    #[test]
+    fn managed_open_ports_and_proxy_round_trip() {
+        let cfg = managed_with(
+            ", proxy: true, open_ports: [{ port: 2222, target_port: 22, stack: git, service: ssh }, { port: 53, protocol: udp, stack: dns, service: dns }]",
+            "192.168.32.2",
+            "~",
+        )
+        .expect("valid");
+        let ports = cfg.managed_open_ports("mgd");
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].effective_target_port(), 22);
+        assert_eq!(ports[1].effective_target_port(), 53);
+        assert!(cfg.managed_proxy("mgd"));
+        assert!(!cfg.managed_proxy("lan"));
+        assert!(cfg.managed_open_ports("lan").is_empty());
+        let again: ClusterConfig = serde_yaml::from_str(&serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(again.networks["mgd"].open_ports, cfg.networks["mgd"].open_ports);
+        assert!(again.networks["mgd"].proxy);
+        let plain = managed("192.168.32.0/24", "192.168.32.2", "~").unwrap();
+        let yaml = serde_yaml::to_string(&plain.networks["mgd"]).unwrap();
+        assert!(!yaml.contains("open_ports") && !yaml.contains("proxy"), "{yaml}");
+    }
+
+    #[test]
+    fn managed_open_ports_are_validated() {
+        let err = |extra: &str| managed_with(extra, "192.168.32.2", "~").unwrap_err().to_string();
+        let dup = err(", open_ports: [{ port: 22, stack: a, service: b }, { port: 22, target_port: 2, stack: a, service: c }]");
+        assert!(dup.contains("22/tcp is listed more than once"), "{dup}");
+        let zero = err(", open_ports: [{ port: 0, stack: a, service: b }]");
+        assert!(zero.contains("port 0"), "{zero}");
+        let blank = err(", open_ports: [{ port: 22, stack: '', service: b }]");
+        assert!(blank.contains("stack and service"), "{blank}");
+        let web = err(", proxy: true, open_ports: [{ port: 443, stack: a, service: b }]");
+        assert!(web.contains("reverse proxy"), "{web}");
+        // The same port over another protocol is fine.
+        managed_with(", open_ports: [{ port: 22, stack: a, service: b }, { port: 22, protocol: udp, stack: a, service: b }]", "~", "~").expect("tcp and udp");
+        managed_with(", open_ports: [{ port: 443, stack: a, service: b }]", "~", "~").expect("443 without proxy");
+    }
+
+    #[test]
+    fn open_ports_and_proxy_are_only_for_managed_networks() {
+        let err = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  p: { type: private, subnet: 192.168.40.0/24, proxy: true }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only allowed on a managed network"), "{err}");
+        let err = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  p: { type: private, subnet: 192.168.40.0/24, open_ports: [{ port: 1, stack: a, service: b }] }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("open_ports"), "{err}");
     }
 
     #[test]
@@ -2601,36 +2738,12 @@ cloudflare:
         // One addressed node is enough, whichever it is.
         let cfg =
             managed_portal("192.168.32.2", "~", "mgd", "lan, mgd").expect("n1 holds an address");
-        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1"]);
+        // A node listing the network without an address gets an automatic one.
+        assert_eq!(cfg.addressed_nodes_on("mgd"), vec!["n1", "n2"]);
         managed_portal("~", "192.168.32.3", "mgd", "mgd").expect("n2 holds an address");
+        managed_portal("~", "~", "mgd", "lan, mgd").expect("automatic addresses");
         let both = managed_portal("192.168.32.2", "192.168.32.3", "mgd", "lan, mgd").expect("both");
         assert_eq!(both.addressed_nodes_on("mgd"), vec!["n1", "n2"]);
-    }
-
-    #[test]
-    fn the_dashboard_needs_an_addressed_node_on_a_managed_network() {
-        let err = managed_portal("~", "~", "mgd", "lan")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("web.network")
-                && err.contains("managed network")
-                && err.contains("no node has an IP address"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn the_login_page_needs_an_addressed_node_on_a_managed_network() {
-        let err = managed_portal("~", "~", "tailscale", "lan, mgd")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("proxy.auth.networks")
-                && err.contains("managed network")
-                && err.contains("no node has an IP address"),
-            "{err}"
-        );
     }
 
     #[test]

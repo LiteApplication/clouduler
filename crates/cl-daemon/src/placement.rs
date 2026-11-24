@@ -509,6 +509,8 @@ services:
                 publish_dns: true,
                 access: None,
                 managed: false,
+                open_ports: Vec::new(),
+                proxy: false,
                 container: None,
             },
         );

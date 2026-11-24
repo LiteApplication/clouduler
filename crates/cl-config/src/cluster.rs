@@ -441,6 +441,40 @@ pub struct Network {
     /// `private` network with an IPv4 subnet.
     #[serde(default, skip_serializing_if = "is_false")]
     pub managed: bool,
+    /// Managed networks only: the allowlist of ports reachable from outside on
+    /// a node's address, forwarded to the named service's container. Exposed
+    /// only on the node holding the container.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_ports: Vec<ManagedOpenPort>,
+    /// Managed networks only: the reverse proxy serves 80/443 for this
+    /// network's hostnames on any node, and their DNS is published for the
+    /// network instead of following `proxy.dns_publish`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy: bool,
+}
+
+/// One port a managed network exposes on the address of the node holding the
+/// container of `stack`/`service`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedOpenPort {
+    /// Port on the node address.
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: Protocol,
+    /// Port in the container; defaults to `port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_port: Option<u16>,
+    /// Stack holding the service.
+    pub stack: String,
+    /// Service whose container receives the traffic.
+    pub service: String,
+}
+
+impl ManagedOpenPort {
+    pub fn effective_target_port(&self) -> u16 {
+        self.target_port.unwrap_or(self.port)
+    }
 }
 
 /// A `container` network: the router and what its side may reach. The routed
@@ -556,6 +590,12 @@ impl Network {
             _ => None,
         }
     }
+}
+
+/// Stable position (0-based, counted down from the last host address) where
+/// the automatic node address of `node` starts probing.
+fn auto_slot(node: &str, hosts: u64) -> u64 {
+    crate::netalloc::fnv1a(node.as_bytes()) % hosts.max(1)
 }
 
 impl ContainerOpenPort {
@@ -1470,6 +1510,77 @@ impl ClusterConfig {
             .collect()
     }
 
+    /// The address of every node implementing managed network `network`
+    /// (listing it, with or without an address), by node name. An explicit
+    /// address is taken as is; `null` gets an automatic one from the top of
+    /// the subnet downward (the container pool fills from the bottom), picked
+    /// by a stable hash of the node name and probed past the gateway,
+    /// explicit addresses and earlier nodes' addresses, so adding or removing
+    /// another node moves an address only on a hash collision. Empty when
+    /// `network` is not managed; a node the subnet has no room for is absent.
+    pub fn managed_node_addresses(&self, network: &str) -> BTreeMap<&str, Ipv4Addr> {
+        let mut out = BTreeMap::new();
+        let Some(subnet) = self.networks.get(network).and_then(Network::managed_subnet) else {
+            return out;
+        };
+        let gateway = managed_gateway(subnet);
+        let first = u32::from(subnet.network());
+        let last = u32::from(subnet.broadcast());
+        let mut taken: BTreeSet<Ipv4Addr> = BTreeSet::new();
+        taken.insert(subnet.network());
+        taken.insert(subnet.broadcast());
+        taken.insert(gateway);
+        let mut auto = Vec::new();
+        for (name, node) in &self.nodes {
+            match node.network.get(network) {
+                Some(NodeAddress::Ip(IpAddr::V4(ip))) => {
+                    taken.insert(*ip);
+                    out.insert(name.as_str(), *ip);
+                }
+                Some(NodeAddress::None) => auto.push(name.as_str()),
+                _ => {}
+            }
+        }
+        // Host addresses are first+1 ..= last-1; slot 0 is last-1.
+        let hosts = u64::from(last - first).saturating_sub(1);
+        for name in auto {
+            let start = auto_slot(name, hosts);
+            for i in 0..hosts {
+                let slot = (start + i) % hosts;
+                let ip = Ipv4Addr::from(last - 1 - slot as u32);
+                if taken.insert(ip) {
+                    out.insert(name, ip);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The address `node` holds on managed network `network`: its explicit
+    /// one, or the automatic one (see [`Self::managed_node_addresses`]).
+    /// `None` when the network is not managed or the node does not list it.
+    pub fn node_address_on(&self, node: &str, network: &str) -> Option<Ipv4Addr> {
+        self.managed_node_addresses(network).get(node).copied()
+    }
+
+    /// The ports managed network `network` exposes (empty when it is not
+    /// managed or opens none).
+    pub fn managed_open_ports(&self, network: &str) -> &[ManagedOpenPort] {
+        match self.networks.get(network) {
+            Some(n) if n.is_managed() => &n.open_ports,
+            _ => &[],
+        }
+    }
+
+    /// Whether the reverse proxy serves managed network `network` on any
+    /// node (`proxy: true`).
+    pub fn managed_proxy(&self, network: &str) -> bool {
+        self.networks
+            .get(network)
+            .is_some_and(|n| n.is_managed() && n.proxy)
+    }
+
     /// Whether `network` is a managed network.
     pub fn is_managed_network(&self, network: &str) -> bool {
         self.networks.get(network).is_some_and(Network::is_managed)
@@ -1485,11 +1596,7 @@ impl ClusterConfig {
         out.insert(subnet.network());
         out.insert(subnet.broadcast());
         out.insert(managed_gateway(subnet));
-        for node in self.nodes.values() {
-            if let Some(IpAddr::V4(ip)) = node.ip_on(network) {
-                out.insert(ip);
-            }
-        }
+        out.extend(self.managed_node_addresses(network).into_values());
         out
     }
 
@@ -1497,6 +1604,15 @@ impl ClusterConfig {
     /// network only these can serve the login portal and the dashboard, since
     /// a node's address there is the one a client is pointed to.
     pub fn addressed_nodes_on(&self, network: &str) -> Vec<&String> {
+        if self.is_managed_network(network) {
+            // Every implementing node holds an address (explicit or automatic).
+            return self
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.network.contains_key(network))
+                .map(|(name, _)| name)
+                .collect();
+        }
         self.nodes
             .iter()
             .filter(|(_, node)| node.ip_on(network).is_some())

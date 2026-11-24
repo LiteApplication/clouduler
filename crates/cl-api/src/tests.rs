@@ -117,6 +117,8 @@ pub(crate) async fn harness() -> Harness {
                 publish_dns: true,
                 access: None,
                 managed: false,
+                open_ports: Vec::new(),
+                proxy: false,
                 container: None,
             },
         )]),
@@ -1433,6 +1435,8 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
                     publish_dns: true,
                     access: None,
                     managed: false,
+                    open_ports: Vec::new(),
+                    proxy: false,
                     container: None,
                 },
             );
@@ -2264,6 +2268,8 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 publish_dns: true,
                 access: Some(vec!["internal".to_string()]),
                 managed: false,
+                open_ports: Vec::new(),
+                proxy: false,
                 container: Some(cl_config::ContainerNetwork {
                     stack: "web".to_string(),
                     service: "app".to_string(),

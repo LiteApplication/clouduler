@@ -16,7 +16,7 @@ pub use version::{set_version, version};
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
     managed_gateway, qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta,
-    ContainerNetwork, ContainerOpenPort, ContainerView, DnsPublishMode, Drive, DriveMode,
+    ContainerNetwork, ContainerOpenPort, ContainerView, ManagedOpenPort, DnsPublishMode, Drive, DriveMode,
     EgressFallback, Failback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
     InterfaceAddress, McpConfig, Network, NetworkKind, Node, NodeAddress, NodeRole, OidcConfig,
     OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress, SecretsConfig,

@@ -274,6 +274,18 @@ network. Validation in `cl_config::validate` (`validate_managed_network`).
   Internal DNS answers `SERVICE.STACK` and bare names on a managed network too,
   with the address on a network the asker shares (primary first), else the
   target's primary address.
+* Node address: a node listing the network with no value gets an automatic
+  address from the top of the subnet (`ClusterConfig::node_address_on`,
+  `managed_node_addresses`, stable hash of the node name, probed past the
+  gateway, explicit addresses and other nodes); an explicit one must be inside
+  the subnet, not the network, broadcast or gateway address, and unique. Both
+  are reserved from the container pool.
+* `networks.NET.open_ports` (managed only): list of `{port, protocol, target_port,
+  stack, service}`, ports exposed on the node address of the node holding that
+  service's container; no duplicate port/protocol, no port 0.
+  `networks.NET.proxy: true` (managed only): the proxy serves 80/443 for the
+  network's hostnames on any node and DNS is published for the network.
+  Neither is allowed on a non-managed network.
 * Masquerade is off: the internet needs a nat, egress or wireguard network.
 
 DNS: a stack route hostname on a managed network is published (Cloudflare) as the

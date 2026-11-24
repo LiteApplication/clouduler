@@ -101,6 +101,8 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         publish_dns: true,
         access: None,
         managed: false,
+        open_ports: Vec::new(),
+        proxy: false,
         container: None,
         domain: plan.internal_domain.clone(),
     };
