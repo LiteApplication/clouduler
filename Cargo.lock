@@ -861,8 +861,6 @@ version = "0.16.0"
 dependencies = [
  "age",
  "anyhow",
- "base64 0.23.1",
- "blake3",
  "cl-api",
  "cl-backup",
  "cl-config",
@@ -879,10 +877,7 @@ dependencies = [
  "clap_complete",
  "futures",
  "humantime",
- "instant-acme",
- "ipnet",
  "nix",
- "rcgen",
  "reqwest 0.12.28",
  "rpassword",
  "rustls",
@@ -918,7 +913,6 @@ dependencies = [
 name = "cl-daemon"
 version = "0.16.7"
 dependencies = [
- "age",
  "anyhow",
  "async-trait",
  "blake3",
@@ -951,7 +945,6 @@ dependencies = [
  "reqwest 0.12.28",
  "rtnetlink",
  "serde_json",
- "serde_urlencoded",
  "serde_yaml",
  "socket2",
  "tempfile",
@@ -983,7 +976,6 @@ dependencies = [
  "bollard",
  "bytes",
  "futures",
- "serde",
  "serde_json",
  "tar",
  "thiserror 2.0.21",
@@ -1114,7 +1106,6 @@ dependencies = [
  "rand 0.10.3",
  "rcgen",
  "regex",
- "reqwest 0.12.28",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -1134,9 +1125,7 @@ name = "cl-raft"
 version = "0.14.2"
 dependencies = [
  "anyhow",
- "async-trait",
  "base64 0.23.1",
- "bincode",
  "bytes",
  "cl-config",
  "cl-secret",
@@ -1220,7 +1209,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "uuid",

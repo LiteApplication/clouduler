@@ -10,8 +10,6 @@ cl-secret.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true
-async-trait.workspace = true
-bincode.workspace = true
 openraft.workspace = true
 redb.workspace = true
 serde.workspace = true
