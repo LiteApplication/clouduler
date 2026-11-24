@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::supervisor::Supervisor;
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
@@ -17,7 +18,6 @@ use cl_sched::Scheduler;
 use cl_secret::ClusterKey;
 use openraft::BasicNode;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use crate::supervisor::Supervisor;
 use tracing::{debug, info, warn};
 
 /// Process exit status for a node that was removed from the cluster (`EX_CONFIG`).
@@ -210,15 +210,18 @@ pub async fn run(
     // only to restart them a sweep later.
     let observed = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(tokio::sync::Notify::new());
-    background.spawn("fence", run_fence(
-        cluster.clone(),
-        failover.clone(),
-        fence,
-        stamp_path,
-        fenced.clone(),
-        observed.clone(),
-        wake.clone(),
-    ));
+    background.spawn(
+        "fence",
+        run_fence(
+            cluster.clone(),
+            failover.clone(),
+            fence,
+            stamp_path,
+            fenced.clone(),
+            observed.clone(),
+            wake.clone(),
+        ),
+    );
 
     // The api comes up before docker does, and picks the client up whenever it
     // lands. A node whose dockerd is slow or absent still has to be reachable,
@@ -415,31 +418,35 @@ pub async fn run(
         key_rx.clone(),
     );
 
-    background.spawn("watch-cluster-config", watch_cluster_config(
-        cluster.clone(),
-        config_path.clone(),
-        failover.probe_interval,
-        config_tx,
-        reload_config.clone(),
-    ));
+    background.spawn(
+        "watch-cluster-config",
+        watch_cluster_config(
+            cluster.clone(),
+            config_path.clone(),
+            failover.probe_interval,
+            config_tx,
+            reload_config.clone(),
+        ),
+    );
 
     let cfg_for_restore = cfg.clone();
-    background.spawn("watch-leadership", watch_leadership(
-        cfg,
-        config_path,
-        cluster.clone(),
-        failover.probe_interval,
-    ));
+    background.spawn(
+        "watch-leadership",
+        watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval),
+    );
     cl_api::node_metrics::spawn();
     let (gpus_tx, gpus_rx) = tokio::sync::watch::channel(None);
     background.spawn("gpu", crate::gpu::run(docker.clone(), gpus_tx));
-    background.spawn("report-self", report_self(
-        node_name.clone(),
-        cluster.clone(),
-        node_pubkey,
-        gpus_rx,
-        docker.clone(),
-    ));
+    background.spawn(
+        "report-self",
+        report_self(
+            node_name.clone(),
+            cluster.clone(),
+            node_pubkey,
+            gpus_rx,
+            docker.clone(),
+        ),
+    );
     {
         let cluster = cluster.clone();
         let interval = failover.probe_interval;
@@ -447,13 +454,16 @@ pub async fn run(
             reap_removed_nodes(cluster.clone(), interval)
         });
     }
-    background.spawn("watch-git-backup", watch_git_backup(
-        cluster.clone(),
-        config_rx.clone(),
-        key_rx.clone(),
-        data_dir.clone(),
-        api_state.clone(),
-    ));
+    background.spawn(
+        "watch-git-backup",
+        watch_git_backup(
+            cluster.clone(),
+            config_rx.clone(),
+            key_rx.clone(),
+            data_dir.clone(),
+            api_state.clone(),
+        ),
+    );
 
     // restic is opt-in - only worth warning about if something actually
     // depends on it, unlike ethtool (which every overlay network needs).
@@ -468,11 +478,10 @@ pub async fn run(
         warn!("restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed");
     }
     let backup_due_checker = crate::backup_runner::start_due_checker(cluster.clone());
-    background.spawn("log-alerts", crate::log_alerts::run(
-        cluster.clone(),
-        docker.clone(),
-        node_name.clone(),
-    ));
+    background.spawn(
+        "log-alerts",
+        crate::log_alerts::run(cluster.clone(), docker.clone(), node_name.clone()),
+    );
     let backup_runner = crate::backup_runner::start_runner(
         cluster.clone(),
         node_name.clone(),

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::supervisor::Supervisor;
 use cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET;
 use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
@@ -37,7 +38,6 @@ use cl_raft::state::{
 use cl_sched::run::{overlay_name, overlay_network_name};
 use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
-use crate::supervisor::Supervisor;
 use tracing::{info, warn};
 
 /// Restricts a route to clients on `network`, when that network is subnetted

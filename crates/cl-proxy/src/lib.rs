@@ -23,7 +23,7 @@ mod server;
 
 pub use acme::{
     issue_certificate, issue_certificate_http01, load_or_create_account, needs_renewal,
-    renewal_tick, run_renewal_loop, AcmeConfig, IssuedCertificate, ZoneResolver,
+    renewal_tick, run_renewal_loop, AcmeConfig, IssuedCertificate, RenewalLoop, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL, RENEWAL_WINDOW,
 };
 pub use allow::{Denied, HostAllow, PeerPolicies, StackPolicy};

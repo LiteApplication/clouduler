@@ -850,20 +850,19 @@ pub async fn run_tofu(
     let cache = data_dir.join("tofu").join("plugin-cache");
     let mut log = LogTail::new(LOG_CAPTURE_BYTES);
 
-    let outcome =
-        run_tofu_inner(
-            docker,
-            &TofuRun {
-                work: &work,
-                cache: &cache,
-                deadline,
-            },
-            cfg,
-            mode,
-            inputs,
-            &mut log,
-        )
-        .await;
+    let outcome = run_tofu_inner(
+        docker,
+        &TofuRun {
+            work: &work,
+            cache: &cache,
+            deadline,
+        },
+        cfg,
+        mode,
+        inputs,
+        &mut log,
+    )
+    .await;
 
     let mut new_state = None;
     let mut final_state = None;
@@ -887,7 +886,9 @@ pub async fn run_tofu(
     let cleanup = work.clone();
     log_err(
         "removing the terraform work dir failed",
-        flatten_blocking(tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await),
+        flatten_blocking(
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await,
+        ),
     );
 
     let text = redact(&log.into_text(), &hidden);

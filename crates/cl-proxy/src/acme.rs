@@ -386,17 +386,29 @@ pub async fn renewal_tick(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_renewal_loop(
-    node: Arc<ClusterNode>,
-    account: Account,
-    cf: Cloudflare,
-    zones: Arc<dyn ZoneResolver>,
-    allow_http01: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-    http01_store: Arc<Http01Store>,
-    propagation_timeout: Duration,
-    check_interval: Duration,
-) -> ! {
+/// Everything the renewal loop needs.
+pub struct RenewalLoop {
+    pub node: Arc<ClusterNode>,
+    pub account: Account,
+    pub cf: Cloudflare,
+    pub zones: Arc<dyn ZoneResolver>,
+    pub allow_http01: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub http01_store: Arc<Http01Store>,
+    pub propagation_timeout: Duration,
+    pub check_interval: Duration,
+}
+
+pub async fn run_renewal_loop(config: RenewalLoop) -> ! {
+    let RenewalLoop {
+        node,
+        account,
+        cf,
+        zones,
+        allow_http01,
+        http01_store,
+        propagation_timeout,
+        check_interval,
+    } = config;
     let mut ticker = tokio::time::interval(check_interval);
     loop {
         ticker.tick().await;
