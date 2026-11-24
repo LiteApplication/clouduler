@@ -123,6 +123,8 @@ An instance restarted 3 times within 120 seconds on one node is a crash loop. In
 
 If it cannot be moved (pinned, global, anchored by a proxy hostname or colocate group, or every node already tried), it restarts in place with a delay that starts at 30 seconds, doubles, and caps at 10 minutes (`keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place`). Redeploying with a changed spec gives every node another try.
 
+The move also waits while the network is suspect. Each node keeps a rolling history of its own probes of its peers (see [Who can reach whom](#who-can-reach-whom)). If any of this node's links is **flapping**, the instance restarts in place (`keeps restarting here, but this node's links to its peers are flapping, restarting in place`), because the crash may be a network fault and a move would start a drive sync over the same links. A peer whose link from this node is flapping or down is never picked as the target. This reads only the history of the node the instance is running on; a peer that is down is not a reason to hold the move back.
+
 A crash loop caused by a too-small memory limit does not get fixed by moving; the same limit applies everywhere. Raise the limit.
 
 A failed move shows on the instance page with buttons **Try moving to NODE again**, **Dismiss**, **Move to another node** and **Restart on NODE**.
@@ -144,6 +146,8 @@ The Nodes page has a "Who can reach whom" matrix. Every node probes its peers it
 
 - The raft side is an authenticated raft ping on a fresh connection (the cluster-key handshake plus one request and reply), not a bare TCP connect. The figure is its round trip in milliseconds, handshake included. Probes time out after 2 seconds.
 - The API side is a TCP connect to the peer's web port. If raft works and this does not, the cell reads "API down".
+- The drive side is a TCP connect to the peer's drive-sync port (the raft port plus 1). If raft and API work and this does not, the cell reads "Drive sync down". The vxlan overlay is not probed.
+- A single snapshot hides a link that drops for a few seconds at a time, so every node also probes all its peers in the background every 10 seconds and keeps the last 30 rounds per peer in memory (about five minutes; a restart clears them). A round fails when raft, API or drive does not answer. From that history each link gets a state: `down` when the newest 3 rounds all failed, `flapping` when at least 2 of the 30 failed but the newest 3 did not all fail, otherwise `ok`. A cell whose link answers now but is flapping reads "Flapping", and any cell with failures in the history shows "N/30 failed" beneath it, with the failed rounds and their times in the tooltip.
 - Each node also times a 4 KiB write plus `fsync` in its data dir (`disk_ms`). A raft follower must fsync every append before it can answer the leader, so a node whose fsync takes a second or more answers pings yet cannot keep up. Cells pointing at it read "Slow disk (x.x s)", and it tends to flap in and out of quorum. The probe gives up after 8 seconds.
 - A cell reads "Marked down" when the link works from the reporting node but the leader has the peer on its unreachable list. "No report" means the row's node could not be asked, or did not list that peer.
 

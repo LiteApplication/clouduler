@@ -119,16 +119,16 @@ describe('who can reach whom', () => {
           node: 'n1',
           reported: true,
           links: [
-            { peer: 'n2', raft: true, api: true, raft_ms: 4 },
-            { peer: 'n3', raft: false, api: false, raft_ms: null },
+            { peer: 'n2', raft: true, api: true, drive: true, raft_ms: 4, state: 'ok', failures: 0, history: [] },
+            { peer: 'n3', raft: false, api: false, drive: false, raft_ms: null, state: 'down', failures: 3, history: [] },
           ],
         },
         {
           node: 'n2',
           reported: true,
           links: [
-            { peer: 'n1', raft: true, api: false, raft_ms: 2 },
-            { peer: 'n3', raft: true, api: true, raft_ms: 3 },
+            { peer: 'n1', raft: true, api: false, drive: true, raft_ms: 2, state: 'ok', failures: 0, history: [] },
+            { peer: 'n3', raft: true, api: true, drive: true, raft_ms: 3, state: 'flapping', failures: 2, history: [{ at: 1, raft: true, api: true, drive: false, raft_ms: 3 }, { at: 2, raft: true, api: true, drive: true, raft_ms: 3 }] },
           ],
         },
         { node: 'n3', reported: false, links: [] },
@@ -142,6 +142,8 @@ describe('who can reach whom', () => {
     expect(within(table).getByText('4 ms')).toBeInTheDocument();
     expect(within(table).getByText('Unreachable')).toBeInTheDocument();
     expect(within(table).getByText('API down')).toBeInTheDocument();
+    expect(within(table).getByText('Flapping')).toBeInTheDocument();
+    expect(within(table).getByText('2/2 failed')).toBeInTheDocument();
     // n3 did not report, so its whole row reads as not reported.
     expect(within(table).getAllByText('No report')).toHaveLength(2);
     clusterOverride = null;

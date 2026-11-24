@@ -219,6 +219,7 @@ pub async fn run(
     // since the web ui is where someone would go to find out why.
     let docker = cl_docker::DockerHandle::default();
     let pulling: cl_sched::PullTracker = Arc::default();
+    let link_health = cl_sched::LinkHealth::new();
     // Progress of an in-progress migration's volume sync, shared with the api
     // like `pulling`. (Redeploy and update steps are replicated instead: see
     // `ClusterState::instance_updates`.)
@@ -269,6 +270,7 @@ pub async fn run(
         data_dir: &data_dir,
         docker: docker.clone(),
         pulling: pulling.clone(),
+        link_health: link_health.clone(),
         migration_sync: migration_sync.clone(),
         key: key.clone(),
         key_tx,
@@ -337,6 +339,7 @@ pub async fn run(
         cfg.clone(),
         pulling.clone(),
     )
+    .with_link_health(link_health.clone())
     .with_zone(cl_net::dns::zone_origin(&cfg))
     .with_wake(wake);
     let gate = fenced.clone();
@@ -621,6 +624,7 @@ struct StartApiArgs<'a> {
     data_dir: &'a Path,
     docker: cl_docker::DockerHandle,
     pulling: cl_sched::PullTracker,
+    link_health: cl_sched::LinkHealth,
     migration_sync: cl_drive::MigrationSyncTracker,
     key: Option<Arc<ClusterKey>>,
     key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
@@ -650,6 +654,7 @@ async fn start_api(
         data_dir,
         docker,
         pulling,
+        link_health,
         migration_sync,
         key,
         key_tx,
@@ -689,6 +694,7 @@ async fn start_api(
         cluster: cluster.clone(),
         docker,
         pulling,
+        link_health,
         migration_sync,
         node_name: node_name.to_string(),
         config_path: config_path.to_path_buf(),

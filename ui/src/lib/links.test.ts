@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { Connectivity, PeerLink } from '../api/types';
-import { cellState, classify, pairLinks } from './links';
+import { cellState, classify, linkHistory, pairLinks } from './links';
 
-const link = (peer: string, ok: boolean): PeerLink => ({ peer, raft: ok, api: ok, raft_ms: ok ? 1 : null });
+const link = (peer: string, ok: boolean): PeerLink => ({
+  peer,
+  raft: ok,
+  api: ok,
+  drive: ok,
+  raft_ms: ok ? 1 : null,
+  state: ok ? 'ok' : 'down',
+  failures: 0,
+  history: [],
+});
 
 describe('classify', () => {
   it('maps what each end sees to a status', () => {
@@ -36,8 +45,8 @@ describe('pairLinks', () => {
   it('treats a missing api as a degraded link', () => {
     const c: Connectivity = {
       reports: [
-        { node: 'a', reported: true, links: [{ peer: 'b', raft: true, api: false, raft_ms: 2 }] },
-        { node: 'b', reported: true, links: [{ peer: 'a', raft: true, api: false, raft_ms: 2 }] },
+        { node: 'a', reported: true, links: [{ ...link('b', true), api: false }] },
+        { node: 'b', reported: true, links: [{ ...link('a', true), api: false }] },
       ],
     };
     expect(pairLinks(['a', 'b'], c)[0].status).toBe('broken');
@@ -58,5 +67,21 @@ describe('cellState with disk and leader verdicts', () => {
     const ok = { reports: [{ node: 'a', reported: true, links: [link('b', true)] }] };
     expect(cellState(ok, 'a', 'b', ['b'])).toEqual({ kind: 'flagged' });
     expect(cellState(ok, 'a', 'b')).toEqual({ kind: 'ok', ms: expect.anything() });
+  });
+  it('flags a link whose drive-sync port is closed while raft and api work', () => {
+    const c = { reports: [{ node: 'a', reported: true, links: [{ ...link('b', true), drive: false }] }] };
+    expect(cellState(c, 'a', 'b')).toEqual({ kind: 'drive-down' });
+    expect(pairLinks(['a', 'b'], c)[0].aSeesB).toBe(false);
+  });
+  it('reads a link that answers now but keeps failing as flapping and lists the history', () => {
+    const sample = (at: number, up: boolean) => ({ at, raft: up, api: up, drive: up, raft_ms: up ? 1 : null });
+    const history = [sample(1, true), sample(2, false), sample(3, true), sample(4, false), sample(5, true)];
+    const c = { reports: [{ node: 'a', reported: true, links: [{ ...link('b', true), state: 'flapping' as const, failures: 2, history }] }] };
+    expect(cellState(c, 'a', 'b')).toEqual({ kind: 'flapping', failures: 2, window: 5 });
+    const h = linkHistory(c, 'a', 'b');
+    expect(h).toMatchObject({ failures: 2, window: 5 });
+    expect(h?.detail.split('\n')).toHaveLength(5);
+    expect(linkHistory(c, 'a', 'zzz')).toBeNull();
+    expect(linkHistory(c, 'b', 'a')).toBeNull();
   });
 });

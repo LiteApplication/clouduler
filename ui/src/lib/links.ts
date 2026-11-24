@@ -19,7 +19,7 @@ function sees(report: NodeReport | undefined, peer: string): boolean | undefined
   if (!report?.reported) return undefined;
   const link = report.links.find((l) => l.peer === peer);
   // A reporting node that lists no entry for a peer does not know it.
-  return link ? link.raft && link.api : false;
+  return link ? link.raft && link.api && link.drive : false;
 }
 
 export function classify(aSeesB: boolean | undefined, bSeesA: boolean | undefined): LinkStatus {
@@ -51,15 +51,19 @@ export function pairLinks(names: string[], connectivity: Connectivity | null): P
  *  down: the raft connect failed. api-down: raft works, the api port does not.
  *  slow-disk: the link works but `to` takes seconds to fsync, so it cannot
  *  follow raft (it flaps in and out of quorum).
+ *  drive-down: raft and api work, the drive-sync port does not.
  *  flagged: the link works from `from`, yet the leader has marked `to` down.
+ *  flapping: everything answers now, but `from`'s recent probes of `to` keep failing.
  *  no-report: `from` could not be asked, or it did not list `to`. */
 export type CellState =
   | { kind: 'self' }
   | { kind: 'ok'; ms: number | null }
   | { kind: 'down' }
   | { kind: 'api-down' }
+  | { kind: 'drive-down' }
   | { kind: 'slow-disk'; diskMs: number }
   | { kind: 'flagged' }
+  | { kind: 'flapping'; failures: number; window: number }
   | { kind: 'no-report' };
 
 /** An fsync slower than this is slower than raft's heartbeat budget. */
@@ -78,8 +82,30 @@ export function cellState(
   if (!link) return { kind: 'no-report' };
   if (!link.raft) return { kind: 'down' };
   if (!link.api) return { kind: 'api-down' };
+  if (!link.drive) return { kind: 'drive-down' };
   const diskMs = connectivity?.reports.find((r) => r.node === to)?.disk_ms;
   if (diskMs != null && diskMs >= SLOW_DISK_MS) return { kind: 'slow-disk', diskMs };
   if (unreachable.includes(to)) return { kind: 'flagged' };
+  if (link.state === 'flapping') return { kind: 'flapping', failures: link.failures, window: link.history.length };
   return { kind: 'ok', ms: link.raft_ms ?? null };
+}
+
+/** The recent probe history of `from`'s link to `to`, for the cell's detail line. Null when
+ *  there is none (the diagonal, no report, or nothing recorded yet). */
+export function linkHistory(
+  connectivity: Connectivity | null,
+  from: string,
+  to: string,
+): { failures: number; window: number; detail: string } | null {
+  const link = connectivity?.reports.find((r) => r.node === from && r.reported)?.links.find((l) => l.peer === to);
+  if (!link || link.history.length === 0) return null;
+  const detail = link.history
+    .map((s) => `${new Date(s.at * 1000).toLocaleTimeString()} ${s.raft && s.api && s.drive ? 'ok' : failedPorts(s)}`)
+    .join('\n');
+  return { failures: link.failures, window: link.history.length, detail };
+}
+
+function failedPorts(s: { raft: boolean; api: boolean; drive: boolean }): string {
+  const bad = [!s.raft && 'raft', !s.api && 'api', !s.drive && 'drive'].filter(Boolean);
+  return `${bad.join('+')} failed`;
 }

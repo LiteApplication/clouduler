@@ -4,6 +4,7 @@ pub mod container_net;
 pub mod deps;
 pub mod error;
 pub mod images;
+pub mod link_health;
 pub mod materialize;
 pub mod place;
 pub mod plan;
@@ -15,6 +16,7 @@ pub mod run;
 pub mod spec;
 
 pub use error::{Result, SchedError};
+pub use link_health::{LinkHealth, LinkSample, LinkState, LinkSummary};
 pub use materialize::{docker_api_socket_path, Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
 pub use plan::{expand, Desired, GpuNeeds, NvidiaNeed};

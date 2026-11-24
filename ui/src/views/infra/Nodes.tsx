@@ -9,7 +9,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { Banner, BottomSheet, Button, Chip, EmptyState, Meter, NodeCard, PageHeader, Panel, StatusBadge, Tag, TextField, useConfirm, useToast } from '../../ds';
 import { useNodeMetrics, cpuPercent, memPercent } from '../../hooks/useNodeMetrics';
 import { formatUptime, relativeTime } from '../../lib/format';
-import { cellState, type CellState } from '../../lib/links';
+import { cellState, linkHistory, type CellState } from '../../lib/links';
 import { nodeStatus } from '../../lib/status';
 import { useInstances } from '../../state/instancesStore';
 import { useClusterState } from '../../state/store';
@@ -37,6 +37,10 @@ function CellTag({ state }: { state: CellState }) {
       return <Tag tone="danger">Unreachable</Tag>;
     case 'api-down':
       return <Tag tone="warn">API down</Tag>;
+    case 'drive-down':
+      return <Tag tone="warn">Drive sync down</Tag>;
+    case 'flapping':
+      return <Tag tone="warn">Flapping</Tag>;
     case 'slow-disk':
       return <Tag tone="warn">Slow disk ({(state.diskMs / 1000).toFixed(1)} s)</Tag>;
     case 'flagged':
@@ -44,6 +48,16 @@ function CellTag({ state }: { state: CellState }) {
     case 'no-report':
       return <Tag tone="warn">No report</Tag>;
   }
+}
+
+/** "2/30 failed" under a cell once the recent probes include a failure; the tooltip lists them. */
+function LinkFailures({ history }: { history: ReturnType<typeof linkHistory> }) {
+  if (!history || history.failures === 0) return null;
+  return (
+    <div className="cl-sm cl-muted" title={history.detail}>
+      {history.failures}/{history.window} failed
+    </div>
+  );
 }
 
 export function Nodes() {
@@ -224,7 +238,7 @@ export function Nodes() {
         {sorted.length > 0 && (
           <Panel title="Who can reach whom" flush>
             <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
-              Authenticated raft ping and API link, round trip in milliseconds. Rows report, columns are peers. A slow disk means the node answers but cannot fsync fast enough to follow raft.
+              Authenticated raft ping, API and drive-sync port, round trip in milliseconds. Rows report, columns are peers. Every ten seconds each node probes its peers; the failed probes among the last thirty are shown under a cell, and a link whose probes keep failing and recovering reads as flapping. A slow disk means the node answers but cannot fsync fast enough to follow raft.
             </p>
             {sorted.length === 1 && (
               <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
@@ -247,6 +261,7 @@ export function Nodes() {
                       {sorted.map((to) => (
                         <td key={to} className="cl-td--mono" data-label={to}>
                           <CellTag state={cellState(links, from, to, cluster.unreachable)} />
+                          <LinkFailures history={linkHistory(links, from, to)} />
                         </td>
                       ))}
                     </tr>

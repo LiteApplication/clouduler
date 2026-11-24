@@ -132,7 +132,26 @@ export interface PeerLink {
   raft: boolean;
   /** Same, for the peer's web/api port. */
   api: boolean;
+  /** Same, for the peer's drive-sync port. */
+  drive: boolean;
   /** Round trip of the raft connect in ms; null when it failed. */
+  raft_ms: number | null;
+  /** Derived from `history`: ok, flapping (failures keep coming and going) or down
+   *  (the newest probes all failed). */
+  state: 'ok' | 'flapping' | 'down';
+  /** Failed rounds in `history`; a round fails when raft, api or drive does not answer. */
+  failures: number;
+  /** The reporting node's recent probe rounds, oldest first (at most 30, every 10 s). */
+  history: LinkSample[];
+}
+
+/** One background probe round of one link. */
+export interface LinkSample {
+  /** Unix seconds. */
+  at: number;
+  raft: boolean;
+  api: boolean;
+  drive: boolean;
   raft_ms: number | null;
 }
 

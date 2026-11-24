@@ -39,6 +39,8 @@ pub struct AppState {
     /// Instances whose image this node is pulling; lets `routes::instances` report
     /// "pulling" instead of "about to be created".
     pub pulling: cl_sched::PullTracker,
+    /// This node's rolling probe history of its peers, filled by `routes::links::spawn_link_probes`.
+    pub link_health: cl_sched::LinkHealth,
     pub migration_sync: cl_drive::MigrationSyncTracker,
     pub node_name: String,
     pub config_path: PathBuf,
@@ -88,6 +90,7 @@ pub struct ApiServerOptions {
     pub cluster: Arc<ClusterNode>,
     pub docker: cl_docker::DockerHandle,
     pub pulling: cl_sched::PullTracker,
+    pub link_health: cl_sched::LinkHealth,
     pub migration_sync: cl_drive::MigrationSyncTracker,
     pub node_name: String,
     pub config_path: PathBuf,
@@ -158,6 +161,7 @@ impl ApiServer {
             cluster: options.cluster,
             docker: options.docker,
             pulling: options.pulling,
+            link_health: options.link_health,
             migration_sync: options.migration_sync,
             node_name: options.node_name,
             config_path: options.config_path,
@@ -199,6 +203,8 @@ impl ApiServer {
 
         // Neither store evicts on its own.
         spawn_prune_expired(state.clone());
+
+        crate::routes::links::spawn_link_probes(state.clone());
 
         crate::alerts::spawn(state.clone());
         crate::alerts::producers::spawn(state.clone());

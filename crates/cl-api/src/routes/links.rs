@@ -4,9 +4,16 @@
 //! reports instead of being averaged away. The aggregate asks every node over the signed channel
 //! (`internal_peer`); a node that cannot be asked is reported as having no report.
 //!
+//! Each probe round is also recorded, every `LINK_PROBE_INTERVAL` by a background task
+//! (`spawn_link_probes`), into `AppState::link_health`, a rolling history of the last
+//! `cl_sched::link_health::HISTORY_LEN` rounds per peer. A single snapshot hides a link that drops
+//! for seconds at a time; the history yields a `state` of `ok`, `flapping` or `down` per link, and the
+//! scheduler reads the same history to avoid crash-loop moves while links are unstable.
+//!
 //! The raft half is a real authenticated raft `Ping` (the exchange heartbeats use), not a bare TCP
 //! connect: a peer whose listener accepts sockets while its raft path is wedged must read as down. The
-//! api half is a TCP connect to the web port. The vxlan overlay and drive-sync links are not probed.
+//! api half is a TCP connect to the web port and the drive half a TCP connect to the drive-sync
+//! port (`cl_drive::drive_port` of the raft port). The vxlan overlay is not probed.
 //!
 //! A `Ping` reply proves the network and listener, not the disk, yet a follower must fsync every
 //! append, so each node also reports a small durable write time (`disk_ms`); a stalled disk is
@@ -21,6 +28,7 @@ use axum::{Json, Router};
 use cl_config::ClusterConfig;
 use cl_raft::network::{ping, Peer};
 use cl_raft::KeyWatch;
+use cl_sched::{LinkHealth, LinkSample, LinkState};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tracing::warn;
@@ -33,6 +41,9 @@ use crate::server::AppState;
 
 /// Short enough that a probe round stays inside the 5s `internal_peer` fetch timeout.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often the background task probes every peer and records the result.
+const LINK_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 const DISK_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -49,7 +60,23 @@ pub struct PeerLink {
     pub peer: String,
     pub raft: bool,
     pub api: bool,
+    /// The drive-sync port. A node older than this field is assumed up.
+    #[serde(default = "assume_up")]
+    pub drive: bool,
     pub raft_ms: Option<u64>,
+    /// `ok`, `flapping` or `down`, from `history` (not from this round alone).
+    #[serde(default)]
+    pub state: LinkState,
+    /// Failed rounds in `history`; a round fails when raft, api or drive does not answer.
+    #[serde(default)]
+    pub failures: usize,
+    /// The recorded rounds, oldest first, at most `cl_sched::link_health::HISTORY_LEN`.
+    #[serde(default)]
+    pub history: Vec<LinkSample>,
+}
+
+fn assume_up() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -109,12 +136,8 @@ async fn probe(addr: SocketAddr) -> Option<u64> {
     }
 }
 
-pub(crate) async fn local_links(
-    self_name: &str,
-    cfg: &ClusterConfig,
-    keys: &KeyWatch,
-    data_dir: &std::path::Path,
-) -> NodeLinks {
+/// One probe round of every peer. The history fields are left empty for the caller to fill in.
+async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> Vec<PeerLink> {
     let probes = cfg
         .nodes
         .iter()
@@ -124,9 +147,11 @@ pub(crate) async fn local_links(
             let api_addr = cfg
                 .internal_ip(node)
                 .map(|ip| SocketAddr::new(ip, cfg.web.port));
+            let drive_addr =
+                raft_addr.map(|a| SocketAddr::new(a.ip(), cl_drive::drive_port(a.port())));
             let peer = name.clone();
             async move {
-                let (raft_ms, api_ms) = futures::future::join(
+                let (raft_ms, api_ms, drive_ms) = futures::future::join3(
                     async {
                         match raft_addr {
                             Some(a) => probe_raft(a, keys).await,
@@ -139,16 +164,73 @@ pub(crate) async fn local_links(
                             None => None,
                         }
                     },
+                    async {
+                        match drive_addr {
+                            Some(a) => probe(a).await,
+                            None => None,
+                        }
+                    },
                 )
                 .await;
                 PeerLink {
                     peer,
                     raft: raft_ms.is_some(),
                     api: api_ms.is_some(),
+                    drive: drive_ms.is_some(),
                     raft_ms,
+                    state: LinkState::Ok,
+                    failures: 0,
+                    history: Vec::new(),
                 }
             }
         });
+    futures::future::join_all(probes).await
+}
+
+fn sample_of(link: &PeerLink, at: i64) -> LinkSample {
+    LinkSample {
+        at,
+        raft: link.raft,
+        api: link.api,
+        drive: link.drive,
+        raft_ms: link.raft_ms,
+    }
+}
+
+/// Probes every peer each `LINK_PROBE_INTERVAL` and records the round, so the history exists
+/// whether or not anyone is looking at the matrix.
+pub fn spawn_link_probes(state: AppState) {
+    let mut shutdown = state.shutdown.subscribe();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(LINK_PROBE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => return,
+            }
+            let cfg = state.cluster_config.read().await.clone();
+            let keys = state.key_tx.subscribe();
+            let links = probe_peers(&state.node_name, &cfg, &keys).await;
+            let at = crate::alerts::unix_now();
+            for link in &links {
+                state.link_health.record(&link.peer, sample_of(link, at));
+            }
+            state
+                .link_health
+                .retain_peers(links.iter().map(|l| l.peer.as_str()));
+        }
+    });
+}
+
+pub(crate) async fn local_links(
+    self_name: &str,
+    cfg: &ClusterConfig,
+    keys: &KeyWatch,
+    data_dir: &std::path::Path,
+    health: &LinkHealth,
+) -> NodeLinks {
+    let probes = probe_peers(self_name, cfg, keys);
     let disk_enabled = cfg.nodes.get(self_name).is_none_or(|n| n.disk_probe);
     let disk = async {
         if disk_enabled {
@@ -157,7 +239,13 @@ pub(crate) async fn local_links(
             None
         }
     };
-    let (links, disk_ms) = futures::future::join(futures::future::join_all(probes), disk).await;
+    let (mut links, disk_ms) = futures::future::join(probes, disk).await;
+    for link in &mut links {
+        let summary = health.summary(&link.peer);
+        link.state = summary.state;
+        link.failures = summary.failures;
+        link.history = summary.history;
+    }
     NodeLinks {
         node: self_name.to_string(),
         links,
@@ -174,7 +262,16 @@ pub(crate) async fn collect(state: &AppState) -> Connectivity {
         let unreachable = &unreachable;
         async move {
             let report = if *name == state.node_name {
-                Some(local_links(name, cfg, &state.key_tx.subscribe(), &state.data_dir).await)
+                Some(
+                    local_links(
+                        name,
+                        cfg,
+                        &state.key_tx.subscribe(),
+                        &state.data_dir,
+                        &state.link_health,
+                    )
+                    .await,
+                )
             } else if unreachable.contains(name) {
                 None
             } else {
@@ -215,6 +312,7 @@ async fn internal_links(_auth: InternalAuth, State(state): State<AppState>) -> J
             &cfg,
             &state.key_tx.subscribe(),
             &state.data_dir,
+            &state.link_health,
         )
         .await,
     )

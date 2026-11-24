@@ -89,6 +89,8 @@ pub struct Scheduler {
     /// Rung when the fence releases so a node regaining quorum starts containers now.
     wake: Arc<tokio::sync::Notify>,
     image_gc: crate::images::ImageGc,
+    /// This node's recent probes of its peers, filled by the api's background probes.
+    links: crate::link_health::LinkHealth,
 }
 
 impl Scheduler {
@@ -114,7 +116,14 @@ impl Scheduler {
             backoffs: Arc::new(RwLock::new(BTreeMap::new())),
             booted_at: unix_now(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            links: crate::link_health::LinkHealth::new(),
         }
+    }
+
+    /// Share the link history the api records, so crash-loop moves can avoid unstable links.
+    pub fn with_link_health(mut self, links: crate::link_health::LinkHealth) -> Self {
+        self.links = links;
+        self
     }
 
     pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
@@ -757,6 +766,13 @@ impl Scheduler {
             return false;
         }
 
+        // A node whose own links flap cannot tell a crash from a network fault (a drive it syncs
+        // over, a database it reaches), and a move would start a drive sync over the same links.
+        if self.links.any_flapping() {
+            warn!(instance = %id, "keeps restarting here, but this node's links to its peers are flapping, restarting in place");
+            return false;
+        }
+
         let Ok((eligible, _)) = place::candidates(
             state,
             item,
@@ -767,13 +783,16 @@ impl Scheduler {
         };
         let now = unix_now().max(0) as u64;
         let Some(target) = pick_crash_move_target(
-            eligible.iter().copied(),
+            eligible
+                .iter()
+                .copied()
+                .filter(|n| !self.links.is_unstable(&n.name)),
             &self.node,
             state.crash_moves.get(id),
             now,
             |node| state.assignments_on(node).count(),
         ) else {
-            warn!(instance = %id, "keeps restarting here and every other node that can run it has already been tried, restarting in place");
+            warn!(instance = %id, "keeps restarting here and every other node that can run it has already been tried or has an unstable link from here, restarting in place");
             return false;
         };
 

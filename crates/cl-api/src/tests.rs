@@ -169,6 +169,7 @@ pub(crate) async fn harness() -> Harness {
         cluster: node.clone(),
         docker: cl_docker::DockerHandle::new(Docker::connect().ok()),
         pulling: Arc::new(RwLock::new(Default::default())),
+        link_health: cl_sched::LinkHealth::new(),
         migration_sync: Arc::new(parking_lot::RwLock::new(Default::default())),
         node_name: "n0".to_string(),
         config_path: dir.path().join("cluster.yaml"),
@@ -958,6 +959,19 @@ async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
         cfg.nodes.insert("down".into(), loopback_node(closed_port));
     }
 
+    for (i, up) in [true, false, true, false, true].into_iter().enumerate() {
+        h.state.link_health.record(
+            "down",
+            cl_sched::LinkSample {
+                at: 1000 + i as i64,
+                raft: up,
+                api: up,
+                drive: up,
+                raft_ms: None,
+            },
+        );
+    }
+
     let resp = h
         .router
         .clone()
@@ -989,6 +1003,16 @@ async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
     assert!(up["raft_ms"].is_u64());
     assert_eq!(down["raft"], false);
     assert!(down["raft_ms"].is_null());
+    // Nothing listens on the drive-sync port of either peer.
+    assert_eq!(up["drive"], false);
+    assert_eq!(down["drive"], false);
+    // The history comes from the recorded rounds, not from this request's probe.
+    assert_eq!(down["state"], "flapping");
+    assert_eq!(down["failures"], 2);
+    assert_eq!(down["history"].as_array().unwrap().len(), 5);
+    assert_eq!(down["history"][1]["at"], 1001);
+    assert_eq!(up["state"], "ok");
+    assert!(up["history"].as_array().unwrap().is_empty());
 
     // Neither peer runs an api here, so a node that cannot be asked is
     // reported as such rather than silently dropped or shown as healthy.

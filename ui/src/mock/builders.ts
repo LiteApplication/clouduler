@@ -457,7 +457,18 @@ export class ScenarioBuilder {
                 .map((peer) => {
                   const peerDown = this.nodeInputs.find((x) => x.name === peer)?.down;
                   const cross = n.site && this.nodeInputs.find((x) => x.name === peer)?.site !== n.site;
-                  return { peer, raft: !peerDown, api: !peerDown, raft_ms: peerDown ? null : cross ? 38 : 1 };
+                  const up = !peerDown;
+                  const ms = peerDown ? null : cross ? 38 : 1;
+                  return {
+                    peer,
+                    raft: up,
+                    api: up,
+                    drive: up,
+                    raft_ms: ms,
+                    state: up ? 'ok' : 'down',
+                    failures: up ? 0 : 3,
+                    history: [0, 1, 2].map((i) => ({ at: now - (3 - i) * 10, raft: up, api: up, drive: up, raft_ms: ms })),
+                  };
                 }),
         })),
       },
