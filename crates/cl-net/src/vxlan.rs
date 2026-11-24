@@ -696,6 +696,23 @@ impl Overlay {
         self.ensure_up(veth, veth_index).await
     }
 
+    /// The node address of a managed network on its own port: the host port
+    /// of [`Self::ensure_host_port`] with `addr` as its only address, and
+    /// `arp_announce=2` so ARP for another node's address is sent from it.
+    pub async fn ensure_node_port(
+        &self,
+        bridge: &str,
+        veth: &str,
+        peer: &str,
+        mac: [u8; 6],
+        addr: Ipv4Addr,
+    ) -> Result<()> {
+        self.ensure_host_port(bridge, veth, peer, mac, addr).await?;
+        self.reconcile_bridge_addresses(veth, addr, &BTreeSet::new(), 32)
+            .await?;
+        set_sysctl(&format!("net/ipv4/conf/{veth}/arp_announce"), "2")
+    }
+
     pub async fn teardown_host_port(&self, veth: &str) -> Result<()> {
         if let Some(index) = self.find_link(veth).await? {
             self.handle

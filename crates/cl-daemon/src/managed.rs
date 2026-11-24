@@ -23,9 +23,10 @@ use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, Protocol};
 use cl_net::expose::{serve_tcp, serve_udp, Routes};
 use cl_net::iptables::{apply_plan, list_chains, remove_chain};
+use cl_net::managed::port_veth_name;
 use cl_net::managed::{
     managed_plan, remove_legacy_plumbing, ManagedInput, ManagedNetRules, FORWARD_CHAIN,
-    INPUT_CHAIN, LEGACY_NAT_CHAIN,
+    INPUT_CHAIN, LEGACY_NAT_CHAIN, SNAT_CHAIN,
 };
 use cl_net::relay::Dialer;
 use cl_net::vxlan::bridge_name;
@@ -83,6 +84,8 @@ pub fn input_for(cfg: &ClusterConfig, node: &str) -> ManagedInput {
                 name: m.name.clone(),
                 subnet: m.subnet,
                 bridge: bridge_name(&managed_key(&m.name)),
+                port: port_veth_name(&managed_key(&m.name)),
+                peers: m.peer_addrs.iter().copied().collect(),
                 node_addr: m.node_addr,
                 sources: allowed_sources(cfg, &m.name),
                 ports,
@@ -140,7 +143,20 @@ fn remove_chains() -> Result<()> {
             info!(chain, "removed the managed network chain");
         }
     }
+    remove_snat()?;
     remove_legacy_nat()
+}
+
+/// The source NAT chain of forwarded traffic, gone when no peer is routed.
+fn remove_snat() -> Result<()> {
+    if list_chains("nat")?.iter().any(|c| c == SNAT_CHAIN) {
+        remove_chain("nat", SNAT_CHAIN)?;
+        info!(
+            chain = SNAT_CHAIN,
+            "removed the managed network source nat chain"
+        );
+    }
+    Ok(())
 }
 
 /// The source NAT chain of earlier versions.
@@ -165,6 +181,9 @@ fn apply(input: &ManagedInput) -> Result<()> {
     if plan.chain(INPUT_CHAIN).is_none() && list_chains("filter")?.iter().any(|c| c == INPUT_CHAIN)
     {
         remove_chain("filter", INPUT_CHAIN)?;
+    }
+    if plan.chain(SNAT_CHAIN).is_none() {
+        remove_snat()?;
     }
     remove_legacy_nat()
 }

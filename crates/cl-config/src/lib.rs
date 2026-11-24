@@ -16,12 +16,13 @@ pub use version::{set_version, version};
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
     managed_gateway, qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta,
-    ContainerNetwork, ContainerOpenPort, ContainerView, ManagedOpenPort, DnsPublishMode, Drive, DriveMode,
+    ContainerNetwork, ContainerOpenPort, ContainerView, DnsPublishMode, Drive, DriveMode,
     EgressFallback, Failback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
-    InterfaceAddress, McpConfig, Network, NetworkKind, Node, NodeAddress, NodeRole, OidcConfig,
-    OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress, SecretsConfig,
-    SelfUpdateConfig, TerraformConfig, WebConfig, DEFAULT_RPC_PORT, DEFAULT_STOP_GRACE,
-    DEFAULT_TERRAFORM_IMAGE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE, MIN_IMAGE_CHECK_INTERVAL,
+    InterfaceAddress, ManagedOpenPort, McpConfig, Network, NetworkKind, Node, NodeAddress,
+    NodeRole, OidcConfig, OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress,
+    SecretsConfig, SelfUpdateConfig, TerraformConfig, WebConfig, DEFAULT_RPC_PORT,
+    DEFAULT_STOP_GRACE, DEFAULT_TERRAFORM_IMAGE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE,
+    MIN_IMAGE_CHECK_INTERVAL,
 };
 pub use error::{ConfigError, Result};
 pub use netalloc::{

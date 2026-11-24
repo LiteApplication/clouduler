@@ -23,6 +23,7 @@ use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::NetworkSpec;
 use cl_net::container_net::container_docker_name;
 use cl_net::ipam::{is_managed_key, managed_key, DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX};
+use cl_net::managed::{node_port_mac, port_peer_name, port_veth_name, reconcile_peer_routes};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
@@ -97,9 +98,11 @@ fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
 pub struct ManagedLocal {
     pub name: String,
     pub subnet: ipnet::Ipv4Net,
-    /// This node's own address on the network (explicit or automatic, see
-    /// `ClusterConfig::node_address_on`), a secondary address of its bridge.
+    /// x
     pub node_addr: Option<Ipv4Addr>,
+    /// The addresses of the other nodes on the network, which this node
+    /// routes through its node port.
+    pub peer_addrs: BTreeSet<Ipv4Addr>,
     /// Every node address on the network, for docker's IPAM to leave alone.
     pub reserved: Vec<Ipv4Addr>,
     /// Internal addresses of the other nodes implementing the network: its tunnel peers.
@@ -126,6 +129,12 @@ pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
                 .filter(|ip| *ip != gateway && subnet.contains(ip))
                 .collect();
             reserved.sort();
+            let peer_addrs = cfg
+                .managed_node_addresses(name)
+                .into_iter()
+                .filter(|(other, ip)| *other != node && *ip != gateway && subnet.contains(ip))
+                .map(|(_, ip)| ip)
+                .collect();
             let peers = cfg
                 .nodes
                 .iter()
@@ -139,6 +148,7 @@ pub fn managed_local(cfg: &ClusterConfig, node: &str) -> Vec<ManagedLocal> {
                 name: name.to_string(),
                 subnet,
                 node_addr,
+                peer_addrs,
                 reserved,
                 peers,
             })
@@ -552,6 +562,7 @@ impl Context_ {
                 }
                 if let Some(netlink) = netlink {
                     let key = managed_key(network);
+                    netlink.teardown_host_port(&port_veth_name(&key)).await?;
                     netlink
                         .teardown(&bridge_name(&key), &vxlan_name(&key))
                         .await?;
@@ -745,13 +756,11 @@ impl Context_ {
         let bridge_index = netlink
             .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
             .await?;
+        // The node address is carried by the node port, with a MAC of its own,
+        // never by the bridge (whose anycast MAC does not cross the tunnel):
+        // this also removes the secondary address earlier versions put there.
         netlink
-            .reconcile_bridge_addresses(
-                &bridge,
-                gateway,
-                &local.node_addr.into_iter().collect::<BTreeSet<_>>(),
-                subnet.prefix_len(),
-            )
+            .reconcile_bridge_addresses(&bridge, gateway, &BTreeSet::new(), subnet.prefix_len())
             .await?;
         let vxlan_index = netlink
             .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
@@ -761,6 +770,26 @@ impl Context_ {
             .await?;
         if let Err(e) = netlink.keep_gateway_frames_local(&bridge, &vxlan).await {
             warn!(network = %local.name, error = %e, "cannot keep the gateway's own frames off the vxlan tunnel");
+        }
+        let (port, port_peer) = (port_veth_name(&key), port_peer_name(&key));
+        match local.node_addr {
+            Some(addr) => {
+                netlink
+                    .ensure_node_port(
+                        &bridge,
+                        &port,
+                        &port_peer,
+                        node_port_mac(&key, &self.node),
+                        addr,
+                    )
+                    .await?;
+                let peers = local.peer_addrs.clone();
+                let port = port.clone();
+                tokio::task::spawn_blocking(move || reconcile_peer_routes(&port, addr, &peers))
+                    .await
+                    .context("peer route task panicked")??;
+            }
+            None => netlink.teardown_host_port(&port).await?,
         }
         // Loose reverse path filtering: a forwarded connection's reply comes
         // back from the hosting node on the underlay while the client's own

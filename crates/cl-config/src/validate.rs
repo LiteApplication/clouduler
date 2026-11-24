@@ -261,7 +261,10 @@ impl ClusterConfig {
                 return Err(bad("port 0 is not valid".into()));
             }
             if !seen.insert((p.port, p.protocol)) {
-                return Err(bad(format!("{}/{} is listed more than once", p.port, p.protocol)));
+                return Err(bad(format!(
+                    "{}/{} is listed more than once",
+                    p.port, p.protocol
+                )));
             }
             if p.stack.trim().is_empty() || p.service.trim().is_empty() {
                 return Err(bad(format!(
@@ -269,7 +272,8 @@ impl ClusterConfig {
                     p.port, p.protocol
                 )));
             }
-            if net.proxy && p.protocol == crate::stack::Protocol::Tcp && matches!(p.port, 80 | 443) {
+            if net.proxy && p.protocol == crate::stack::Protocol::Tcp && matches!(p.port, 80 | 443)
+            {
                 return Err(bad(format!(
                     "{}/tcp is served by the reverse proxy (proxy: true) and cannot also be an open port",
                     p.port
@@ -2646,17 +2650,28 @@ cloudflare:
         assert!(cfg.managed_proxy("mgd"));
         assert!(!cfg.managed_proxy("lan"));
         assert!(cfg.managed_open_ports("lan").is_empty());
-        let again: ClusterConfig = serde_yaml::from_str(&serde_yaml::to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(again.networks["mgd"].open_ports, cfg.networks["mgd"].open_ports);
+        let again: ClusterConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            again.networks["mgd"].open_ports,
+            cfg.networks["mgd"].open_ports
+        );
         assert!(again.networks["mgd"].proxy);
         let plain = managed("192.168.32.0/24", "192.168.32.2", "~").unwrap();
         let yaml = serde_yaml::to_string(&plain.networks["mgd"]).unwrap();
-        assert!(!yaml.contains("open_ports") && !yaml.contains("proxy"), "{yaml}");
+        assert!(
+            !yaml.contains("open_ports") && !yaml.contains("proxy"),
+            "{yaml}"
+        );
     }
 
     #[test]
     fn managed_open_ports_are_validated() {
-        let err = |extra: &str| managed_with(extra, "192.168.32.2", "~").unwrap_err().to_string();
+        let err = |extra: &str| {
+            managed_with(extra, "192.168.32.2", "~")
+                .unwrap_err()
+                .to_string()
+        };
         let dup = err(", open_ports: [{ port: 22, stack: a, service: b }, { port: 22, target_port: 2, stack: a, service: c }]");
         assert!(dup.contains("22/tcp is listed more than once"), "{dup}");
         let zero = err(", open_ports: [{ port: 0, stack: a, service: b }]");
@@ -2667,7 +2682,12 @@ cloudflare:
         assert!(web.contains("reverse proxy"), "{web}");
         // The same port over another protocol is fine.
         managed_with(", open_ports: [{ port: 22, stack: a, service: b }, { port: 22, protocol: udp, stack: a, service: b }]", "~", "~").expect("tcp and udp");
-        managed_with(", open_ports: [{ port: 443, stack: a, service: b }]", "~", "~").expect("443 without proxy");
+        managed_with(
+            ", open_ports: [{ port: 443, stack: a, service: b }]",
+            "~",
+            "~",
+        )
+        .expect("443 without proxy");
     }
 
     #[test]
