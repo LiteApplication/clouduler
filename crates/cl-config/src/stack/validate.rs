@@ -1162,7 +1162,6 @@ fn memory_overflows(raw: &str) -> bool {
         && digits.trim().chars().all(|c| c.is_ascii_digit())
 }
 
-
 #[cfg(test)]
 mod tests {
     fn tf_stack(tf: &str) -> std::result::Result<super::StackFile, crate::error::ConfigError> {

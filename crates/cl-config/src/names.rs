@@ -1,6 +1,5 @@
 //! Name and hostname predicates shared by the cluster and stack validators.
 
-
 /// A stack name ends up in container names, overlay network names and the git
 /// backup's `stacks/<name>.yaml`: lowercase letters, digits, `-` and `_`,
 /// starting and ending alphanumeric, at most 63 bytes. `_` is allowed for
