@@ -7,6 +7,9 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+  # Nightly run, which is what drives the qemu smoke scenario below.
+  schedule:
+    - cron: "0 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,11 +27,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # Regenerate before the real test run so the fixture the ui typechecks
-      # against always reflects what this commit's backend actually returns,
-      # rather than failing on drift (e.g. a version bump) a human forgot to
-      # regenerate locally.
+      # Regenerate the fixture, then fail if it differs from the committed
+      # one. The ui typechecks against this file, so a backend shape change
+      # that was not committed alongside it (and so never reached
+      # ui/src/api/types.ts) is caught here rather than in production.
       - run: UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+      - name: fail on api-shapes.json drift
+        run: |
+          git diff --exit-code -- ui/src/api/__fixtures__/api-shapes.json || {
+            echo "::error::api-shapes.json is stale: run UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes, update ui/src/api/types.ts to match, and commit"
+            exit 1
+          }
       - run: cargo test --workspace
       - uses: actions/upload-artifact@v4
         with:
@@ -77,10 +86,11 @@ jobs:
           done
 
   # The qemu suite boots real VMs, so it is slower and kept off the pull
-  # request and push paths entirely. It only runs when triggered manually
-  # via workflow_dispatch.
+  # request and push paths entirely. It runs the full suite when triggered
+  # manually via workflow_dispatch, and only the formation smoke scenario on
+  # the nightly schedule.
   qemu:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-26.04
     # The whole suite, and the runners often have no kvm, so every VM is
     # emulated. Locally with kvm the suite takes about twenty minutes; under
@@ -123,7 +133,12 @@ jobs:
       # summary at the end, so a failure names itself rather than hiding
       # behind whichever scenario the loop stopped on.
       - name: run every scenario
+        if: github.event_name == 'workflow_dispatch'
         run: tests/qemu/run.sh --all
+
+      - name: run the formation smoke scenario
+        if: github.event_name == 'schedule'
+        run: tests/qemu/run.sh formation
 
       - name: keep the logs from a failed run
         if: failure()
