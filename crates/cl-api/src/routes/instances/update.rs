@@ -72,7 +72,10 @@ pub(crate) async fn remove_container_on(
     remove_container(state, instance).await
 }
 
-pub(super) async fn remove_container(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
+pub(super) async fn remove_container(
+    state: &AppState,
+    instance: &InstanceId,
+) -> Result<(), ApiError> {
     let name = instance.container_name();
     let docker = state.docker().await?;
     // Reconcile's `failover.stop_grace`, not docker's 10s, which is short for a database.
@@ -99,11 +102,16 @@ pub(crate) async fn update_instance(
     state: &AppState,
     instance: InstanceId,
 ) -> Result<(), ApiError> {
-    let node = owning_node(state, &instance).await?;
-    if node != state.node_name {
-        return internal_peer::post_empty(state, &node, &internal_update_path(&instance)).await;
-    }
-    update_local(state, instance).await
+    let instance = &instance;
+    forward_or_local(
+        state,
+        instance,
+        update_local(state, instance),
+        |node| async move {
+            internal_peer::post_empty(state, &node, &internal_update_path(instance)).await
+        },
+    )
+    .await
 }
 
 /// First half of an update: downloads the image and returns the digest to pin; the old
@@ -112,13 +120,17 @@ pub(crate) async fn pull_instance(
     state: &AppState,
     instance: &InstanceId,
 ) -> Result<String, ApiError> {
-    let node = owning_node(state, instance).await?;
-    if node != state.node_name {
-        let path = format!("/api/instances/internal/{instance}/pull");
-        let pulled: Pulled = internal_peer::post_json(state, &node, &path).await?;
-        return Ok(pulled.digest);
-    }
-    pull_local(state, instance).await
+    forward_or_local(
+        state,
+        instance,
+        pull_local(state, instance),
+        |node| async move {
+            let path = format!("/api/instances/internal/{instance}/pull");
+            let pulled: Pulled = internal_peer::post_json(state, &node, &path).await?;
+            Ok(pulled.digest)
+        },
+    )
+    .await
 }
 
 pub(crate) async fn replace_instance(
@@ -126,13 +138,17 @@ pub(crate) async fn replace_instance(
     instance: &InstanceId,
     digest: String,
 ) -> Result<(), ApiError> {
-    let node = owning_node(state, instance).await?;
-    if node != state.node_name {
-        let query = serde_urlencoded::to_string(Pulled { digest }).unwrap_or_default();
-        let path = format!("/api/instances/internal/{instance}/replace?{query}");
-        return internal_peer::post_empty(state, &node, &path).await;
-    }
-    replace_local(state, instance, digest).await
+    forward_or_local(
+        state,
+        instance,
+        replace_local(state, instance, digest.clone()),
+        |node| async move {
+            let query = serde_urlencoded::to_string(Pulled { digest }).unwrap_or_default();
+            let path = format!("/api/instances/internal/{instance}/replace?{query}");
+            internal_peer::post_empty(state, &node, &path).await
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize, Serialize)]
@@ -151,12 +167,27 @@ pub(super) struct Pulled {
 /// Ordering against reconcile's `Action::Create` does not matter: if it runs before the pin
 /// applies, it creates from the tag, which the pull just repointed at the same digest.
 /// Each step is recorded in `ClusterState::instance_updates`; the reconciler records `Started`.
-pub(super) async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
+pub(super) async fn update_local(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
+    with_failure_report(state, instance, |progress| async move {
+        update_local_steps(state, instance, &progress).await
+    })
+    .await
+}
+
+/// Runs `steps` with an update reporter, recording a `Failed` phase for the instance if it errs.
+async fn with_failure_report<T, Fut>(
+    state: &AppState,
+    instance: &InstanceId,
+    steps: impl FnOnce(cl_sched::UpdateReporter) -> Fut,
+) -> Result<T, ApiError>
+where
+    Fut: std::future::Future<Output = Result<T, ApiError>>,
+{
     let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
-    let result = update_local_steps(state, &instance, &progress).await;
+    let result = steps(progress.clone()).await;
     if let Err(e) = &result {
         progress
-            .report(&instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
+            .report(instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
             .await;
     }
     result
@@ -171,15 +202,14 @@ pub(super) async fn update_local_steps(
     replace_steps(state, instance, digest, progress).await
 }
 
-pub(super) async fn pull_local(state: &AppState, instance: &InstanceId) -> Result<String, ApiError> {
-    let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
-    let result = pull_steps(state, instance, &progress).await;
-    if let Err(e) = &result {
-        progress
-            .report(instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
-            .await;
-    }
-    result
+pub(super) async fn pull_local(
+    state: &AppState,
+    instance: &InstanceId,
+) -> Result<String, ApiError> {
+    with_failure_report(state, instance, |progress| async move {
+        pull_steps(state, instance, &progress).await
+    })
+    .await
 }
 
 pub(super) async fn replace_local(
@@ -187,14 +217,10 @@ pub(super) async fn replace_local(
     instance: &InstanceId,
     digest: String,
 ) -> Result<(), ApiError> {
-    let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
-    let result = replace_steps(state, instance, digest, &progress).await;
-    if let Err(e) = &result {
-        progress
-            .report(instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
-            .await;
-    }
-    result
+    with_failure_report(state, instance, |progress| async move {
+        replace_steps(state, instance, digest, &progress).await
+    })
+    .await
 }
 
 pub(super) async fn pull_steps(
@@ -326,6 +352,6 @@ pub(super) async fn internal_update(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let instance = parse_id(&id)?;
-    update_local(&state, instance).await?;
+    update_local(&state, &instance).await?;
     Ok(StatusCode::OK)
 }

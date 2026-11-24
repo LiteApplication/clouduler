@@ -1,7 +1,5 @@
 use super::*;
 
-
-
 /// The UI deploy goes through the same cluster-aware check as the CLI: a
 /// volume on a drive the cluster does not define is refused up front.
 #[tokio::test]

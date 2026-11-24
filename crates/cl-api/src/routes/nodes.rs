@@ -601,31 +601,6 @@ async fn internal_log_tail(
     Json(node_logs::ring().tail(clamp_tail(query.tail)))
 }
 
-/// Oldest first, for the MCP layer. Redaction is the caller's job.
-#[allow(dead_code)] // called by `crate::mcp`
-pub(crate) async fn fetch_node_logs(
-    state: &AppState,
-    node: &str,
-    tail: u32,
-) -> Result<Vec<String>, ApiError> {
-    let tail = clamp_tail(Some(tail as usize));
-    let lines = if node == state.node_name {
-        node_logs::ring().tail(tail)
-    } else {
-        let cluster_state = state.cluster.snapshot().await;
-        if !cluster_state.nodes.contains_key(node) {
-            return Err(ApiError::NotFound(format!("no node {node}")));
-        }
-        internal_peer::fetch_json::<Vec<node_logs::LogLine>>(
-            state,
-            node,
-            &format!("/api/nodes/internal/{node}/log-tail?tail={tail}"),
-        )
-        .await?
-    };
-    Ok(lines.iter().map(node_logs::LogLine::render).collect())
-}
-
 async fn submit(state: &AppState, request: ClusterRequest) -> Result<(), ApiError> {
     let response = state
         .cluster

@@ -31,7 +31,6 @@ async fn internal_instance_and_node_routes_reject_an_unsigned_request() {
     }
 }
 
-
 /// As [`internal_request`] but v3-only: the nonce header and v3 signature,
 /// signed over `signed_nonce` while `nonce` is what is sent.
 async fn v3_request(h: &Harness, path: &str, nonce: &str, signed_nonce: &str) -> Request<Body> {
@@ -183,7 +182,6 @@ async fn internal_routes_accept_a_v2_only_request_for_rolling_upgrades() {
     let resp = signed_get(&h, "/api/nodes/internal/n0/usage").await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
-
 
 #[tokio::test]
 async fn internal_routes_reject_a_legacy_only_request() {

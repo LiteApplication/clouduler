@@ -95,16 +95,20 @@ pub(crate) async fn read_file(
     path: &str,
     max: Option<usize>,
 ) -> Result<FileRead, ApiError> {
-    let node = owning_node(state, instance).await?;
     let max = max.unwrap_or(FILE_READ_DEFAULT).min(MAX_BUFFERED_BYTES);
-    if node == state.node_name {
-        return read_file_local(state, instance, path, max).await;
-    }
-    let query = FileQuery {
-        path: path.to_string(),
-        max: Some(max),
-    };
-    internal_peer::fetch_json(state, &node, &internal_file_path(instance, &query)).await
+    forward_or_local(
+        state,
+        instance,
+        read_file_local(state, instance, path, max),
+        |node| async move {
+            let query = FileQuery {
+                path: path.to_string(),
+                max: Some(max),
+            };
+            internal_peer::fetch_json(state, &node, &internal_file_path(instance, &query)).await
+        },
+    )
+    .await
 }
 
 pub(super) async fn internal_file(

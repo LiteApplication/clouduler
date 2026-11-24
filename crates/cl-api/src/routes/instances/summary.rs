@@ -251,7 +251,10 @@ pub(super) fn proxy_health_of(
 }
 
 /// `Exited` means "crashed" when the cluster wanted it running, "stopped" otherwise.
-pub(super) fn run_state_to_summary(status: cl_docker::RunState, desired: DesiredState) -> &'static str {
+pub(super) fn run_state_to_summary(
+    status: cl_docker::RunState,
+    desired: DesiredState,
+) -> &'static str {
     use cl_docker::RunState;
     match status {
         RunState::Running => STATE_RUNNING,
@@ -339,63 +342,6 @@ pub(super) fn compose_migration_reason(
     }
 }
 
-#[cfg(test)]
-mod progress_tests {
-    use super::*;
-    use cl_raft::state::MigrationPhase;
-
-    fn update(phase: cl_raft::UpdatePhase) -> cl_raft::InstanceUpdate {
-        cl_raft::InstanceUpdate {
-            node: "n1".into(),
-            phase,
-            started_at: 0,
-            at: 0,
-            error: None,
-        }
-    }
-
-    #[test]
-    fn update_reason_names_the_step() {
-        let (reason, step) = compose_progress(Some(&update(cl_raft::UpdatePhase::Stopping)), None);
-        assert_eq!(
-            reason.as_deref(),
-            Some("updating (stopping old container, step 2/4)")
-        );
-        assert_eq!(step, Some((2, 4)));
-    }
-
-    #[test]
-    fn a_started_update_is_steady_state() {
-        assert_eq!(
-            compose_progress(Some(&update(cl_raft::UpdatePhase::Started)), None),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn migration_reason_without_sync_progress_names_just_the_phase() {
-        let (reason, step) = compose_migration_reason(&MigrationPhase::Verifying, None);
-        assert_eq!(reason.as_deref(), Some("migrating (verifying)"));
-        assert_eq!(step, None);
-    }
-
-    #[test]
-    fn migration_reason_with_sync_progress_names_the_volume_and_file_counts() {
-        let progress = cl_drive::MigrationSyncProgress {
-            volume_index: 1,
-            volume_count: 2,
-            files_done: 5,
-            files_total: 12,
-        };
-        let (reason, step) = compose_migration_reason(&MigrationPhase::Syncing, Some(progress));
-        assert_eq!(
-            reason.as_deref(),
-            Some("migrating (syncing volume 1/2, 5/12 files)")
-        );
-        assert_eq!(step, Some((1, 2)));
-    }
-}
-
 pub(crate) async fn progress_snapshot(
     state: &AppState,
     cluster_state: &cl_raft::ClusterState,
@@ -423,11 +369,17 @@ pub(crate) async fn progress_snapshot(
         .collect()
 }
 
-pub(super) async fn instance_events(_identity: Identity, State(state): State<AppState>) -> impl IntoResponse {
+pub(super) async fn instance_events(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     stream::instance_progress_events(state)
 }
 
-pub(super) async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<InstanceSummary>> {
+pub(super) async fn list(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<InstanceSummary>> {
     Json(list_all(&state).await)
 }
 
@@ -544,4 +496,61 @@ pub(super) async fn internal_cluster_live_usage(
     State(state): State<AppState>,
 ) -> Json<cl_sched::rebalance::LiveUsage> {
     Json(crate::live_usage::gather(&state).await)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use cl_raft::state::MigrationPhase;
+
+    fn update(phase: cl_raft::UpdatePhase) -> cl_raft::InstanceUpdate {
+        cl_raft::InstanceUpdate {
+            node: "n1".into(),
+            phase,
+            started_at: 0,
+            at: 0,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn update_reason_names_the_step() {
+        let (reason, step) = compose_progress(Some(&update(cl_raft::UpdatePhase::Stopping)), None);
+        assert_eq!(
+            reason.as_deref(),
+            Some("updating (stopping old container, step 2/4)")
+        );
+        assert_eq!(step, Some((2, 4)));
+    }
+
+    #[test]
+    fn a_started_update_is_steady_state() {
+        assert_eq!(
+            compose_progress(Some(&update(cl_raft::UpdatePhase::Started)), None),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn migration_reason_without_sync_progress_names_just_the_phase() {
+        let (reason, step) = compose_migration_reason(&MigrationPhase::Verifying, None);
+        assert_eq!(reason.as_deref(), Some("migrating (verifying)"));
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn migration_reason_with_sync_progress_names_the_volume_and_file_counts() {
+        let progress = cl_drive::MigrationSyncProgress {
+            volume_index: 1,
+            volume_count: 2,
+            files_done: 5,
+            files_total: 12,
+        };
+        let (reason, step) = compose_migration_reason(&MigrationPhase::Syncing, Some(progress));
+        assert_eq!(
+            reason.as_deref(),
+            Some("migrating (syncing volume 1/2, 5/12 files)")
+        );
+        assert_eq!(step, Some((1, 2)));
+    }
 }

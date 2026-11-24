@@ -41,7 +41,12 @@ pub(super) async fn internal_exec(
     Ok(ws.on_upgrade(move |socket| bridge_exec(socket, docker, instance.container_name(), spec)))
 }
 
-pub(super) async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, spec: ExecSpec) {
+pub(super) async fn bridge_exec(
+    mut socket: WebSocket,
+    docker: Docker,
+    container: String,
+    spec: ExecSpec,
+) {
     let mut session = match docker.exec(&container, spec).await {
         Ok(session) => session,
         Err(e) => {
@@ -163,7 +168,12 @@ pub(super) async fn internal_capture(
     Ok(ws.on_upgrade(move |socket| bridge_capture(socket, bridge, query.pcap, query.filter)))
 }
 
-pub(super) async fn bridge_capture(mut socket: WebSocket, iface: String, pcap: bool, filter: Option<String>) {
+pub(super) async fn bridge_capture(
+    mut socket: WebSocket,
+    iface: String,
+    pcap: bool,
+    filter: Option<String>,
+) {
     let mut cmd = Command::new("tcpdump");
     cmd.arg("-i").arg(&iface).arg("-nn").kill_on_drop(true);
     if pcap {
@@ -556,11 +566,16 @@ pub(crate) async fn exec_run(
     instance: &InstanceId,
     req: ExecRunRequest,
 ) -> Result<ExecRunResult, ApiError> {
-    let node = owning_node(state, instance).await?;
-    if node == state.node_name {
-        return exec_run_local(state, instance, req).await;
-    }
-    internal_peer::post_json_body(state, &node, &internal_exec_run_path(instance), &req).await
+    forward_or_local(
+        state,
+        instance,
+        exec_run_local(state, instance, req.clone()),
+        |node| async move {
+            internal_peer::post_json_body(state, &node, &internal_exec_run_path(instance), &req)
+                .await
+        },
+    )
+    .await
 }
 
 /// Takes a body, so the signed body hash is checked against what was read.

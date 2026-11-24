@@ -1,4 +1,3 @@
-
 pub(crate) use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use std::net::SocketAddr;
 pub(crate) use std::sync::Arc;
@@ -218,7 +217,6 @@ pub(crate) async fn viewer_cookie(state: &AppState) -> String {
         .expect("storing the viewer session");
     format!("cl_session={id}")
 }
-
 
 pub(crate) async fn deploy(h: &Harness, name: &str, body: &str) -> StatusCode {
     h.router

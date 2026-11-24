@@ -6,15 +6,15 @@ mod common;
 mod mcp;
 mod oauth_flow;
 
+mod api_shapes;
 mod auth;
-mod config;
 mod cluster;
-mod renames;
-mod stacks;
+mod config;
 mod instances;
 mod internal_auth;
-mod api_shapes;
+mod renames;
 mod secrets;
+mod stacks;
 mod terraform;
 
 pub(crate) use common::*;

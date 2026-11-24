@@ -163,18 +163,31 @@ pub(crate) async fn fetch_logs(
     since: Option<i64>,
 ) -> Result<Vec<LogLine>, ApiError> {
     let tail = tail.min(LOG_TAIL_LIMIT);
-    let node = owning_node(state, instance).await?;
-    if node != state.node_name {
-        let qs = serde_urlencoded::to_string(LogsQuery {
-            follow: false,
-            tail: Some(tail),
-            since,
-        })
-        .unwrap_or_default();
-        let path = format!("{}?{qs}", internal_logs_path(instance));
-        let body = internal_peer::fetch_text(state, &node, &path).await?;
-        return parse_sse_logs(&body).map_err(ApiError::Internal);
-    }
+    forward_or_local(
+        state,
+        instance,
+        fetch_logs_local(state, instance, tail, since),
+        |node| async move {
+            let qs = serde_urlencoded::to_string(LogsQuery {
+                follow: false,
+                tail: Some(tail),
+                since,
+            })
+            .unwrap_or_default();
+            let path = format!("{}?{qs}", internal_logs_path(instance));
+            let body = internal_peer::fetch_text(state, &node, &path).await?;
+            parse_sse_logs(&body).map_err(ApiError::Internal)
+        },
+    )
+    .await
+}
+
+async fn fetch_logs_local(
+    state: &AppState,
+    instance: &InstanceId,
+    tail: u32,
+    since: Option<i64>,
+) -> Result<Vec<LogLine>, ApiError> {
     let docker = state.docker().await?;
     let opts = LogOptions {
         follow: false,

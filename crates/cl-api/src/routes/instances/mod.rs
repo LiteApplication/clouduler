@@ -105,6 +105,26 @@ pub(super) fn parse_id(raw: &str) -> Result<InstanceId, ApiError> {
     raw.parse().map_err(ApiError::BadRequest)
 }
 
+/// Runs `local` when `instance` is assigned to this node, otherwise `remote` with the owning node's name.
+pub(super) async fn forward_or_local<T, L, R, RF>(
+    state: &AppState,
+    instance: &InstanceId,
+    local: L,
+    remote: R,
+) -> Result<T, ApiError>
+where
+    L: std::future::Future<Output = Result<T, ApiError>>,
+    R: FnOnce(String) -> RF,
+    RF: std::future::Future<Output = Result<T, ApiError>>,
+{
+    let node = owning_node(state, instance).await?;
+    if node == state.node_name {
+        local.await
+    } else {
+        remote(node).await
+    }
+}
+
 pub(crate) async fn owning_node(
     state: &AppState,
     instance: &InstanceId,
