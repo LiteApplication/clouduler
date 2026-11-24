@@ -49,6 +49,19 @@ cl-secret = { path = "crates/cl-secret" }
 cl-update = { path = "crates/cl-update" }
 
 anyhow = "1"
+age = "0.11"
+async-stream = "0.3"
+chacha20poly1305 = "0.11"
+clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
+filetime = "0.2"
+hex = "0.4"
+hmac = "0.13"
+humantime = "2"
+openidconnect = "4"
+rand = "0.10"
+sha2 = "0.11"
+tempfile = "3"
+zeroize = "1"
 base64 = "0.23"
 async-trait = "0.1"
 bincode = "1"

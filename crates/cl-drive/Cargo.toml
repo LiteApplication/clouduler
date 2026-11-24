@@ -20,12 +20,12 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
-bytes = "1"
-rand = "0.8"
+bytes.workspace = true
+rand.workspace = true
 nix = { workspace = true, features = ["user", "fs", "mount"] }
-filetime = "0.2"
+filetime.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 openraft.workspace = true
 uuid.workspace = true

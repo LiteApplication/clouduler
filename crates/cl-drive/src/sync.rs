@@ -16,7 +16,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -201,7 +200,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
                 let interval = intervals.interval_for(id, &state);
                 let due_at = next_due.entry(id.clone()).or_insert_with(|| {
-                    let spread: f64 = rand::thread_rng().gen();
+                    let spread: f64 = rand::random();
                     now + jitter(interval, spread)
                 });
                 if now < *due_at {

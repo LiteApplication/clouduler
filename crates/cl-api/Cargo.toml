@@ -25,15 +25,15 @@ axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
 base64.workspace = true
 aho-corasick = "1"
-zeroize = "1"
+zeroize.workspace = true
 futures.workspace = true
-openidconnect = "4"
-rand = "0.10"
+openidconnect.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
 serde_yaml.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
 sysinfo = "0.39"
 thiserror.workspace = true
 tokio.workspace = true
@@ -47,11 +47,11 @@ uuid.workspace = true
 rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 
 # Not in the pre-wired list; added here since only cl-api needs them.
-async-stream = "0.3"
+async-stream.workspace = true
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-bollard = "0.21"
+bollard.workspace = true
 cookie = "0.18"
-humantime = "2"
+humantime.workspace = true
 jiff = "0.2"
 url = "2"
 humantime-serde.workspace = true
@@ -63,6 +63,6 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
-tempfile = "3"
+tempfile.workspace = true
 openraft = { workspace = true }
 http-body-util.workspace = true

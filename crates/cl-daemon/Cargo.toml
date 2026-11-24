@@ -24,7 +24,7 @@ cl-update.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
-age = "0.11"
+age.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -47,4 +47,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 serde_yaml.workspace = true
-tempfile = "3"
+tempfile.workspace = true

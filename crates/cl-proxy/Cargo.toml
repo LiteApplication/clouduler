@@ -30,15 +30,15 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 
 arc-swap = "1"
-base64 = "0.22"
-rand = "0.10"
-sha2 = "0.11"
-bytes = "1"
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+bytes.workspace = true
 http = "1"
 ipnet.workspace = true
-openidconnect = "4"
+openidconnect.workspace = true
 tower-service = "0.3"
-serde_json = "1"
+serde_json.workspace = true
 x509-parser = "0.18"
 
 [dev-dependencies]

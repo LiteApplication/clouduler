@@ -8,14 +8,14 @@
 //! that need them, so requiring it here is a consistent trust boundary, not a
 //! new one.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::key::ClusterKey;
 
 /// HMAC accepts keys of any length, so construction cannot fail.
 pub(crate) fn hmac_sha256(key: &ClusterKey) -> Hmac<Sha256> {
-    <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
+    <Hmac<Sha256> as KeyInit>::new_from_slice(key.bytes())
         .expect("any length key is valid for hmac-sha256")
 }
 

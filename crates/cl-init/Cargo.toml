@@ -22,7 +22,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
@@ -33,5 +33,5 @@ cl-proxy.workspace = true
 cl-raft.workspace = true
 openraft.workspace = true
 rcgen.workspace = true
-tempfile = "3"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
