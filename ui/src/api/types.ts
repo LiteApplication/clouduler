@@ -1044,6 +1044,13 @@ export interface SelfUpdateRunState {
   finished_at: number | null;
   failure_reason: string | null;
   restart_started_at: number | null;
+  /** The tag the run was asked for (POST /run with a body), or null for the configured source. */
+  target_tag: string | null;
+}
+
+/** GET /api/self-update/releases: stable release tags, newest first. */
+export interface SelfUpdateReleases {
+  tags: string[];
 }
 
 // ---- git backup ----

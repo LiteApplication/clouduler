@@ -1098,11 +1098,14 @@ export function buildHttpRoutes(): HttpRoute[] {
     }),
     route('GET', '/api/self-update/latest', ({ db }) => db.selfUpdate.latest),
     route('GET', '/api/self-update/repo', ({ db }) => db.selfUpdate.repo),
-    route('POST', '/api/self-update/run', ({ db }) => {
+    route('GET', '/api/self-update/releases', ({ db }) => ({ tags: db.selfUpdate.releases })),
+    route('POST', '/api/self-update/run', ({ db, body }) => {
+      const tag = (body as { tag?: string } | undefined)?.tag;
+      if (tag !== undefined && (!tag || /[\s/]/.test(tag))) throw new HttpError(400, 'invalid release tag');
       const nodes = Object.keys(db.state.nodes);
       db.selfUpdate.run = {
         id: newId(db, 'upd'),
-        release_tag: db.selfUpdate.latest.tag,
+        release_tag: tag ?? db.selfUpdate.latest.tag,
         owner: 'example',
         repo: 'clouduler',
         assets: {},
@@ -1112,6 +1115,7 @@ export function buildHttpRoutes(): HttpRoute[] {
         finished_at: null,
         failure_reason: null,
         restart_started_at: null,
+        target_tag: tag ?? null,
       };
       putReservedConfig(db, '_clouduler_self_update_run', db.selfUpdate.run);
       commit(db);

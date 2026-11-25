@@ -31,6 +31,7 @@ import type {
   ProxyRoute,
   SelfUpdateConfig,
   SelfUpdateGithubTokenStatus,
+  SelfUpdateReleases,
   SelfUpdateRunState,
   StackDetailResponse,
   StackState,
@@ -246,8 +247,10 @@ for (const name of Object.keys(scenarios)) {
         cloudflare: await getJson<CloudflareTokenStatus>('/api/cloudflare/token'),
         oidc: await getJson<OidcClientSecretStatus>('/api/oidc/client-secret'),
         github: await getJson<SelfUpdateGithubTokenStatus>('/api/self-update/github-token'),
+        releases: await getJson<SelfUpdateReleases>('/api/self-update/releases'),
       };
       expect(wire.status.node).toBeTruthy();
+      expect(Array.isArray(wire.releases.tags)).toBe(true);
       const firstNode = Object.keys(db.state.nodes)[0];
       const detail = await getJson<NodeDetail>(`/api/nodes/${firstNode}`);
       expect(detail.name).toBe(firstNode);

@@ -90,6 +90,8 @@ export interface MockDb {
   selfUpdate: {
     repo: SelfUpdateConfig | null;
     latest: SelfUpdateLatest;
+    /** stable release tags, newest first */
+    releases: string[];
     run: SelfUpdateRunState | null;
     githubTokenSet: boolean;
   };

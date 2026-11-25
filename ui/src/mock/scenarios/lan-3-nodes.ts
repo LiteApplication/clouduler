@@ -80,6 +80,7 @@ export default function lan3Nodes() {
       finished_at: db.now - 86400 * 4 + 240,
       failure_reason: null,
       restart_started_at: db.now - 86400 * 4 + 120,
+      target_tag: null,
     };
     reserved('_clouduler_self_update_run', db.selfUpdate.run);
     reserved('_clouduler_self_update_check', { checked_at: db.now - 3600, tag: 'v0.9.10', error: null });

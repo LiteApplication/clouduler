@@ -44,6 +44,16 @@ sequenceDiagram
 
 If a run fails or is cancelled, nodes that already restarted stay on the new version, so the cluster can end up on mixed versions.
 
+### Upgrade path: last patch first {#upgrade-path}
+
+:::warning Always update through the last patch of each minor series
+Before moving to the next minor or major release, upgrade to the **last patch release of your current minor series** (a series is the major and minor number, for example `0.17.x`). Do not jump straight from `0.17.0` to `0.19.0`: go through the last patch of each series, as shown below.
+:::
+
+Example: the cluster runs `0.17.0` and the repository has the releases `0.17.0`, `0.17.3`, `0.18.0`, `0.18.2` and `0.19.0`. The path is `v0.17.3` then `v0.18.2` then `v0.19.0`: the last patch of every series, ending on the newest release. Each step is a complete rollout, and the next one starts only once the previous one has finished.
+
+The web UI works this out for you, from `GET /api/self-update/releases`. Only plain `vX.Y.Z` tags count; draft and prerelease releases are never offered. The server does not chain the steps: the browser starts each one in turn, so keep the page open.
+
 ### Tasks
 
 <UiCli>
@@ -57,6 +67,8 @@ Open **Settings**, then the **Updates** tab (`/settings/self-update`), to set wh
 Then open the **Updates** page (`/updates`) and use its **Clouduler** panel to roll a release out:
 
 - **Clouduler** panel: **Running**, **Available** (with a `newer` tag) and **Rolling out**, with each node's architecture and phase (`idle`, `fetching`, `ready`, `restarting`, `done`, or the failure).
+- When more than one release lies ahead, the panel shows the planned path (for example `v0.17.3 → v0.18.2 → v0.19.0`). **Start update to vX** installs only the first step of that path.
+- **Update step by step** (admin, shown when the path has more than one step) asks for confirmation, then installs every step in turn from your browser. For each step it starts a run for that exact tag, waits for the run to finish (errors while the leader restarts are tolerated, for up to 30 minutes per step), and checks that the cluster reports the new version before starting the next. The panel shows `Step 2 of 3: v0.18.2`. **Stop after this step** lets the current step finish and then stops; **Cancel update** cancels the running step. If a step fails, the chain stops and the banner names the step and the reason. Leaving the page ends the chain; the step already started keeps running on the cluster, and you can resume from the panel, which recomputes the path from the running version.
 
 Click **Start update** (or **Start update to TAG**). The dialog `Update to TAG?` says "Nodes download the release, then restart one at a time once all are ready." While a run is active the button becomes **Cancel update** ("Nodes that already restarted stay on the new version."). A failed run shows **The update stopped** with the reason. When current, the page says `Already on the latest version.`
 
@@ -80,10 +92,13 @@ To track the official Clouduler releases, set the repository to `https://github.
 ```bash title="Self-update through the API"
 KEY=clk_...   # an API key
 curl -H "Authorization: Bearer $KEY" https://cloud.example.com/api/self-update/latest
-curl -X POST -H "Authorization: Bearer $KEY" https://cloud.example.com/api/self-update/run
+curl -H "Authorization: Bearer $KEY" https://cloud.example.com/api/self-update/releases   # {"tags": ["v0.19.0", "v0.18.2", ...]}
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"tag": "v0.17.3"}' https://cloud.example.com/api/self-update/run
 curl -H "Authorization: Bearer $KEY" https://cloud.example.com/api/self-update/run   # until finished_at is set
 curl -X POST -H "Authorization: Bearer $KEY" https://cloud.example.com/api/self-update/cancel
 ```
+
+`POST /api/self-update/run` without a body installs the latest release (or the tag pinned in `release_url`). With `{"tag": "v0.17.3"}` it installs exactly that release from the configured repository, overriding a pinned tag; the tag must be non-empty with no `/` or whitespace, otherwise the answer is 400. The run state then shows it as `target_tag`. To follow the [upgrade path](#upgrade-path) by hand, start each tag in order and wait for `finished_at` before the next.
 
 Other routes: `PUT /api/self-update/repo` (write-once), `PUT /api/self-update/check` with `{"enabled": true, "interval": "24h"}`, and `PUT /api/self-update/github-token` with `{"token": "..."}`. See the [HTTP API](/docs/reference/http-api#self-update).
 
@@ -112,6 +127,7 @@ Other routes: `PUT /api/self-update/repo` (write-once), `PUT /api/self-update/ch
 | `<name> left the cluster mid-restart` | A node dropped out of the cluster during its restart. |
 | `the downloaded binary did not answer --version` | The staged binary cannot run on that node (10 second limit). |
 | `a self-update run is already in progress` | A run is active. |
+| `tag must be non-empty with no '/' or whitespace` | The `tag` in the `POST /api/self-update/run` body is malformed (400). |
 | `cancelled by operator` | You pressed **Cancel update**. |
 | `the new binary did not rejoin the cluster in time` | Local rollback after 150 seconds. The daemon exits with `rolled back to the previous binary: <reason>`. |
 

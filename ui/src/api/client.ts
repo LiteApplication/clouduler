@@ -42,6 +42,7 @@ import type {
   ProxyRoute,
   RememberedIp,
   SelfUpdateLatest,
+  SelfUpdateReleases,
   OidcClientSecretStatus,
   RebalanceResponse,
   RedirectRule,
@@ -448,7 +449,8 @@ export const api = {
   setSelfUpdateCheck: (body: { enabled: boolean; interval?: string }) => put<void>('/api/self-update/check', body),
   selfUpdateLatest: () => get<SelfUpdateLatest>('/api/self-update/latest'),
   selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
-  startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),
+  selfUpdateReleases: () => get<SelfUpdateReleases>('/api/self-update/releases'),
+  startSelfUpdate: (tag?: string) => post<SelfUpdateRunState>('/api/self-update/run', tag ? { tag } : undefined),
   selfUpdateRun: () => get<SelfUpdateRunState | null>('/api/self-update/run'),
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 

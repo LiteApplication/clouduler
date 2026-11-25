@@ -2,17 +2,19 @@
 // and how they are checked; SelfUpdatePanel (the Updates page) is what is
 // running against what is available, the per-node phases, and Start / Cancel.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../api/client';
 import type { SelfUpdateCheck, SelfUpdateConfig, SelfUpdateGithubTokenStatus, SelfUpdateLatest, SelfUpdateNodePhase, SelfUpdateRunState } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, KV, Panel, Tag, TextField, useConfirm, useToast, type TagTone } from '../../ds';
 import { useClusterState } from '../../state/store';
-import { isNewer } from '../../components/version';
+import { bare, isNewer, planUpdatePath } from '../../components/version';
 
 const RUN_CONFIG = '_clouduler_self_update_run';
 const CHECK_CONFIG = '_clouduler_self_update_check';
 const DEFAULT_RELEASE_URL = 'https://github.com/LiteApplication/clouduler';
+const STEP_POLL_MS = 3000;
+const STEP_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** The run state rides `ClusterState.configs` as base64 json. */
 function decodeRun(content: string | undefined): SelfUpdateRunState | null {
@@ -183,14 +185,26 @@ export function SelfUpdatePanel() {
   const confirm = useConfirm();
   const [repo, setRepo] = useState<SelfUpdateConfig | null>(null);
   const [latest, setLatest] = useState<SelfUpdateLatest | null>(null);
-  const newer = !!latest && isNewer(latest.tag, latest.running_version);
+  const [releases, setReleases] = useState<string[] | null>(null);
+  // The releases to install in order: the last patch of every minor series first.
+  const path = latest && releases ? planUpdatePath(latest.running_version, releases) : null;
+  const newer = path ? path.length > 0 : !!latest && isNewer(latest.tag, latest.running_version);
   const upToDate = !!latest && !newer;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [stepping, setStepping] = useState<{ index: number; total: number; tag: string } | null>(null);
+  const stopRequested = useRef(false);
+  const unmounted = useRef(false);
 
+  const loadLatest = () => api.selfUpdateLatest().then(setLatest).catch(() => {});
   useEffect(() => {
+    unmounted.current = false;
     api.selfUpdateRepo().then(setRepo).catch(() => {});
-    api.selfUpdateLatest().then(setLatest).catch(() => {});
+    void loadLatest();
+    api.selfUpdateReleases().then((r) => setReleases(r.tags)).catch(() => {});
+    return () => {
+      unmounted.current = true;
+    };
   }, []);
 
   const run = decodeRun(cluster?.configs[RUN_CONFIG]?.content);
@@ -208,15 +222,90 @@ export function SelfUpdatePanel() {
     }
   };
 
+  const toast = useToast();
+
+  /** Wait for the run started for `tag` to finish and the cluster to report that version.
+   *  Network errors and 503s are expected while the leader restarts. */
+  const waitForStep = async (tag: string, runId: string): Promise<string | null> => {
+    const deadline = Date.now() + STEP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, STEP_POLL_MS));
+      if (unmounted.current) return 'stopped';
+      let run: SelfUpdateRunState | null;
+      try {
+        run = await api.selfUpdateRun();
+      } catch {
+        continue;
+      }
+      if (!run || run.id !== runId) continue;
+      if (run.failure_reason) return run.failure_reason;
+      if (!run.finished_at) continue;
+      try {
+        const l = await api.selfUpdateLatest();
+        if (bare(l.running_version) === bare(tag)) {
+          setLatest(l);
+          return null;
+        }
+      } catch {
+        // the node answering is restarting
+      }
+    }
+    return `Timed out waiting for ${tag}.`;
+  };
+
+  const stepByStep = async () => {
+    if (!path || path.length < 2) return;
+    const steps = path;
+    if (!(await confirm({
+      title: 'Update step by step?',
+      body: `This installs ${steps.join(', then ')}, one after the other, waiting for each to finish. Keep this page open: the steps are driven from your browser.`,
+      confirmLabel: 'Start',
+      confirmVariant: 'primary',
+    }))) return;
+    stopRequested.current = false;
+    setError(null);
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        const tag = steps[i];
+        if (unmounted.current) return;
+        setStepping({ index: i + 1, total: steps.length, tag });
+        let started: SelfUpdateRunState;
+        try {
+          started = await api.startSelfUpdate(tag);
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : `Could not start the update to ${tag}.`);
+          return;
+        }
+        const failure = await waitForStep(tag, started.id);
+        if (unmounted.current) return;
+        if (failure) {
+          setError(`Step ${i + 1} of ${steps.length} (${tag}) failed: ${failure}`);
+          return;
+        }
+        if (stopRequested.current && i < steps.length - 1) {
+          toast(`Stopped after ${tag}.`);
+          return;
+        }
+      }
+      toast('Finished the step-by-step update.');
+    } finally {
+      if (!unmounted.current) {
+        setStepping(null);
+        void loadLatest();
+      }
+    }
+  };
+
   const start = async () => {
-    const tag = latest?.tag ?? 'the latest release';
+    const tag = path?.[0] ?? latest?.tag;
+    const label = tag ?? 'the latest release';
     const ok = await confirm({
-      title: `Update to ${tag}?`,
+      title: `Update to ${label}?`,
       body: 'Nodes download the release, then restart one at a time once all are ready.',
-      confirmLabel: `Update to ${tag}`,
+      confirmLabel: `Update to ${label}`,
       confirmVariant: 'primary',
     });
-    if (ok) await attempt(() => api.startSelfUpdate(), 'Could not start the update.');
+    if (ok) await attempt(() => api.startSelfUpdate(path?.[0]), 'Could not start the update.');
   };
 
   const cancel = async () => {
@@ -233,9 +322,21 @@ export function SelfUpdatePanel() {
       {run?.failure_reason && <Banner tone="warn" title="The update stopped">{run.failure_reason}</Banner>}
       <Panel
         title="Clouduler"
-        actions={isAdmin && (inProgress
-          ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
-          : <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer ? ` to ${latest.tag}` : ''}</Button>)}
+        actions={isAdmin && (stepping
+          ? (
+            <>
+              <Button variant="secondary" disabled={stopRequested.current} onClick={() => { stopRequested.current = true; setStepping({ ...stepping }); }}>Stop after this step</Button>
+              {inProgress && <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>}
+            </>
+          )
+          : inProgress
+            ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
+            : (
+              <>
+                {path && path.length > 1 && <Button variant="secondary" icon="play" disabled={busy || !repo} onClick={() => void stepByStep()}>Update step by step</Button>}
+                <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer ? ` to ${path?.[0] ?? latest?.tag}` : ''}</Button>
+              </>
+            ))}
       >
         <KV items={[
           ['Running', latest?.running_version ?? '-'],
@@ -243,6 +344,17 @@ export function SelfUpdatePanel() {
           ...(run?.release_tag ? [['Rolling out', run.release_tag] as [string, string]] : []),
         ]} />
         {!repo && <p className="cl-sm cl-muted">Set a release source before starting an update.</p>}
+        {path && path.length > 1 && !stepping && (
+          <p className="cl-sm cl-muted">
+            Updates go through the last patch of each minor series first: {path.join(' → ')}. Start installs {path[0]}.
+          </p>
+        )}
+        {stepping && (
+          <p className="cl-sm">
+            Step {stepping.index} of {stepping.total}: {stepping.tag}
+            {stopRequested.current && <span className="cl-muted"> (stopping after this step)</span>}
+          </p>
+        )}
         {upToDate && !inProgress && <p className="cl-sm cl-muted">Already on the latest version.</p>}
         {run ? (
           <div className="stack">

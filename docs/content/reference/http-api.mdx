@@ -296,8 +296,9 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET, PUT | `/api/self-update/repo` | user, admin | `{"release_url": "..."}` | config or null, 204 | Write-once. |
 | PUT | `/api/self-update/check` | admin | `{"enabled": bool, "interval"?: string}` | 204 | Interval at least 1h. |
 | GET | `/api/self-update/latest` | user | none | `{tag, architectures, source, running_version, fetched_at}` | Cached 5 minutes. |
-| GET | `/api/self-update/run` | user | none | run state or null | |
-| POST | `/api/self-update/run` | admin | none | 202 run state | |
+| GET | `/api/self-update/releases` | any identity | none | `{tags}` | Stable (non-draft, non-prerelease) release tags of the configured repo, newest first. Cached 5 minutes. 409 if no release source is configured. |
+| GET | `/api/self-update/run` | user | none | run state or null | `target_tag` is the tag the run was asked for, or null. |
+| POST | `/api/self-update/run` | admin | none, or `{"tag": "v0.17.3"}` | 202 run state | With a tag, installs exactly that release of the configured repo (a tag pinned in `release_url` is overridden). 400 if the tag is empty or contains `/` or whitespace. |
 | POST | `/api/self-update/cancel` | admin | none | 204 | |
 
 ### Alerts {#alerts}
