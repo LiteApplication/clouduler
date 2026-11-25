@@ -391,6 +391,43 @@ fn answers_for(
         // A managed network's hostname is answered by the owning node's
         // address there, never a container address.
         if cfg.is_managed_network(&entry.network) {
+            // The shortcut: a client on another subnetted network is sent to
+            // a node's address on its own network, whose proxy relays to the
+            // owner (the managed network must be served by the proxy). A
+            // stopped service (no owner) still answers nothing.
+            if entry.shortcut_for(cfg, client_net)
+                && client_net != entry.network
+                && !entry.nodes.is_empty()
+                && cfg.managed_proxy(&entry.network)
+                && cfg.networks.get(client_net).is_some_and(|n| n.kind.is_subnetted())
+                && !cfg.is_managed_network(client_net)
+            {
+                let on_client_net = |nodes: Vec<&Node>| -> Vec<DesiredRecord> {
+                    nodes
+                        .into_iter()
+                        .filter(|n| n.ip_on(client_net).is_some())
+                        .filter_map(|n| records_for(cfg, fqdn, client_net, n).ok())
+                        .flatten()
+                        .filter(|r| matches!(r.kind, RecordType::A | RecordType::AAAA))
+                        .filter(|r| {
+                            r.content
+                                .parse::<IpAddr>()
+                                .is_ok_and(|ip| client_can_reach(cfg, client_net, ip))
+                        })
+                        .collect()
+                };
+                // The owners' own addresses first; any node's otherwise.
+                let mut found = on_client_net(
+                    entry.nodes.iter().filter_map(|n| cfg.nodes.get(n)).collect(),
+                );
+                if found.is_empty() {
+                    found = on_client_net(cfg.nodes.values().collect());
+                }
+                if !found.is_empty() {
+                    records.extend(found);
+                    continue;
+                }
+            }
             for answer in managed_answers(cfg, client_net, entry) {
                 if !segment.contains(&answer) {
                     segment.push(answer);
@@ -644,6 +681,42 @@ mod tests {
         let rows = hosts(&[("files", "mgd", &[])]);
         let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
         assert!(answer(&views, "mgd", "files.m.example.com").is_none());
+    }
+
+    /// A client on another subnetted network is sent to a node's address on
+    /// its own network (the owner's first) when the managed network is served
+    /// by the proxy; `shortcut: {mgd: false}` and `private_shortcut: false`
+    /// keep the managed address.
+    #[test]
+    fn a_managed_route_gets_the_shortcut_for_clients_on_another_network() {
+        let mut cfg = managed_cfg();
+        cfg.networks.get_mut("mgd").unwrap().proxy = true;
+        cfg.networks.get_mut("tailscale").unwrap().access = Some(vec!["mgd".to_string()]);
+        let rows = hosts(&[("files", "mgd", &["n1"])]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "tailscale", "files.m.example.com"),
+            Some(&[a([10, 10, 0, 1])][..])
+        );
+        // The owner has no address on the client's network: any node that
+        // does relays through its proxy.
+        cfg.nodes.get_mut("n2").unwrap().network.remove("tailscale");
+        let rows_n2 = hosts(&[("files", "mgd", &["n2"])]);
+        let views = views_for(&cfg, &alloc(), &rows_n2, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "tailscale", "files.m.example.com"),
+            Some(&[a([10, 10, 0, 1]), a([10, 10, 0, 3])][..])
+        );
+        cfg.networks
+            .get_mut("tailscale")
+            .unwrap()
+            .shortcut
+            .insert("mgd".into(), false);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "tailscale", "files.m.example.com"),
+            Some(&[a([192, 168, 32, 2])][..])
+        );
     }
 
     /// A node with no address on the managed network (the owner here) gives a
