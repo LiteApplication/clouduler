@@ -194,6 +194,19 @@ pub fn validate(
                     {
                         return err(format!("{at}.username"), "at most 80 characters");
                     }
+                    if let Some(u) = o
+                        .avatar_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|u| !u.is_empty())
+                    {
+                        if !http_url_ok(u) || u.len() > 2048 {
+                            return err(
+                                format!("{at}.avatar_url"),
+                                "must be an http or https URL of at most 2048 characters",
+                            );
+                        }
+                    }
                 }
             }
             DestinationKind::Email { to } => {

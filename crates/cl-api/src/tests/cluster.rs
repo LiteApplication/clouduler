@@ -221,9 +221,9 @@ async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
     assert!(up["raft_ms"].is_u64());
     assert_eq!(down["raft"], false);
     assert!(down["raft_ms"].is_null());
-    // Nothing listens on the drive-sync port of either peer.
-    assert_eq!(up["drive"], false);
-    assert_eq!(down["drive"], false);
+    // Neither peer has drives, so the drive-sync port is not probed and counts as up.
+    assert_eq!(up["drive"], true);
+    assert_eq!(down["drive"], true);
     // The history comes from the recorded rounds, not from this request's probe.
     assert_eq!(down["state"], "flapping");
     assert_eq!(down["failures"], 2);

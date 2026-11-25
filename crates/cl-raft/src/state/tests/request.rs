@@ -2,12 +2,6 @@ use super::*;
 use crate::state::request::KNOWN_REQUEST_VARIANTS;
 
 #[test]
-fn backup_run_outcome_reads_the_pre_progress_unit_variant() {
-    let legacy: BackupRunOutcome = serde_json::from_str("\"Running\"").unwrap();
-    assert_eq!(legacy, BackupRunOutcome::Running { percent: None });
-}
-
-#[test]
 fn backup_run_outcome_round_trips_the_current_shape() {
     for outcome in [
         BackupRunOutcome::Running {
@@ -54,13 +48,6 @@ fn a_known_request_tag_with_a_bad_body_is_a_hard_error() {
     assert!(serde_json::from_value::<Request>(serde_json::json!({"NoOp": {"x": 1}})).is_err());
     assert!(serde_json::from_value::<Request>(serde_json::json!(7)).is_err());
     assert!(serde_json::from_value::<Request>(serde_json::json!({"NoOp": null, "b": 1})).is_err());
-}
-
-#[test]
-fn a_legacy_unit_unknown_string_still_deserializes_and_round_trips() {
-    let req: Request = serde_json::from_str("\"Unknown\"").unwrap();
-    assert_eq!(req, Request::Unknown(serde_json::json!("Unknown")));
-    assert_eq!(serde_json::to_string(&req).unwrap(), "\"Unknown\"");
 }
 
 #[test]

@@ -278,20 +278,14 @@ mod tests {
         assert_eq!(config.web_fqdn(), "cloud.int.example.com");
     }
 
-    /// The written file has to carry `enabled: false` itself: a file without
-    /// the key parses as enabled, which is what keeps older clusters' access.
     #[test]
-    fn a_new_cluster_starts_with_mcp_off_and_says_so_in_the_file() {
+    fn a_new_cluster_starts_with_mcp_off() {
         let config = new_cluster(&plan()).expect("valid");
         assert!(!config.mcp.enabled);
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let reparsed: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
         assert!(!reparsed.mcp.enabled);
-
-        let without_key: ClusterConfig =
-            serde_yaml::from_str(&yaml.replace("mcp:\n  enabled: false\n", "")).unwrap();
-        assert!(without_key.mcp.enabled);
     }
 
     #[test]

@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_left_at_the_end_by_an_older_version_is_moved_to_the_top() {
+    fn a_jump_below_other_rules_is_moved_to_the_top() {
         let jump = Jump::new("filter", &["DOCKER-USER", "FORWARD"], "X", true);
         let l = "-A FORWARD -j DOCKER-USER\n-A FORWARD -j DOCKER\n-A FORWARD -j X\n";
         assert_eq!(

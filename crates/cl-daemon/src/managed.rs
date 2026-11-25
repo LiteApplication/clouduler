@@ -14,7 +14,6 @@
 //! `access` list takes effect without a restart. A node that implements no
 //! managed network carries none of it.
 
-use crate::supervisor::log_err;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -26,8 +25,7 @@ use cl_net::expose::{serve_tcp, serve_udp, Routes};
 use cl_net::iptables::{apply_plan, list_chains, remove_chain};
 use cl_net::managed::port_veth_name;
 use cl_net::managed::{
-    managed_plan, remove_legacy_plumbing, ManagedInput, ManagedNetRules, FORWARD_CHAIN,
-    INPUT_CHAIN, LEGACY_NAT_CHAIN, SNAT_CHAIN,
+    managed_plan, ManagedInput, ManagedNetRules, FORWARD_CHAIN, INPUT_CHAIN, SNAT_CHAIN,
 };
 use cl_net::relay::Dialer;
 use cl_net::vxlan::bridge_name;
@@ -144,8 +142,7 @@ fn remove_chains() -> Result<()> {
             info!(chain, "removed the managed network chain");
         }
     }
-    remove_snat()?;
-    remove_legacy_nat()
+    remove_snat()
 }
 
 /// The source NAT chain of forwarded traffic, gone when no peer is routed.
@@ -155,18 +152,6 @@ fn remove_snat() -> Result<()> {
         info!(
             chain = SNAT_CHAIN,
             "removed the managed network source nat chain"
-        );
-    }
-    Ok(())
-}
-
-/// The source NAT chain of earlier versions.
-fn remove_legacy_nat() -> Result<()> {
-    if list_chains("nat")?.iter().any(|c| c == LEGACY_NAT_CHAIN) {
-        remove_chain("nat", LEGACY_NAT_CHAIN)?;
-        info!(
-            chain = LEGACY_NAT_CHAIN,
-            "removed the managed network chain of an earlier version"
         );
     }
     Ok(())
@@ -186,7 +171,7 @@ fn apply(input: &ManagedInput) -> Result<()> {
     if plan.chain(SNAT_CHAIN).is_none() {
         remove_snat()?;
     }
-    remove_legacy_nat()
+    Ok(())
 }
 
 async fn firewall(cluster: Arc<ClusterNode>, node_name: String, boot_cfg: ClusterConfig) {
@@ -194,11 +179,6 @@ async fn firewall(cluster: Arc<ClusterNode>, node_name: String, boot_cfg: Cluste
     // Nothing to clean up once an empty pass has run; skips the iptables
     // calls on a cluster that never uses managed networks.
     let mut clean = false;
-    // The routes and tunnels of earlier versions go once, at boot.
-    log_err(
-        "the legacy managed-network cleanup failed",
-        tokio::task::spawn_blocking(remove_legacy_plumbing).await,
-    );
     loop {
         ticker.tick().await;
         let state = cluster.snapshot().await;

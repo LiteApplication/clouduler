@@ -153,7 +153,7 @@ pub(crate) async fn harness() -> Harness {
         proxy: Default::default(),
         self_update: None,
         backup: None,
-        mcp: Default::default(),
+        mcp: cl_config::McpConfig { enabled: true },
         updates: Default::default(),
         terraform: None,
     };
@@ -258,14 +258,15 @@ pub(crate) async fn internal_request(
     use cl_update::internal_client::*;
     let key_guard = h.state.key.read().await;
     let key = key_guard.as_ref().expect("test cluster holds a key");
-    let v2 = cl_secret::internal_auth::sign_v2(key, method, path, ts, body_hash);
+    let nonce = cl_secret::internal_auth::new_nonce();
+    let sig = cl_secret::internal_auth::sign_v3(key, method, path, ts, &nonce, body_hash);
     Request::builder()
         .method(method)
         .uri(path)
-        .header(AUTH_HEADER, cl_secret::internal_auth::sign(key, path))
         .header(TIMESTAMP_HEADER, ts.to_string())
         .header(BODY_SHA256_HEADER, body_hash)
-        .header(SIGNATURE_HEADER, v2)
+        .header(NONCE_HEADER, nonce)
+        .header(SIGNATURE_V3_HEADER, sig)
         .body(Body::from(body))
         .unwrap()
 }

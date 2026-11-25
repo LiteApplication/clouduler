@@ -167,17 +167,18 @@ describe('overrides', () => {
 
 describe('destination form', () => {
   it('round-trips a discord destination', () => {
-    const d = discord({ mention: '<@&1>', username: 'Piosny', categories: ['nodes'], stacks: ['media'] });
+    const d = discord({ mention: '<@&1>', username: 'Piosny', avatar_url: 'https://img.example.com/a.png', categories: ['nodes'], stacks: ['media'] });
     const f = formFrom(d);
     expect(f.original).toBe('home');
     expect(f.stacks).toBe('media');
     expect(formToDestination(f)).toEqual(d);
   });
   it('trims and drops empty optional fields', () => {
-    const f = { ...newForm('discord'), name: ' home ', mention: ' ', username: '', stacks: ' ' };
+    const f = { ...newForm('discord'), name: ' home ', mention: ' ', username: '', avatarUrl: ' ', stacks: ' ' };
     const d = formToDestination(f);
     expect(d).not.toHaveProperty('mention');
     expect(d).not.toHaveProperty('username');
+    expect(d).not.toHaveProperty('avatar_url');
     expect(d).not.toHaveProperty('stacks');
     expect(d.name).toBe('home');
   });

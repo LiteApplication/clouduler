@@ -268,14 +268,3 @@ fn publishing_to_dns_is_on_unless_a_private_network_opts_out() {
     let err = ClusterConfig::parse(&bad).unwrap_err().to_string();
     assert!(err.contains("publish_dns"), "{err}");
 }
-
-/// `interval` no longer exists but older cluster.yaml files still have it;
-/// they must keep loading.
-#[test]
-fn backup_tolerates_a_leftover_interval_field() {
-    let cfg = with_backup(
-        "  repo_url: git@github.com:org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n  interval: 30s\n",
-    )
-    .expect("valid");
-    assert_eq!(cfg.backup.expect("backup set").branch, "main");
-}

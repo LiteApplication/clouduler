@@ -368,7 +368,7 @@ pub enum Request {
     /// no-op without bumping `version`; the real effect lands once this node is
     /// upgraded and replays a snapshot or the entry. Holds the raw JSON and is
     /// `untagged` so re-serializing reproduces the payload verbatim (an old leader
-    /// re-replicating it); the legacy bare string `"Unknown"` round trips too.
+    /// re-replicating it).
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
@@ -770,7 +770,7 @@ mod request_mirror {
     }
 }
 
-// Hand-written like `BackupRunOutcome`'s impl, but for forward compatibility: a
+// Hand-written for forward compatibility: a
 // tag from a newer node must not fail. Delegates to `request_mirror::RequestMirror`
 // (`serde(remote)`) and falls back to `Request::Unknown` when the tag is not in
 // `KNOWN_REQUEST_VARIANTS` (a known tag with a bad body is an error). Also
@@ -791,10 +791,8 @@ impl<'de> Deserialize<'de> for Request {
             _ => None,
         };
         match tag {
-            // Only a never-heard-of tag is "from a newer node" (old logs wrote "Unknown").
-            Some(tag) if tag == "Unknown" || !KNOWN_REQUEST_VARIANTS.contains(&tag) => {
-                Ok(Request::Unknown(value))
-            }
+            // Only a never-heard-of tag is "from a newer node".
+            Some(tag) if !KNOWN_REQUEST_VARIANTS.contains(&tag) => Ok(Request::Unknown(value)),
             // A known tag with an unparseable body is a bug or corruption, not version
             // skew: fail loudly rather than no-op here while other nodes apply it.
             _ => {

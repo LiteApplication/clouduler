@@ -10,7 +10,7 @@ MCP, the Model Context Protocol, is a standard way for an AI assistant (Claude C
 The endpoint is `https://<your dashboard address>/mcp` (for example `https://cloud.example.com/mcp`). Any node can answer; requests are relayed to the leader.
 
 :::note Off or on
-New clusters created by `clouduler init` get `mcp.enabled: false`. A config with no `mcp:` key counts as enabled. When it is off, `/mcp` and every OAuth route answer `404 {"error":"mcp access is disabled"}`, so the cluster looks like it has no MCP server at all. The switch is read live, with no restart.
+MCP is off unless `mcp.enabled` is `true`, and a config with no `mcp:` key counts as off. When it is off, `/mcp` and every OAuth route answer `404 {"error":"mcp access is disabled"}`, so the cluster looks like it has no MCP server at all. The switch is read live, with no restart.
 :::
 
 ## How it works

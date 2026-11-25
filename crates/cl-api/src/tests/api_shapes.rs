@@ -125,7 +125,6 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                     stack: "web".to_string(),
                     service: "app".to_string(),
                     hosts: vec!["n0".to_string()],
-                    allowed_networks: Vec::new(),
                     open_ports: Vec::new(),
                     proxy: false,
                 }),

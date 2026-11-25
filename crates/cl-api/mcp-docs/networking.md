@@ -158,7 +158,7 @@ A `container` network (`type: container` plus a `container:` block: `stack`,
 `service`, `hosts`, `open_ports`, `proxy`) sends
 traffic for the network's own `subnet` through a router container that the
 operator runs as an ordinary single-replica service. The routed range is the
-network's `subnet` (not `container.subnet`, which is no longer accepted);
+network's `subnet`;
 `0.0.0.0/0` is allowed, IPv4 only. A `domain` is optional: it qualifies the
 proxy hostnames the client DNS answers for the router side. Every node implements the network, so no node declares an
 address for it (use `hosts` to route a node's own traffic).
@@ -214,9 +214,7 @@ targets internal, private, public or container; no self, duplicates or unknown
 names, see `validate_access`) says which networks `n` may reach.
 `ClusterConfig::reaches(a, b)` is `a == b || b is public || b in access(a)`.
 An absent `access` means no host firewall for that source and, at layer 7, the
-same as `[]`. The legacy `container.allowed_networks` is deserialize-only:
-`deserialize_networks` folds each entry into the container network's `access`
-(deduplicated) and clears it; it is never serialized. The fold is one way, `X.access` is not touched.
+same as `[]`.
 
 Users: the proxy gate (`allowed_subnets`, `local_clients`), client DNS
 (`views_for`, `answers_for`: unreachable names are `REFUSED`), container
@@ -255,11 +253,10 @@ Access is by routing. Clouduler advertises nothing: clients route the whole subn
 * `CLDR-MNG-IN` (filter, first in `INPUT`): for each node address (`-d ADDR/32`): RETURN from the managed bridge and `lo`, RETURN established/related, then for each source subnet that may reach the network (`ClusterConfig::reaches`: a cluster internal, private or container network with no `access` list, or one that names the network) RETURN ICMP echo-request and each open port and protocol (plus 80/443 with `proxy: true`). From another node's address (`-s PEER/32 -i PORT`): only ICMP echo and the open ports, else DROP; other traffic via the port (containers) RETURNs. Everything else to that address is DROPped, including sources in no cluster network, such as the public internet or an unlisted LAN. The host's own traffic and the managed bridge's are left to other chains.
 * `CLDR-MNG` (filter, first in `DOCKER-USER`, else `FORWARD`): for `-d SUBNET ! -i BRIDGE`: RETURN established/related (replies to what a container opened), DROP the rest. Nothing is routed into the subnet from outside its bridge, except the forwarding case: for each peer node address `ADDR/32`, ACCEPT `-s SOURCE -d ADDR/32 -o PORT` for ICMP echo and each open port from every source subnet that may reach the network, and `-s ADDR/32 -i PORT` established/related. `CLDR-MNG-SNAT` (nat `POSTROUTING`, first): `! -s SUBNET -d SUBNET -o PORT -j SNAT --to-source NODE_ADDR`, so replies return to the entry node's MAC. Container addresses are never forwarded. `CLDR-ALLOW` and `CLDR-NETF` are hooked ahead of it, so a stack's `allowed` list is checked first and a restricted stack only reaches managed destinations its list names.
 
-Apart from that forwarding ACCEPT (the node port is not docker's, so the `FORWARD` policy would drop it) the chains never ACCEPT: a sub-chain ACCEPT would skip the later chains, so allowed traffic RETURNs and the rest still apply. Managed subnets are also CLDR-IN container sources (DNS to the gateway allowed) and are excluded from the proxy's internal peer subnets, since outside clients arrive from the gateway. Peers are recomputed from live config every 10 s (overlay pass), routes and firewall every 5 s; both also use raft placement. Earlier versions added per-container routes (`proto 201`), IPIP tunnels and a `CLDR-MNG-NAT` chain; the daemon removes that leftover plumbing when it starts.
-
+Apart from that forwarding ACCEPT (the node port is not docker's, so the `FORWARD` policy would drop it) the chains never ACCEPT: a sub-chain ACCEPT would skip the later chains, so allowed traffic RETURNs and the rest still apply. Managed subnets are also CLDR-IN container sources (DNS to the gateway allowed) and are excluded from the proxy's internal peer subnets, since outside clients arrive from the gateway. Peers are recomputed from live config every 10 s (overlay pass), routes and firewall every 5 s; both also use raft placement.
 The direction is the existing one: `networks.SRC.access: [media]` says SRC may reach `media`; an absent list reaches everything. `container` networks count as sources through their routed range.
 
-Config updates (`managed_network_conflict` in `routes/config.rs`) are refused when a new or moved managed subnet overlaps an allocated or pinned stack overlay subnet, when `managed` or the subnet changes while a deployed stack lists the network, when a node drops its entry on the network while it runs instances attached to it, or when a node takes an address an instance holds. Renaming a managed network is live: the overlay is rebuilt under the new key and the `@old` allocations move to `@new`, so containers are recreated with the same addresses. `Docker::ensure_managed_network` recreates `MNG_NET` when its subnet, gateway or reserved addresses drift, only with nothing attached (else it logs). Rolling upgrade: every node must run a managed-capable release before `managed: true` is set; an older daemon rejects the config and an older leader drops managed allocations. The UI adds a managed network to a node with the **Automatic address** box ticked, so the node gets an address without one being filled in.
+Config updates (`managed_network_conflict` in `routes/config.rs`) are refused when a new or moved managed subnet overlaps an allocated or pinned stack overlay subnet, when `managed` or the subnet changes while a deployed stack lists the network, when a node drops its entry on the network while it runs instances attached to it, or when a node takes an address an instance holds. Renaming a managed network is live: the overlay is rebuilt under the new key and the `@old` allocations move to `@new`, so containers are recreated with the same addresses. `Docker::ensure_managed_network` recreates `MNG_NET` when its subnet, gateway or reserved addresses drift, only with nothing attached (else it logs). The UI adds a managed network to a node with the **Automatic address** box ticked, so the node gets an address without one being filled in.
 
 ## Host firewall
 

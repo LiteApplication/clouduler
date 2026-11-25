@@ -38,6 +38,7 @@ export function DiscordPreview({
   notify,
   buttons,
   username,
+  avatarUrl = '',
   cluster = 'homelab',
 }: {
   style: DiscordStyle;
@@ -45,6 +46,7 @@ export function DiscordPreview({
   notify: DiscordNotifyLevels;
   buttons: boolean;
   username: string;
+  avatarUrl?: string;
   cluster?: string;
 }) {
   const [sample, setSample] = useState<Sample>('critical');
@@ -61,7 +63,7 @@ export function DiscordPreview({
       </div>
       <div className="dc" role="img" aria-label={`Preview of a ${sample} Discord message`}>
         <div className="dc__av">
-          <img src={`${import.meta.env.BASE_URL}icon-192.png`} alt="" />
+          <img src={/^https?:\/\//.test(avatarUrl.trim()) ? avatarUrl.trim() : `${import.meta.env.BASE_URL}icon-192.png`} alt="" />
         </div>
         <div className="dc__body">
           <div className="dc__head">

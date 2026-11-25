@@ -32,7 +32,6 @@ pub const DEFAULT_RPC_PORT: u16 = 7373;
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     pub cluster: ClusterMeta,
-    #[serde(deserialize_with = "deserialize_networks")]
     pub networks: BTreeMap<String, Network>,
     #[serde(default)]
     pub drives: BTreeMap<String, Drive>,

@@ -20,4 +20,9 @@ edit_resolved: boolean,
 /**
  * Overrides the webhook's own name.
  */
-username?: string | null, };
+username?: string | null, 
+/**
+ * Overrides the webhook's avatar. Must be reachable from the internet;
+ * defaults to the icon on the public docs site.
+ */
+avatar_url?: string | null, };

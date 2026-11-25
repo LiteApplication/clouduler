@@ -19,12 +19,6 @@ service: string,
  */
 hosts?: Array<string>, 
 /**
- * Legacy: deserialize-only, never serialized. Folded into the network's
- * `access` while parsing (see [`deserialize_networks`]) and then empty,
- * so everything reads `access` instead.
- */
-allowed_networks?: Array<string>, 
-/**
  * Host ports the router side may reach.
  */
 open_ports: Array<ContainerOpenPort>, 

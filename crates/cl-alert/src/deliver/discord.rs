@@ -28,6 +28,10 @@ const FOOTER_MAX: usize = 2048;
 const FLAG_SUPPRESS_EMBEDS: u64 = 1 << 2;
 const FLAG_SUPPRESS_NOTIFICATIONS: u64 = 1 << 12;
 
+/// Avatar used when a destination sets none: the icon on the public docs site,
+/// which Discord can fetch even when the UI is private.
+const DEFAULT_AVATAR_URL: &str = "https://clouduler.liteapp.fr/ui-mock/icon-192.png";
+
 const COLOR_CRITICAL: u32 = 0xE5_48_4D;
 const COLOR_WARNING: u32 = 0xF5_A6_23;
 const COLOR_INFO: u32 = 0x8E_8A_9C;
@@ -154,7 +158,7 @@ impl Envelope {
         }
     }
 
-    fn finish(&self, opts: &DiscordOptions, ui_url: Option<&str>, mut payload: Value) -> Message {
+    fn finish(&self, opts: &DiscordOptions, mut payload: Value) -> Message {
         let Some(o) = payload.as_object_mut() else {
             return Message { payload };
         };
@@ -177,9 +181,13 @@ impl Envelope {
         {
             o.insert("username".into(), truncate(name, 80).into());
         }
-        if let Some(u) = ui_url.filter(|u| is_http(u)) {
-            o.insert("avatar_url".into(), format!("{u}/icon-192.png").into());
-        }
+        let avatar = opts
+            .avatar_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| is_http(u))
+            .unwrap_or(DEFAULT_AVATAR_URL);
+        o.insert("avatar_url".into(), avatar.into());
         Message { payload }
     }
 
@@ -340,7 +348,7 @@ fn test_messages(opts: &DiscordOptions, n: &Notification) -> Vec<Message> {
             "flags": FLAG_SUPPRESS_EMBEDS,
         }),
     };
-    vec![env.finish(opts, n.ui_url.as_deref(), payload)]
+    vec![env.finish(opts, payload)]
 }
 
 fn alert_message(opts: &DiscordOptions, n: &Notification, m: &AlertMessage) -> Message {
@@ -370,7 +378,7 @@ fn alert_message(opts: &DiscordOptions, n: &Notification, m: &AlertMessage) -> M
     if let Some(c) = buttons(opts, &links) {
         payload["components"] = c;
     }
-    env.finish(opts, n.ui_url.as_deref(), payload)
+    env.finish(opts, payload)
 }
 
 fn digest_line(m: &AlertMessage) -> String {
@@ -427,7 +435,7 @@ fn digest_messages(
                             p["components"] = b.clone();
                         }
                     }
-                    env.finish(opts, n.ui_url.as_deref(), p)
+                    env.finish(opts, p)
                 })
                 .collect()
         }
@@ -487,7 +495,7 @@ fn digest_messages(
                             p["components"] = b.clone();
                         }
                     }
-                    env.finish(opts, n.ui_url.as_deref(), p)
+                    env.finish(opts, p)
                 })
                 .collect()
         }
@@ -651,7 +659,7 @@ mod tests {
             mention: None,
             flags: 0,
         };
-        let m = env.finish(&o, None, json!([1, 2]));
+        let m = env.finish(&o, json!([1, 2]));
         assert_eq!(m.payload, json!([1, 2]));
     }
 
@@ -691,7 +699,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("```\npanic: out of memory\n```"));
-        assert_eq!(p["avatar_url"], "https://cloud.test/icon-192.png");
+        assert_eq!(p["avatar_url"], DEFAULT_AVATAR_URL);
     }
 
     #[test]
@@ -900,10 +908,13 @@ mod tests {
         o.username = Some("  Piosny alerts ".into());
         let p = one(&o, Body::Alert(alert(Severity::Warning, Phase::Opened)));
         assert_eq!(p["username"], "Piosny alerts");
-        let mut n = notification(Body::Alert(alert(Severity::Warning, Phase::Opened)));
-        n.ui_url = None;
-        let p = &messages(&o, &n)[0].payload;
-        assert!(p.get("avatar_url").is_none());
+        assert_eq!(p["avatar_url"], DEFAULT_AVATAR_URL);
+        o.avatar_url = Some(" https://img.example.com/a.png ".into());
+        let p = one(&o, Body::Alert(alert(Severity::Warning, Phase::Opened)));
+        assert_eq!(p["avatar_url"], "https://img.example.com/a.png");
+        o.avatar_url = Some("javascript:x".into());
+        let p = one(&o, Body::Alert(alert(Severity::Warning, Phase::Opened)));
+        assert_eq!(p["avatar_url"], DEFAULT_AVATAR_URL);
     }
 
     #[test]

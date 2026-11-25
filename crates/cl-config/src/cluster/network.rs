@@ -129,11 +129,6 @@ pub struct ContainerNetwork {
     /// Nodes whose host-level traffic to `subnet` goes through the router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
-    /// Legacy: deserialize-only, never serialized. Folded into the network's
-    /// `access` while parsing (see [`deserialize_networks`]) and then empty,
-    /// so everything reads `access` instead.
-    #[serde(default, skip_serializing)]
-    pub allowed_networks: Vec<String>,
     /// Host ports the router side may reach.
     #[serde(default)]
     pub open_ports: Vec<ContainerOpenPort>,
@@ -169,36 +164,6 @@ impl std::ops::Deref for ContainerView<'_> {
     fn deref(&self) -> &ContainerNetwork {
         self.container
     }
-}
-
-/// Deserializes `networks`, folding the legacy `container.allowed_networks`
-/// into network-level `access` (entry X of container network C is added to
-/// `C.access`, deduplicated) and clearing the legacy list, so every
-/// construction path is normalized.
-///
-/// Deliberately not folded in reverse: `X.access` is untouched.
-pub(super) fn deserialize_networks<'de, D>(
-    d: D,
-) -> std::result::Result<BTreeMap<String, Network>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut networks = BTreeMap::<String, Network>::deserialize(d)?;
-    for net in networks.values_mut() {
-        if let Some(c) = net.container.as_mut() {
-            if c.allowed_networks.is_empty() {
-                continue;
-            }
-            let legacy = std::mem::take(&mut c.allowed_networks);
-            let access = net.access.get_or_insert_with(Vec::new);
-            for x in legacy {
-                if !access.contains(&x) {
-                    access.push(x);
-                }
-            }
-        }
-    }
-    Ok(networks)
 }
 
 /// Smallest and largest prefix a managed network's subnet may have.

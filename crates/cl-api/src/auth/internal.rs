@@ -5,8 +5,7 @@
 //! cannot decrypt secrets, so this is no new trust boundary.
 //!
 //! The signature binds method, path and query, a timestamp, a nonce and a body hash, and is accepted
-//! once. The legacy path-only header is ignored: it never expires, so honouring it would leave every
-//! captured request replayable forever.
+//! once.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -15,7 +14,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use cl_secret::internal_auth::{self, SKEW_SECS};
 use cl_update::internal_client::{
-    BODY_SHA256_HEADER, NONCE_HEADER, SIGNATURE_HEADER, SIGNATURE_V3_HEADER, TIMESTAMP_HEADER,
+    BODY_SHA256_HEADER, NONCE_HEADER, SIGNATURE_V3_HEADER, TIMESTAMP_HEADER,
 };
 
 use crate::error::ApiError;
@@ -33,10 +32,6 @@ impl ReplayCache {
         let mut seen = self.seen.lock();
         seen.retain(|_, expires| *expires >= now);
         seen.insert(signature.to_string(), ts + SKEW_SECS).is_none()
-    }
-
-    fn mark(&self, signature: &str, ts: u64, now: u64) {
-        self.first_use(signature, ts, now);
     }
 }
 
@@ -66,10 +61,6 @@ fn header<'a>(parts: &'a Parts, name: &str) -> Result<&'a str, ApiError> {
         .ok_or_else(|| ApiError::Unauthenticated(format!("missing {name} header")))
 }
 
-fn optional_header<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
-    parts.headers.get(name).and_then(|v| v.to_str().ok())
-}
-
 /// An already used signature is routine (a retry racing its first attempt), so it logs at debug.
 fn reject(parts: &Parts, scheme: &str, reason: &str, routine: bool) -> ApiError {
     if routine {
@@ -80,19 +71,14 @@ fn reject(parts: &Parts, scheme: &str, reason: &str, routine: bool) -> ApiError 
     ApiError::Unauthenticated(reason.into())
 }
 
-/// Verifies the signature and burns it, returning the body hash it commits to. v3 (nonce) is checked
-/// when its headers are present, else v2, which older clients still send (removable once every node
-/// runs v3). Both are replay protected.
+/// Verifies the signature and burns it, returning the body hash it commits to.
 async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiError> {
     let body_sha256 = header(parts, BODY_SHA256_HEADER)?;
     let ts: u64 = header(parts, TIMESTAMP_HEADER)?
         .parse()
         .map_err(|_| reject(parts, "-", "bad internal timestamp", false))?;
-    let v3 = optional_header(parts, NONCE_HEADER).zip(optional_header(parts, SIGNATURE_V3_HEADER));
-    let v2 = match v3 {
-        Some(_) => None,
-        None => Some(header(parts, SIGNATURE_HEADER)?),
-    };
+    let nonce = header(parts, NONCE_HEADER)?;
+    let signature = header(parts, SIGNATURE_V3_HEADER)?;
 
     let key_guard = state.key.read().await;
     let key = key_guard
@@ -108,55 +94,25 @@ async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiErro
         .unwrap_or_else(|| parts.uri.path());
     let now = internal_auth::unix_now();
     let method = parts.method.as_str();
-    let (scheme, replay_key) = match (v3, v2) {
-        (Some((nonce, signature)), _) => {
-            if !internal_auth::verify_v3(
-                key,
-                &internal_auth::V3Request {
-                    method,
-                    path_and_query,
-                    ts,
-                    nonce,
-                    body_sha256,
-                },
-                signature,
-                now,
-            ) {
-                return Err(reject(parts, "v3", "bad internal signature", false));
-            }
-            ("v3", format!("v3:{signature}"))
-        }
-        (None, Some(signature)) => {
-            if !internal_auth::verify_v2(
-                key,
-                method,
-                path_and_query,
-                ts,
-                body_sha256,
-                signature,
-                now,
-            ) {
-                return Err(reject(parts, "v2", "bad internal signature", false));
-            }
-            ("v2", format!("v2:{signature}"))
-        }
-        (None, None) => unreachable!("v2 header is required when v3 is absent"),
-    };
-    if !state.internal_replay.first_use(&replay_key, ts, now) {
-        return Err(reject(
-            parts,
-            scheme,
-            "internal signature already used",
-            true,
-        ));
+    if !internal_auth::verify_v3(
+        key,
+        &internal_auth::V3Request {
+            method,
+            path_and_query,
+            ts,
+            nonce,
+            body_sha256,
+        },
+        signature,
+        now,
+    ) {
+        return Err(reject(parts, "v3", "bad internal signature", false));
     }
-    // A v3 client also sends a v2 signature; burn it too, or stripping the v3 headers would allow replay.
-    // Two legitimate v3 requests in a second share a v2 signature, so this only marks. Reached only
-    // after v3 verified, so an unauthenticated caller cannot grow the cache.
-    if scheme == "v3" {
-        if let Some(v2_sig) = optional_header(parts, SIGNATURE_HEADER) {
-            state.internal_replay.mark(&format!("v2:{v2_sig}"), ts, now);
-        }
+    if !state
+        .internal_replay
+        .first_use(&format!("v3:{signature}"), ts, now)
+    {
+        return Err(reject(parts, "v3", "internal signature already used", true));
     }
     Ok(body_sha256.to_string())
 }

@@ -323,10 +323,10 @@ impl Overlay {
         Ok(index)
     }
 
-    /// Make `extras` (a managed network's node address) the only IPv4
-    /// addresses on bridge `name` besides `gateway`: adds the missing ones as
-    /// secondary addresses of the subnet and removes any other, such as the
-    /// address of a node that left the network. Idempotent.
+    /// Make `extras` the only IPv4 addresses on interface `name` besides
+    /// `gateway`: adds the missing ones as secondary addresses of the subnet
+    /// and removes any other, such as the address of a node that left the
+    /// network. Idempotent.
     pub async fn reconcile_bridge_addresses(
         &self,
         name: &str,

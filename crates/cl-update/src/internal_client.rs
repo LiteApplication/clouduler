@@ -2,30 +2,18 @@
 
 use cl_secret::ClusterKey;
 
-/// Legacy signature header: an HMAC over the path alone, so a captured copy is
-/// a permanent bearer token. Servers no longer read it; clients still send it
-/// only so a not-yet-upgraded node in a mixed-version cluster keeps accepting
-/// them. Drop it (and `cl_secret::internal_auth::sign` here) once no node
-/// older than the v2 scheme can be in the cluster.
-pub const AUTH_HEADER: &str = "X-Clouduler-Internal-Auth";
-/// Unix timestamp the v2 signature was made at.
+/// Unix timestamp the signature was made at.
 pub const TIMESTAMP_HEADER: &str = "X-Clouduler-Internal-Timestamp";
-/// Hex sha256 of the request body the v2 signature commits to.
+/// Hex sha256 of the request body the signature commits to.
 pub const BODY_SHA256_HEADER: &str = "X-Clouduler-Internal-Body-Sha256";
-/// v2 signature over method, path and query, timestamp and body hash.
-pub const SIGNATURE_HEADER: &str = "X-Clouduler-Internal-Signature-V2";
-
 /// Per-request random nonce the v3 signature commits to.
 pub const NONCE_HEADER: &str = "X-Clouduler-Internal-Nonce";
 /// v3 signature over method, path and query, timestamp, nonce and body hash.
-/// Unlike v2 it is unique per request even within one second.
+/// Unique per request even within one second.
 pub const SIGNATURE_V3_HEADER: &str = "X-Clouduler-Internal-Signature-V3";
 
 /// Every header an internal request carries, freshly signed. Call again on
 /// retry: the server rejects a signature it has already seen.
-///
-/// v2 is sent alongside v3 for not-yet-upgraded servers; drop it once all nodes
-/// run v3.
 pub fn auth_headers(
     key: &ClusterKey,
     method: &str,
@@ -35,17 +23,11 @@ pub fn auth_headers(
     let ts = cl_secret::internal_auth::unix_now();
     let body_sha256 = cl_secret::internal_auth::body_sha256_hex(body);
     let nonce = cl_secret::internal_auth::new_nonce();
-    let v2 = cl_secret::internal_auth::sign_v2(key, method, path_and_query, ts, &body_sha256);
     let v3 =
         cl_secret::internal_auth::sign_v3(key, method, path_and_query, ts, &nonce, &body_sha256);
     vec![
-        (
-            AUTH_HEADER,
-            cl_secret::internal_auth::sign(key, path_and_query),
-        ),
         (TIMESTAMP_HEADER, ts.to_string()),
         (BODY_SHA256_HEADER, body_sha256),
-        (SIGNATURE_HEADER, v2),
         (NONCE_HEADER, nonce),
         (SIGNATURE_V3_HEADER, v3),
     ]
@@ -108,22 +90,13 @@ mod tests {
     }
 
     #[test]
-    fn auth_headers_carry_both_v2_and_v3_signatures() {
+    fn auth_headers_carry_a_valid_v3_signature() {
         let key = ClusterKey::generate();
         let h = auth_headers(&key, "GET", "/a?b=1", b"");
         let ts: u64 = get(&h, TIMESTAMP_HEADER).parse().unwrap();
         let body = get(&h, BODY_SHA256_HEADER);
         let nonce = get(&h, NONCE_HEADER);
         let now = ts;
-        assert!(cl_secret::internal_auth::verify_v2(
-            &key,
-            "GET",
-            "/a?b=1",
-            ts,
-            body,
-            get(&h, SIGNATURE_HEADER),
-            now
-        ));
         assert!(cl_secret::internal_auth::verify_v3(
             &key,
             &cl_secret::internal_auth::V3Request {

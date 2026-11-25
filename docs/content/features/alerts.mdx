@@ -287,8 +287,9 @@ All settings apply live.
   {key: 'notify.info', type: 'ping | normal | silent', default: 'silent', reload: 'live', description: 'Discord: how an info alert announces itself. Digests use this level.'},
   {key: 'notify.resolved', type: 'ping | normal | silent', default: 'silent', reload: 'live', description: 'Discord: how a resolved message announces itself.'},
   {key: 'buttons', type: 'bool', default: 'true', reload: 'live', description: 'Discord: link buttons.', quirks: 'Digests get the "Open alerts" button only when `buttons` is on.'},
-  {key: 'edit_resolved', type: 'bool', default: 'false', reload: 'live', description: 'Discord: edit the original message when resolved instead of posting a new one.', quirks: 'Discord drops the username when editing. If the original was deleted, a new message is posted.'},
+  {key: 'edit_resolved', type: 'bool', default: 'false', reload: 'live', description: 'Discord: edit the original message when resolved instead of posting a new one.', quirks: 'Discord drops the username and avatar when editing. If the original was deleted, a new message is posted.'},
   {key: 'username', type: 'string', reload: 'live', description: 'Discord: display name the webhook posts under.'},
+  {key: 'avatar_url', type: 'URL', default: 'https://clouduler.liteapp.fr/ui-mock/icon-192.png', reload: 'live', description: 'Discord: avatar the webhook posts with. Discord fetches it from the internet, so it must be publicly reachable (PNG, JPG or GIF).', quirks: 'Blank or not an http(s) URL falls back to the default. Errors: must be an http or https URL of at most 2048 characters'},
   {key: 'to', type: 'list of addresses', reload: 'live', required: true, description: 'Email: recipients, at least one.', quirks: 'Errors: add at least one recipient; not an email address'},
 ]} />
 

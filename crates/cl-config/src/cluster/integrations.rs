@@ -63,21 +63,13 @@ impl ImageUpdatesConfig {
 /// Whether AI clients may connect over MCP.
 /// Whether AI clients may connect over MCP.
 ///
-/// On by default; every grant still needs an admin or viewer approval.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Off by default; every grant still needs an admin or viewer approval.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
-    #[serde(default = "default_true_bool")]
+    #[serde(default)]
     pub enabled: bool,
-}
-
-/// Deriving this would default `enabled` to false, contradicting the serde
-/// field default that existing cluster.yaml files get.
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 /// Where the cluster downloads its own prebuilt binary to roll out updates.
@@ -105,8 +97,9 @@ pub struct SelfUpdateConfig {
 /// clouduler generates its own ssh keypair; the admin adds its public half as
 /// a deploy key (`GET /api/git-backup/status`). Secrets are re-encrypted for
 /// `age_recipient`, so the private key can live outside the cluster.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(deny_unknown_fields)]
 pub struct GitBackupConfig {
     /// SSH url, e.g. `git@github.com:org/repo.git`. Only ssh push (deploy
     /// key) auth is implemented, so http(s) urls are rejected.
@@ -114,34 +107,8 @@ pub struct GitBackupConfig {
     /// An `age1...` X25519 recipient public key. The matching private key is
     /// never given to clouduler.
     pub age_recipient: String,
+    #[serde(default = "default_backup_branch")]
     pub branch: String,
-}
-
-// Hand-rolled rather than `deny_unknown_fields`: `interval` (removed once
-// exports started pushing on every change) may still be on disk in older
-// cluster.yaml files. Accept and discard it so they keep loading.
-impl<'de> Deserialize<'de> for GitBackupConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Raw {
-            repo_url: String,
-            age_recipient: String,
-            #[serde(default = "default_backup_branch")]
-            branch: String,
-            #[serde(default, rename = "interval")]
-            _interval: Option<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        Ok(GitBackupConfig {
-            repo_url: raw.repo_url,
-            age_recipient: raw.age_recipient,
-            branch: raw.branch,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

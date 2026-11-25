@@ -24,11 +24,11 @@ networks:
   ctn:
     type: container
     subnet: 0.0.0.0/0
+    access: [cluster]
     container:
       stack: ctn-router
       service: router
       hosts: [n3]
-      allowed_networks: [cluster]
       open_ports:
         - { port: 2200, protocol: tcp, target_port: 8080 }
       proxy: true

@@ -711,7 +711,8 @@ fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
     if found > crate::state::CURRENT_SCHEMA_VERSION {
         return Ok(LoadedStateMachine::TooNew { found });
     }
-    let migrated = crate::migrations::migrate_to_current(value, found);
+    let migrated = crate::migrations::migrate_to_current(value, found)
+        .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::error(e))))?;
     let mut sm: StateMachine = serde_json::from_value(migrated)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
     // Stamp so it is never migrated twice.

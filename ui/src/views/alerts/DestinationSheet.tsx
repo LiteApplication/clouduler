@@ -12,6 +12,7 @@ import {
   secretEdits,
   upsertDestination,
   validateForm,
+  DEFAULT_DISCORD_AVATAR,
   type DestForm,
   type DestKind,
 } from '../../lib/alerts';
@@ -247,7 +248,7 @@ export function DestinationSheet({
                 ]}
                 onChange={(style) => set({ style })}
               />
-              <DiscordPreview style={f.style} mention={f.mention} notify={f.notify} buttons={f.buttons} username={f.username} />
+              <DiscordPreview style={f.style} mention={f.mention} notify={f.notify} buttons={f.buttons} username={f.username} avatarUrl={f.avatarUrl} />
             </div>
             <TextField
               label="Mention on ping"
@@ -293,6 +294,14 @@ export function DestinationSheet({
               value={f.username}
               hint="Overrides the webhook's own name. Optional."
               onChange={(e) => set({ username: e.target.value })}
+            />
+            <TextField
+              label="Avatar URL"
+              mono
+              placeholder={DEFAULT_DISCORD_AVATAR}
+              value={f.avatarUrl}
+              hint="Image Discord shows next to messages. Discord fetches it from the internet, so it must be publicly reachable (PNG, JPG or GIF). Optional."
+              onChange={(e) => set({ avatarUrl: e.target.value })}
             />
           </>
         )}

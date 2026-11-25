@@ -1319,6 +1319,7 @@ export interface DiscordDestination extends AlertDestinationBase {
   buttons: boolean;
   edit_resolved?: boolean;
   username?: string;
+  avatar_url?: string;
 }
 export interface WebhookDestination extends AlertDestinationBase {
   kind: 'webhook';

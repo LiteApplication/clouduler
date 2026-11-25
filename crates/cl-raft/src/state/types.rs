@@ -543,7 +543,7 @@ pub struct BackupRun {
     pub triggered_by: BackupTrigger,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum BackupRunOutcome {
     /// restic's `percent_done` from its last status line, updated in place by repeated
@@ -563,52 +563,6 @@ pub enum BackupRunOutcome {
     Failed {
         error: String,
     },
-}
-
-// Hand-written so a raft log/snapshot from before `Running` grew `percent` (a bare
-// unit variant, the JSON string `"Running"`) still replays: the derived
-// `Deserialize` rejects it and crashes every node on startup. Routes through
-// `serde_json::Value` (format-agnostic) to special-case the legacy string.
-impl<'de> Deserialize<'de> for BackupRunOutcome {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        enum Current {
-            Running {
-                #[serde(default)]
-                percent: Option<f64>,
-            },
-            Succeeded {
-                snapshot_id: String,
-                bytes: u64,
-                #[serde(default)]
-                warning: Option<String>,
-            },
-            Failed {
-                error: String,
-            },
-        }
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if value.as_str() == Some("Running") {
-            return Ok(BackupRunOutcome::Running { percent: None });
-        }
-        match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
-            Current::Running { percent } => Ok(BackupRunOutcome::Running { percent }),
-            Current::Succeeded {
-                snapshot_id,
-                bytes,
-                warning,
-            } => Ok(BackupRunOutcome::Succeeded {
-                snapshot_id,
-                bytes,
-                warning,
-            }),
-            Current::Failed { error } => Ok(BackupRunOutcome::Failed { error }),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

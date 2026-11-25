@@ -277,6 +277,7 @@ export interface DestForm {
   buttons: boolean;
   edit_resolved: boolean;
   username: string;
+  avatarUrl: string;
   /** One per line or comma separated. */
   to: string;
   severities: AlertSeverity[];
@@ -284,6 +285,9 @@ export interface DestForm {
   categories: string[];
   stacks: string;
 }
+
+/** Avatar Discord shows when a destination sets none (the public docs site icon). */
+export const DEFAULT_DISCORD_AVATAR = 'https://clouduler.liteapp.fr/ui-mock/icon-192.png';
 
 export const DEFAULT_NOTIFY: DiscordNotifyLevels = { critical: 'ping', warning: 'normal', info: 'silent', resolved: 'silent' };
 
@@ -302,6 +306,7 @@ export function newForm(kind: DestKind): DestForm {
     buttons: true,
     edit_resolved: false,
     username: '',
+    avatarUrl: '',
     to: '',
     severities: ['critical', 'warning'],
     digest: false,
@@ -326,6 +331,7 @@ export function formFrom(d: AlertDestination): DestForm {
     f.buttons = d.buttons;
     f.edit_resolved = d.edit_resolved ?? false;
     f.username = d.username ?? '';
+    f.avatarUrl = d.avatar_url ?? '';
   } else if (d.kind === 'email') {
     f.to = d.to.join('\n');
   }
@@ -357,6 +363,7 @@ export function formToDestination(f: DestForm): AlertDestination {
       buttons: f.buttons,
       edit_resolved: f.edit_resolved,
       ...(f.username.trim() ? { username: f.username.trim() } : {}),
+      ...(f.avatarUrl.trim() ? { avatar_url: f.avatarUrl.trim() } : {}),
     };
   }
   if (f.kind === 'email') return { ...base, kind: 'email', to: splitList(f.to) };

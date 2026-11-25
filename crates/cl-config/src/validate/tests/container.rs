@@ -2,9 +2,10 @@ use super::*;
 
 #[test]
 fn a_container_network_validates() {
-    let cfg = with_container(&format!(
-        "{CTN_OK}      hosts: [n1]\n      allowed_networks: [lan, wan, tailscale]\n      proxy: true\n      open_ports:\n        - {{ port: 2222, target_port: 22 }}\n        - {{ port: 2222, protocol: udp }}\n"
-    ))
+    let cfg = with_container_access(
+        "[lan, wan, tailscale]",
+        &format!("{CTN_OK}      hosts: [n1]\n      proxy: true\n      open_ports:\n        - {{ port: 2222, target_port: 22 }}\n        - {{ port: 2222, protocol: udp }}\n"),
+    )
     .expect("valid");
     let (name, c) = cfg.container_networks().next().unwrap();
     assert_eq!(name, "ctn");
@@ -12,34 +13,16 @@ fn a_container_network_validates() {
     assert_eq!(c.open_ports[1].effective_target_port(), 2222);
     assert_eq!(cfg.container_router_of("ts", "ts"), Some("ctn"));
     assert_eq!(cfg.container_router_of("ts", "other"), None);
-    // The legacy list is folded into the network's `access` and cleared.
     assert_eq!(cfg.access_of("ctn"), ["lan", "wan", "tailscale"]);
-    assert!(cfg.networks["ctn"]
-        .container
-        .as_ref()
-        .unwrap()
-        .allowed_networks
-        .is_empty());
     let yaml = serde_yaml::to_string(&cfg).unwrap();
     assert!(yaml.contains("access:"), "{yaml}");
-    assert!(!yaml.contains("allowed_networks"), "{yaml}");
     let again = ClusterConfig::parse(&yaml).unwrap();
     assert_eq!(again, cfg);
 }
 
 #[test]
-fn legacy_allowed_networks_merge_into_an_existing_access_list() {
-    let cfg = parse(&[(
-        WAN_ANCHOR,
-        &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    subnet: 100.64.0.0/10\n    access: [wan, lan]\n    container:\n      stack: ts\n      service: ts\n      allowed_networks: [lan, tailscale]\n"),
-    )])
-    .expect("valid");
-    assert_eq!(cfg.access_of("ctn"), ["wan", "lan", "tailscale"]);
-}
-
-#[test]
 fn reaches_is_reflexive_public_implicit_and_directed() {
-    let cfg = with_container(&format!("{CTN_OK}      allowed_networks: [lan]\n")).unwrap();
+    let cfg = with_container_access("[lan]", CTN_OK).unwrap();
     assert!(cfg.reaches("ctn", "ctn"));
     assert!(cfg.reaches("ctn", "lan"));
     assert!(!cfg.reaches("lan", "ctn"));
@@ -150,17 +133,19 @@ fn a_container_network_needs_a_subnet_may_have_a_domain_and_takes_no_node_addres
 }
 
 #[test]
-fn container_hosts_and_allowed_networks_are_checked() {
+fn container_hosts_and_access_are_checked() {
     assert!(ctn_err(&format!("{CTN_OK}      hosts: [nope]\n")).contains("no node named nope"));
     assert!(ctn_err(&format!("{CTN_OK}      hosts: [n1, n1]\n")).contains("more than once"));
-    assert!(
-        ctn_err(&format!("{CTN_OK}      allowed_networks: [nope]\n"))
-            .contains("no network named nope")
-    );
-    assert!(ctn_err(&format!("{CTN_OK}      allowed_networks: [ctn]\n")).contains("reaches itself"));
+    let access_err = |access: &str| {
+        with_container_access(access, CTN_OK)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(access_err("[nope]").contains("no network named nope"));
+    assert!(access_err("[ctn]").contains("reaches itself"));
     let err = parse(&[(
         WAN_ANCHOR,
-        &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, container: {{ stack: a, service: b, allowed_networks: [vpn] }} }}"),
+        &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, access: [vpn], container: {{ stack: a, service: b }} }}"),
     )])
     .unwrap_err()
     .to_string();

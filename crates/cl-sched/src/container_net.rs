@@ -129,7 +129,7 @@ mod tests {
     fn cfg() -> ClusterConfig {
         let yaml = CLUSTER.replace(
             "  vpn:\n    type: egress\n",
-            "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    subnet: 100.64.0.0/10\n    container: { stack: rt, service: router, allowed_networks: [lan] }\n",
+            "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    subnet: 100.64.0.0/10\n    access: [lan]\n    container: { stack: rt, service: router }\n",
         );
         ClusterConfig::parse(&yaml).expect("cluster parses")
     }

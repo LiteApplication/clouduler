@@ -172,6 +172,10 @@ pub struct DiscordOptions {
     /// Overrides the webhook's own name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// Overrides the webhook's avatar. Must be reachable from the internet;
+    /// defaults to the icon on the public docs site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
 }
 
 impl Default for DiscordOptions {
@@ -183,6 +187,7 @@ impl Default for DiscordOptions {
             buttons: true,
             edit_resolved: false,
             username: None,
+            avatar_url: None,
         }
     }
 }

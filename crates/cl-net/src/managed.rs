@@ -57,18 +57,6 @@ pub const INPUT_CHAIN: &str = "CLDR-MNG-IN";
 /// Nat chain (`POSTROUTING`): source NAT of traffic forwarded to another node's address.
 pub const SNAT_CHAIN: &str = "CLDR-MNG-SNAT";
 
-/// Nat chain of earlier versions (cross-node source NAT), removed when found.
-pub const LEGACY_NAT_CHAIN: &str = "CLDR-MNG-NAT";
-
-/// Routing protocol the per-container routes of earlier versions carried.
-const LEGACY_ROUTE_PROTO: &str = "201";
-
-/// Prefix of the IPIP tunnel devices of earlier versions.
-const LEGACY_TUNNEL_PREFIX: &str = "clt-";
-
-/// UDP port of the FOU receiver of earlier versions.
-const LEGACY_FOU_PORT: &str = "7390";
-
 /// One managed network this node implements, as far as the firewall cares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedNetRules {
@@ -415,43 +403,6 @@ fn ip(args: &[&str], v4: bool) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The devices `ip -o link show type ipip` lists that earlier versions made
-/// (`7: clt-ab@NONE: <...>`).
-pub fn legacy_tunnels(listing: &str) -> Vec<String> {
-    listing
-        .lines()
-        .filter_map(|l| {
-            let name = l.split_whitespace().nth(1)?;
-            let name = name.trim_end_matches(':').split('@').next()?;
-            name.starts_with(LEGACY_TUNNEL_PREFIX)
-                .then(|| name.to_string())
-        })
-        .collect()
-}
-
-/// Remove what earlier versions left on the host: the per-container routes
-/// (protocol 201), the IPIP tunnels and their FOU receiver. Every step is
-/// best effort and silent when there is nothing to remove.
-pub fn remove_legacy_plumbing() {
-    let routes =
-        ip(&["-o", "route", "show", "proto", LEGACY_ROUTE_PROTO], true).unwrap_or_default();
-    if !routes.trim().is_empty() {
-        if let Err(e) = ip(&["route", "flush", "proto", LEGACY_ROUTE_PROTO], true) {
-            tracing::warn!(error = %e, "could not flush the legacy routes");
-        }
-    }
-    let links = ip(&["-o", "link", "show", "type", "ipip"], false).unwrap_or_default();
-    let tunnels = legacy_tunnels(&links);
-    for dev in &tunnels {
-        if let Err(e) = ip(&["link", "del", "dev", dev], false) {
-            tracing::warn!(error = %e, "could not delete a legacy tunnel");
-        }
-    }
-    if !tunnels.is_empty() {
-        let _ = ip(&["fou", "del", "port", LEGACY_FOU_PORT], false);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,11 +624,5 @@ mod tests {
         assert_eq!(port_veth_name("@media"), "clmh-@media");
         assert!(port_veth_name("@a-very-long-network-name").len() <= 15);
         assert_ne!(port_veth_name("@media"), port_peer_name("@media"));
-    }
-
-    #[test]
-    fn old_tunnel_devices_are_recognised() {
-        let listing = "7: clt-0123abcd@NONE: <POINTOPOINT,NOARP,UP> mtu 1252 qdisc noqueue\n8: tunl0@NONE: <NOARP> mtu 1480\n9: other@NONE: <X>\n";
-        assert_eq!(legacy_tunnels(listing), ["clt-0123abcd"]);
     }
 }

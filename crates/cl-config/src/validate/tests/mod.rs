@@ -147,6 +147,14 @@ fn with_container_at(subnet: &str, block: &str) -> Result<ClusterConfig> {
     )])
 }
 
+/// A container network carrying a network-level `access` list.
+fn with_container_access(access: &str, block: &str) -> Result<ClusterConfig> {
+    parse(&[(
+        WAN_ANCHOR,
+        &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    subnet: \"100.64.0.0/10\"\n    access: {access}\n    container:\n{block}"),
+    )])
+}
+
 const CTN_OK: &str = "      stack: ts\n      service: ts\n";
 
 fn ctn_err(block: &str) -> String {

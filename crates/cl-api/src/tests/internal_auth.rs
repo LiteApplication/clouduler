@@ -31,8 +31,7 @@ async fn internal_instance_and_node_routes_reject_an_unsigned_request() {
     }
 }
 
-/// As [`internal_request`] but v3-only: the nonce header and v3 signature,
-/// signed over `signed_nonce` while `nonce` is what is sent.
+/// As [`internal_request`] but with the nonce under the caller's control: signed over `signed_nonce` while `nonce` is what is sent.
 async fn v3_request(h: &Harness, path: &str, nonce: &str, signed_nonce: &str) -> Request<Body> {
     use cl_update::internal_client::*;
     let key_guard = h.state.key.read().await;
@@ -60,75 +59,6 @@ async fn internal_v3_requests_differing_only_in_nonce_both_pass() {
             .router
             .clone()
             .oneshot(v3_request(&h, path, &n, &n).await)
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-}
-
-/// A request as the real client sends it: v2 and v3 signatures together.
-/// `with_v3` false strips it down to the v2 headers an attacker could replay.
-async fn dual_request(
-    h: &Harness,
-    path: &str,
-    ts: u64,
-    nonce: &str,
-    with_v3: bool,
-) -> Request<Body> {
-    use cl_update::internal_client::*;
-    let key_guard = h.state.key.read().await;
-    let key = key_guard.as_ref().expect("test cluster holds a key");
-    let hash = cl_secret::internal_auth::body_sha256_hex(b"");
-    let mut b = Request::builder()
-        .uri(path)
-        .header(TIMESTAMP_HEADER, ts.to_string())
-        .header(BODY_SHA256_HEADER, &hash)
-        .header(
-            SIGNATURE_HEADER,
-            cl_secret::internal_auth::sign_v2(key, "GET", path, ts, &hash),
-        );
-    if with_v3 {
-        b = b.header(NONCE_HEADER, nonce).header(
-            SIGNATURE_V3_HEADER,
-            cl_secret::internal_auth::sign_v3(key, "GET", path, ts, nonce, &hash),
-        );
-    }
-    b.body(Body::empty()).unwrap()
-}
-
-#[tokio::test]
-async fn internal_v3_burns_the_v2_signature_so_stripping_v3_cannot_replay() {
-    let h = harness().await;
-    let path = "/api/nodes/internal/n0/usage";
-    let ts = cl_secret::internal_auth::unix_now();
-    let n = cl_secret::internal_auth::new_nonce();
-    let resp = h
-        .router
-        .clone()
-        .oneshot(dual_request(&h, path, ts, &n, true).await)
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let resp = h
-        .router
-        .clone()
-        .oneshot(dual_request(&h, path, ts, &n, false).await)
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn internal_v3_requests_sharing_a_v2_signature_both_pass() {
-    let h = harness().await;
-    let path = "/api/nodes/internal/n0/usage";
-    let ts = cl_secret::internal_auth::unix_now();
-    for _ in 0..2 {
-        let n = cl_secret::internal_auth::new_nonce();
-        let resp = h
-            .router
-            .clone()
-            .oneshot(dual_request(&h, path, ts, &n, true).await)
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -173,49 +103,6 @@ async fn internal_v3_rejects_a_signature_over_a_different_nonce() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn internal_routes_accept_a_v2_only_request_for_rolling_upgrades() {
-    let h = harness().await;
-    // `internal_request` sends no nonce or v3 signature, as an old client.
-    let resp = signed_get(&h, "/api/nodes/internal/n0/usage").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn internal_routes_reject_a_legacy_only_request() {
-    let h = harness().await;
-    let path = "/api/nodes/internal/n0/usage";
-    let key_guard = h.state.key.read().await;
-    let legacy = cl_secret::internal_auth::sign(key_guard.as_ref().unwrap(), path);
-    drop(key_guard);
-    let resp = h
-        .router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(path)
-                .header(cl_update::internal_client::AUTH_HEADER, legacy)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn internal_routes_reject_a_replayed_signature() {
-    let h = harness().await;
-    let path = "/api/nodes/internal/n0/usage";
-    let empty = cl_secret::internal_auth::body_sha256_hex(b"");
-    let now = cl_secret::internal_auth::unix_now();
-    for expected in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
-        let req = internal_request(&h, "GET", path, now, &empty, Vec::new()).await;
-        let resp = h.router.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), expected);
-    }
 }
 
 #[tokio::test]

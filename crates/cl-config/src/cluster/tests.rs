@@ -16,13 +16,13 @@ fn a_trailing_dot_wins_over_a_bare_label() {
 }
 
 #[test]
-fn mcp_is_on_unless_a_config_turns_it_off() {
-    assert!(McpConfig::default().enabled);
-    assert!(serde_yaml::from_str::<McpConfig>("{}").unwrap().enabled);
-    let off: McpConfig = serde_yaml::from_str("enabled: false").unwrap();
-    assert!(!off.enabled);
-    let round: McpConfig = serde_yaml::from_str(&serde_yaml::to_string(&off).unwrap()).unwrap();
-    assert_eq!(round, off);
+fn mcp_is_off_unless_a_config_turns_it_on() {
+    assert!(!McpConfig::default().enabled);
+    assert!(!serde_yaml::from_str::<McpConfig>("{}").unwrap().enabled);
+    let on: McpConfig = serde_yaml::from_str("enabled: true").unwrap();
+    assert!(on.enabled);
+    let round: McpConfig = serde_yaml::from_str(&serde_yaml::to_string(&on).unwrap()).unwrap();
+    assert_eq!(round, on);
 }
 
 #[test]

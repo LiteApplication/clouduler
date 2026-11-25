@@ -184,7 +184,7 @@ pub fn build(
     // A client whose only network is a container one has no overlay to be primary on, and
     // docker would put it on its default bridge, bypassing the router. Create it on the
     // segment at its pinned address instead. Routers and services with an egress network
-    // keep the legacy layout.
+    // keep the usual layout.
     let (network, ip) = match placement.container_networks.first() {
         Some(att)
             if placement.network.is_none()

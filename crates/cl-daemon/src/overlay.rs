@@ -757,11 +757,7 @@ impl Context_ {
             .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
             .await?;
         // The node address is carried by the node port, with a MAC of its own,
-        // never by the bridge (whose anycast MAC does not cross the tunnel):
-        // this also removes the secondary address earlier versions put there.
-        netlink
-            .reconcile_bridge_addresses(&bridge, gateway, &BTreeSet::new(), subnet.prefix_len())
-            .await?;
+        // never by the bridge (whose anycast MAC does not cross the tunnel).
         let vxlan_index = netlink
             .ensure_vxlan(&VxlanSpec {
                 name: &vxlan,
