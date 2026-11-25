@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,16 +22,19 @@ pub fn ensure_crypto_provider() {
 }
 
 fn signing_key_for(key_pem: &str) -> Result<Arc<dyn rustls::sign::SigningKey>> {
-    let key_der = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .map_err(|e| ProxyError::CertParse(e.to_string()))?
-        .ok_or_else(|| ProxyError::CertParse("no private key found in PEM".to_string()))?;
+    let key_der = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| match e {
+        rustls::pki_types::pem::Error::NoItemsFound => {
+            ProxyError::CertParse("no private key found in PEM".to_string())
+        }
+        e => ProxyError::CertParse(e.to_string()),
+    })?;
     rustls::crypto::aws_lc_rs::sign::any_supported_type(&key_der)
         .map_err(|e| ProxyError::CertParse(e.to_string()))
 }
 
 fn chain_for(chain_pem: &str) -> Result<Vec<CertificateDer<'static>>> {
     let certs: std::result::Result<Vec<_>, _> =
-        rustls_pemfile::certs(&mut chain_pem.as_bytes()).collect();
+        CertificateDer::pem_slice_iter(chain_pem.as_bytes()).collect();
     let certs = certs.map_err(|e| ProxyError::CertParse(e.to_string()))?;
     if certs.is_empty() {
         return Err(ProxyError::CertParse(

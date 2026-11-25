@@ -1,10 +1,22 @@
-# cargo-deny configuration. Only the bans check is configured; run it with
-# `cargo deny check bans`.
+# cargo-deny configuration: bans and advisories. Run it with
+# `cargo deny check bans advisories`.
+#
+# The advisories check reads the live RustSec database, so a new advisory can
+# fail it (locally and in CI) without any change on our side: upgrade the crate
+# or, when no fix exists or it cannot apply, add a justified ignore below.
 #
 # Every skipped entry is an older copy of a crate that is pulled in by a
 # third-party dependency we do not control (mostly age 0.11 on the RustCrypto
 # 0.10 generation, the rand 0.8/0.9 split, and syn 2 vs 3). Direct duplicates
 # that could be unified were unified; revisit this list when those crates move.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 (Marvin timing attack on private-key operations) is reached only through openidconnect 4.0.1, which pins ^0.9 and has no patched release. We only verify OIDC id tokens (id_token_verifier / claims in cl-api auth/oidc.rs and cl-proxy auth_gate.rs) with the provider's public JWKS; no RSA private key is ever loaded, decrypted with or used to sign" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 is pinned by elliptic-curve 0.13 / p256 0.13 via openidconnect 4.0.1 (no compatible release). Leakage needs secret operands; we only verify ES256 id-token signatures, which use public keys and public signatures" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is the frozen cl-drive wire format; the authors call it a complete version. Replacing it would break wire compatibility between nodes" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained (follows chrono) and no replacement release exists; it only formats and parses durations, with no security impact. Also pulled in by humantime-serde" },
+]
 
 [bans]
 multiple-versions = "deny"

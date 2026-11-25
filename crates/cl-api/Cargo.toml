@@ -45,7 +45,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 # MCP server for AI clients: tool/resource protocol plus the streamable-http
 # transport, mounted into the axum router by `mcp`.
-rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server"] }
 
 # Not in the pre-wired list; added here since only cl-api needs them.
 async-stream.workspace = true
@@ -59,7 +59,7 @@ humantime-serde.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
 # For `git2::Oid` only, in `routes::git_backup` - the git2 IO itself all lives
 # in `cl-backup`.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }
 
 [features]
 # Derive TypeScript bindings for the wire types (see docs/content/contributing/typescript-bindings).

@@ -54,7 +54,7 @@ impl GitBackup {
         };
 
         match repo.find_remote("origin") {
-            Ok(remote) if remote.url() == Some(repo_url) => {}
+            Ok(remote) if remote.url().ok() == Some(repo_url) => {}
             Ok(_) => {
                 repo.remote_delete("origin")?;
                 repo.remote("origin", repo_url)?;
@@ -479,14 +479,14 @@ impl GitBackup {
             return Ok(out);
         };
         for stack in tf.iter() {
-            let Some(stack_name) = stack.name() else {
+            let Some(stack_name) = stack.name().ok() else {
                 continue;
             };
             let Ok(stack_tree) = stack.to_object(&self.repo)?.into_tree() else {
                 continue;
             };
             for entry in stack_tree.iter() {
-                if let Some(name) = entry.name().filter(|n| n.ends_with(".tfstate.age")) {
+                if let Some(name) = entry.name().ok().filter(|n| n.ends_with(".tfstate.age")) {
                     out.insert(format!("{stack_name}/{name}"), entry.id());
                 }
             }
@@ -714,7 +714,7 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
                     reason: "not a tree".to_string(),
                 })?;
         for entry in stacks_tree.iter() {
-            let Some(name) = entry.name() else {
+            let Some(name) = entry.name().ok() else {
                 continue;
             };
             let Some(yaml_name) = name.strip_suffix(".yaml") else {
@@ -743,7 +743,7 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
                     reason: "not a tree".to_string(),
                 })?;
         for entry in configs_tree.iter() {
-            let Some(name) = entry.name() else {
+            let Some(name) = entry.name().ok() else {
                 continue;
             };
             let content = entry
@@ -769,7 +769,7 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
                     reason: "not a tree".to_string(),
                 })?;
         for entry in secrets_tree.iter() {
-            let Some(name) = entry.name() else {
+            let Some(name) = entry.name().ok() else {
                 continue;
             };
             let Some(age_name) = name.strip_suffix(".age") else {
@@ -799,7 +799,7 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
                     reason: "not a tree".to_string(),
                 })?;
         for stack_entry in tf_tree.iter() {
-            let Some(stack) = stack_entry.name() else {
+            let Some(stack) = stack_entry.name().ok() else {
                 continue;
             };
             // Stray files directly under terraform/ are ignored.
@@ -807,7 +807,7 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
                 continue;
             };
             for entry in stack_tree.iter() {
-                let Some(name) = entry.name() else {
+                let Some(name) = entry.name().ok() else {
                     continue;
                 };
                 let Ok(blob) = entry.to_object(repo)?.into_blob() else {
@@ -1000,7 +1000,7 @@ mod tests {
             .expect("has target");
         assert_eq!(remote_tip, oid.unwrap());
         let commit = remote_repo.find_commit(remote_tip).expect("find commit");
-        assert_eq!(commit.message(), Some("add cluster.yaml"));
+        assert_eq!(commit.message().ok(), Some("add cluster.yaml"));
     }
 
     #[test]
@@ -1368,7 +1368,7 @@ mod tests {
             .find_commit(preserved_ref.target().expect("preserved target"))
             .expect("find explanation commit");
         assert_eq!(
-            explanation_commit.message(),
+            explanation_commit.message().ok(),
             Some("rejected: stack broken.yaml failed to parse")
         );
         assert_eq!(explanation_commit.parent_id(0).expect("parent"), bad_oid);
@@ -1494,7 +1494,7 @@ mod tests {
             .find_commit(preserved_ref.target().expect("preserved target"))
             .expect("find explanation commit");
         assert_eq!(
-            explanation_commit.message(),
+            explanation_commit.message().ok(),
             Some("rejected: cluster.yaml failed to parse")
         );
         assert_eq!(explanation_commit.parent_id(0).expect("parent"), bad_oid);
@@ -1738,7 +1738,7 @@ mod tests {
 
         let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
         let commit = remote_repo.find_commit(oid).expect("find commit");
-        assert_eq!(commit.author().name(), Some("alice"));
-        assert_eq!(commit.author().email(), Some("alice@example.com"));
+        assert_eq!(commit.author().name().ok(), Some("alice"));
+        assert_eq!(commit.author().email().ok(), Some("alice@example.com"));
     }
 }
