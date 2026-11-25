@@ -178,6 +178,27 @@ export function SettingsUpdate() {
   );
 }
 
+/** The two ways to update when releases must be crossed one series at a time. */
+function UpdateModeChoice({ steps, onChange }: { steps: string[]; onChange: (m: 'all' | 'first') => void }) {
+  const [mode, setMode] = useState<'all' | 'first'>('all');
+  const pick = (m: 'all' | 'first') => { setMode(m); onChange(m); };
+  return (
+    <div className="stack">
+      <p className="cl-sm cl-muted">
+        Updates go through the last patch of each minor series first. Nodes download each release, then restart one at a time.
+      </p>
+      <label className="li">
+        <input type="radio" name="update-mode" checked={mode === 'all'} onChange={() => pick('all')} />
+        <span><strong>Update step by step</strong> to {steps[steps.length - 1]}<br /><span className="cl-sm cl-muted">{steps.join(' → ')}, one after the other. Keep this page open: the steps are driven from your browser.</span></span>
+      </label>
+      <label className="li">
+        <input type="radio" name="update-mode" checked={mode === 'first'} onChange={() => pick('first')} />
+        <span><strong>Update to {steps[0]} only</strong><br /><span className="cl-sm cl-muted">Install this one step now and come back for the rest later.</span></span>
+      </label>
+    </div>
+  );
+}
+
 /** The cluster's own release: what runs, what is available, per-node phases, Start / Cancel. */
 export function SelfUpdatePanel() {
   const cluster = useClusterState();
@@ -253,15 +274,7 @@ export function SelfUpdatePanel() {
     return `Timed out waiting for ${tag}.`;
   };
 
-  const stepByStep = async () => {
-    if (!path || path.length < 2) return;
-    const steps = path;
-    if (!(await confirm({
-      title: 'Update step by step?',
-      body: `This installs ${steps.join(', then ')}, one after the other, waiting for each to finish. Keep this page open: the steps are driven from your browser.`,
-      confirmLabel: 'Start',
-      confirmVariant: 'primary',
-    }))) return;
+  const runSteps = async (steps: string[]) => {
     stopRequested.current = false;
     setError(null);
     try {
@@ -299,13 +312,19 @@ export function SelfUpdatePanel() {
   const start = async () => {
     const tag = path?.[0] ?? latest?.tag;
     const label = tag ?? 'the latest release';
+    const multi = !!path && path.length > 1;
+    const mode = { current: 'all' as 'all' | 'first' };
     const ok = await confirm({
-      title: `Update to ${label}?`,
-      body: 'Nodes download the release, then restart one at a time once all are ready.',
-      confirmLabel: `Update to ${label}`,
+      title: multi ? 'Update Clouduler' : `Update to ${label}?`,
+      body: multi
+        ? <UpdateModeChoice steps={path} onChange={(m) => { mode.current = m; }} />
+        : 'Nodes download the release, then restart one at a time once all are ready.',
+      confirmLabel: multi ? 'Update' : `Update to ${label}`,
       confirmVariant: 'primary',
     });
-    if (ok) await attempt(() => api.startSelfUpdate(path?.[0]), 'Could not start the update.');
+    if (!ok) return;
+    if (multi && mode.current === 'all') await runSteps(path);
+    else await attempt(() => api.startSelfUpdate(path?.[0]), 'Could not start the update.');
   };
 
   const cancel = async () => {
@@ -333,8 +352,7 @@ export function SelfUpdatePanel() {
             ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
             : (
               <>
-                {path && path.length > 1 && <Button variant="secondary" icon="play" disabled={busy || !repo} onClick={() => void stepByStep()}>Update step by step</Button>}
-                <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer ? ` to ${path?.[0] ?? latest?.tag}` : ''}</Button>
+                <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer && !(path && path.length > 1) ? ` to ${path?.[0] ?? latest?.tag}` : ''}</Button>
               </>
             ))}
       >

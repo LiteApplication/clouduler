@@ -52,8 +52,9 @@ describe('SelfUpdatePanel step by step', () => {
     api.startSelfUpdate.mockResolvedValue(runState('v0.17.3'));
     renderPanel();
     await screen.findByText(/v0\.17\.3 → v0\.18\.2 → v0\.19\.0/);
-    await userEvent.click(screen.getByRole('button', { name: /Start update to v0\.17\.3/ }));
-    await userEvent.click(await screen.findByRole('button', { name: 'Update to v0.17.3' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Start update' }));
+    await userEvent.click(await screen.findByLabelText(/Update to v0\.17\.3 only/));
+    await userEvent.click(await screen.findByRole('button', { name: 'Update' }));
     expect(api.startSelfUpdate).toHaveBeenCalledWith('v0.17.3');
   });
 
@@ -67,8 +68,8 @@ describe('SelfUpdatePanel step by step', () => {
     });
     renderPanel();
     await screen.findByText(/v0\.17\.3 → v0\.18\.2/);
-    await userEvent.click(screen.getByRole('button', { name: 'Update step by step' }));
-    await userEvent.click(await screen.findByRole('button', { name: 'Start' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Start update' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Update' }));
     await screen.findByText(/Step 1 of 3: v0\.17\.3/);
     await screen.findByText(/Step 2 of 3 \(v0\.18\.2\) failed: node a did not come back/, {}, { timeout: 15000 });
     expect(api.startSelfUpdate.mock.calls.map((c) => c[0])).toEqual(['v0.17.3', 'v0.18.2']);
@@ -79,6 +80,6 @@ describe('SelfUpdatePanel step by step', () => {
     api.selfUpdateReleases.mockResolvedValue({ tags: ['v0.18.2', 'v0.18.0'] });
     renderPanel();
     await screen.findByRole('button', { name: /Start update to v0\.18\.2/ });
-    expect(screen.queryByRole('button', { name: 'Update step by step' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start update to v0.18.2' })).toBeInTheDocument();
   });
 });
