@@ -188,7 +188,7 @@ TARGET is an instance id (`stack.service.index`, for example `immich.server.0`) 
 - **update** answers when the work is scheduled, not when it is done. Output: `updating N instance(s):` or `nothing to update`. Same action as the Updates page.
 - **rebalance** reads live memory and CPU from a daemon (the `--via` node, else the first manager); if that fails it warns and uses declared memory limits. It never moves instances pinned to a node, published on a proxy hostname, already migrating, or with nowhere else to go. Prints `N move(s) planned:` and `INSTANCE : FROM -> TO`, or `already balanced, nothing to move`.
 - **prioritize** makes the stack's instances start first (ahead of every `x-clouduler.priority`, and the last to be stopped by a fenced node) and makes the volumes on its drives sync first when several are due together. It stays in force until `prioritize --reset`, and while it does the alerts show a `stack.prioritized` warning with a reset button. It is refused for a stack that is not deployed, and removing the stack drops it.
-- **clear-errors** clears failed backup runs, restores, image updates, migrations, certificate and DNS errors, and failed alert deliveries. A failure that is still happening is reported again by its next attempt.
+- **clear-errors** clears failed backup runs, restores, image updates, migrations, certificate and DNS errors, failed alert deliveries, and crash-loop reschedule history. A failure that is still happening is reported again by its next attempt.
 
 ## Secrets and registry logins
 

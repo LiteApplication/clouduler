@@ -103,6 +103,7 @@ impl ClusterState {
                     statuses.retain(|_, s| !matches!(s, ReconcileStatus::Error { .. }));
                 }
                 self.alert_destinations.retain(|_, h| h.ok);
+                self.crash_moves.clear();
                 Ok(())
             }
 

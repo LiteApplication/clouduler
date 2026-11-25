@@ -20,8 +20,15 @@ fn clear_errors_drops_failures_and_keeps_everything_else() {
     state
         .dns_status
         .insert("b.example.com".into(), ReconcileStatus::Pending);
+    state
+        .crash_moves
+        .entry(InstanceId::new("gitlab", "web", 0))
+        .or_default()
+        .insert("n1".into(), 1);
 
     assert!(state.apply(&Request::ClearErrors).is_ok());
+
+    assert!(state.crash_moves.is_empty());
 
     assert!(!state.restore_requests.contains_key("failed"));
     assert!(state.restore_requests.contains_key("pending"));

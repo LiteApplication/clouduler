@@ -131,7 +131,7 @@ A failed move shows on the instance page with buttons **Try moving to NODE again
 
 ## Clear recorded errors
 
-`clear-errors` forgets recorded failures so they stop being reported as problems: failed backup runs and restores, failed image updates, failed migrations, certificate and DNS errors, and alert destinations whose last delivery failed. Running, pending and succeeded records stay. A failure that is still happening is reported again by its next attempt. CLI only.
+`clear-errors` forgets recorded failures so they stop being reported as problems: failed backup runs and restores, failed image updates, failed migrations, certificate and DNS errors, alert destinations whose last delivery failed, and crash-loop reschedule history (the "moved off a node after crashing" problem). Running, pending and succeeded records stay. A failure that is still happening is reported again by its next attempt. CLI only.
 
 ```bash
 clouduler clear-errors      # cleared 3 failed backup runs, 1 failed migrations
