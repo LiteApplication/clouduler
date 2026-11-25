@@ -191,7 +191,10 @@ fn version_parts(v: &str) -> Vec<u64> {
 fn is_older(tag: &str, running: &str) -> bool {
     let (a, b) = (version_parts(tag), version_parts(running));
     for i in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x < y;
         }
@@ -453,7 +456,8 @@ mod tests {
 
     #[test]
     fn the_error_names_both_versions() {
-        let ApiError::BadRequest(msg) = check_downgrade("v0.1.0", "0.2.0", false).unwrap_err() else {
+        let ApiError::BadRequest(msg) = check_downgrade("v0.1.0", "0.2.0", false).unwrap_err()
+        else {
             panic!("expected a 400");
         };
         assert_eq!(

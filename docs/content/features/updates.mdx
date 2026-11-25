@@ -40,7 +40,8 @@ sequenceDiagram
 4. **Download.** Every node downloads its asset and records a blake3 hash. Releases publish no checksum, so the only integrity check is that all nodes of one architecture must get identical bytes.
 5. **Restart in a fixed order.** Workers (sorted by name), then non-leader managers, then the leader last. One node at a time. Before replacing anything, the node runs the new binary with `--version` (10 seconds) and refuses it if that fails. The old binary is kept as `<name>.old`.
 6. **Wait.** A node is Done once it is reachable and reports the new hash. If it does not come back within 180 seconds the run fails.
-7. **Local rollback.** After a restart the node is on probation. If the new binary starts more than 3 times without rejoining the cluster, or has not rejoined after 150 seconds, the node puts the previous binary back and exits. The next start logs `the last update was rolled back, this is the previous version`.
+7. **Git commit.** If [git backup](/docs/features/git-backup) is on and the run finished with every node Done (and no emergency mode), the next export commits `Upgrade Clouduler to <tag>` even when nothing else changed. A failed or cancelled run commits nothing.
+8. **Local rollback.** After a restart the node is on probation. If the new binary starts more than 3 times without rejoining the cluster, or has not rejoined after 150 seconds, the node puts the previous binary back and exits. The next start logs `the last update was rolled back, this is the previous version`.
 
 If a run fails or is cancelled, nodes that already restarted stay on the new version, so the cluster can end up on mixed versions.
 
