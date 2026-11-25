@@ -45,6 +45,26 @@ export function implicitPublicEdges(networks: Networks): [string, string][] {
   return out;
 }
 
+/** Only these kinds carry a per-target `shortcut` map (client DNS side). */
+export function canHaveShortcut(kind: NetworkKind): boolean {
+  return kind === 'internal' || kind === 'private';
+}
+
+/** Whether clients on `from` get the shortcut answer towards routes on `to` (default true). */
+export function shortcutOn(networks: Networks, from: string, to: string): boolean {
+  const net = networks[from];
+  if (!net || !canHaveShortcut(net.type)) return true;
+  return net.shortcut?.[to] !== false;
+}
+
+/** The `shortcut` map after setting one link; `undefined` when it ends up empty. */
+export function withShortcut(net: NetworkConfig, to: string, on: boolean): Record<string, boolean> | undefined {
+  const next = { ...(net.shortcut ?? {}) };
+  if (on) delete next[to];
+  else next[to] = false;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 export function reachedBy(networks: Networks, name: string): string[] {
   return explicitEdges(networks).filter(([, b]) => b === name).map(([a]) => a).sort();
 }

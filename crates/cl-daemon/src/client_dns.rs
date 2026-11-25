@@ -224,6 +224,19 @@ struct Entry {
     private_shortcut: bool,
 }
 
+impl Entry {
+    /// Whether a client on `client_net` may be answered with a node's address
+    /// on its own network: the route allows it and so does the client
+    /// network's per link `shortcut` setting towards the route's network.
+    fn shortcut_for(&self, cfg: &ClusterConfig, client_net: &str) -> bool {
+        self.private_shortcut
+            && cfg
+                .networks
+                .get(client_net)
+                .is_none_or(|n| n.shortcut.get(&self.network) != Some(&false))
+    }
+}
+
 /// One view per network a client can be in (every subnetted and public
 /// network), from the hostnames the proxy serves (`hosts`, as built by
 /// `proxy::desired_dns_hosts`) plus the dashboard on the leader alone.
@@ -421,7 +434,34 @@ fn answers_for(
             }
             // A dotted name is used as is, so the network only picks the
             // address.
-            let own_net = if entry.private_shortcut {
+            let shortcut = entry.shortcut_for(cfg, client_net);
+            // A node with no address on the client's subnetted network cannot
+            // be reached from it, but every node's proxy (or expose forwarder)
+            // relays to the real owner, so any node that has one will do.
+            if shortcut
+                && client_net != entry.network
+                && cfg.networks.get(client_net).is_some_and(|n| n.kind.is_subnetted())
+                && !cfg.is_managed_network(client_net)
+                && node.ip_on(client_net).is_none()
+            {
+                let relays: Vec<DesiredRecord> = cfg
+                    .nodes
+                    .values()
+                    .filter(|other| other.ip_on(client_net).is_some())
+                    .filter_map(|other| records_for(cfg, fqdn, client_net, other).ok())
+                    .flatten()
+                    .filter(|r| matches!(r.kind, RecordType::A | RecordType::AAAA))
+                    .filter(|r| match r.content.parse::<IpAddr>() {
+                        Ok(ip) => client_can_reach(cfg, client_net, ip),
+                        Err(_) => false,
+                    })
+                    .collect();
+                if !relays.is_empty() {
+                    records.extend(relays);
+                    continue;
+                }
+            }
+            let own_net = if shortcut {
                 client_net
             } else {
                 &entry.network
@@ -744,9 +784,68 @@ mod tests {
             &BTreeSet::new(),
             None,
         );
+        // Every node's proxy relays to the owner, so a node that has a LAN
+        // address answers for it (n1 here).
+        assert_eq!(
+            answer(&views, "lan", "blog.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
+        );
+        // No node has one: the route's own address, as before.
+        cfg.nodes.get_mut("n1").unwrap().network.remove("lan");
+        let views = views_for(
+            &cfg,
+            &alloc(),
+            &hosts(&[("blog", "wan", &["n2"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "lan", "blog.example.com"),
             Some(&[ViewAnswer::Cname("n2.example.net".into())][..])
+        );
+    }
+
+    /// `shortcut: { wan: false }` on the LAN gives LAN clients the route's own
+    /// address, while the tailnet (no key) keeps the shortcut.
+    #[test]
+    fn a_per_link_shortcut_setting_only_affects_that_client_network() {
+        let mut cfg = cfg();
+        cfg.networks
+            .get_mut("lan")
+            .unwrap()
+            .shortcut
+            .insert("wan".into(), false);
+        let views = views_for(
+            &cfg,
+            &alloc(),
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
+        assert_eq!(
+            answer(&views, "lan", "blog.example.com"),
+            answer(&views, "wan", "blog.example.com")
+        );
+        assert_eq!(
+            answer(&views, "tailscale", "blog.example.com"),
+            Some(&[a([10, 10, 0, 1])][..])
+        );
+        // An explicit true is the default.
+        cfg.networks
+            .get_mut("lan")
+            .unwrap()
+            .shortcut
+            .insert("wan".into(), true);
+        let views = views_for(
+            &cfg,
+            &alloc(),
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
+        assert_eq!(
+            answer(&views, "lan", "blog.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
         );
     }
 

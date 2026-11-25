@@ -45,6 +45,35 @@ fn wireguard_network_takes_a_bare_interface_name() {
     assert!(err.to_string().contains("takes a bare host interface name"));
 }
 
+#[test]
+fn shortcut_is_a_per_link_map_on_subnetted_networks() {
+    let cfg = parse(&[(
+        "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }",
+        "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, shortcut: { wan: false } }",
+    )])
+    .expect("valid");
+    assert_eq!(cfg.networks["lan"].shortcut.get("wan"), Some(&false));
+    let yaml = serde_yaml::to_string(&cfg).unwrap();
+    assert_eq!(ClusterConfig::parse(&yaml).unwrap(), cfg);
+    // Absent when empty.
+    let plain = ClusterConfig::parse(BASE).unwrap();
+    assert!(!serde_yaml::to_string(&plain).unwrap().contains("shortcut"));
+
+    let err = parse(&[(
+        "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }",
+        "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, shortcut: { nope: false } }",
+    )])
+    .unwrap_err();
+    assert!(err.to_string().contains("no network named nope"), "{err}");
+
+    let err = parse(&[(
+        "wan:       { type: public,   domain: example.com }",
+        "wan:       { type: public,   domain: example.com, shortcut: { lan: false } }",
+    )])
+    .unwrap_err();
+    assert!(err.to_string().contains("only allowed on internal and private"), "{err}");
+}
+
 /// Two distinct names whose derived value (octet or table id) collides,
 /// found by search so the test does not hard-code a hash.
 fn colliding_names<K: PartialEq + Ord>(key: impl Fn(&str) -> K) -> (String, String) {

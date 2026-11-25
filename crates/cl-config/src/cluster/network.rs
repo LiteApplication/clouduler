@@ -89,6 +89,13 @@ pub struct Network {
     /// network instead of following `proxy.dns_publish`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub proxy: bool,
+    /// Internal and private networks only: per link (this network as the
+    /// client side, the key as the target network a route lives on), whether
+    /// the client DNS server (`proxy.dns_server`) answers clients here with the
+    /// node's address on this network (the shortcut) instead of the route's own.
+    /// A missing key means `true`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shortcut: BTreeMap<String, bool>,
 }
 
 /// One port a managed network exposes on the address of the node holding the

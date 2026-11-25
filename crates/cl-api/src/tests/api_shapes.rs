@@ -121,6 +121,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: Some(cl_config::ContainerNetwork {
                     stack: "web".to_string(),
                     service: "app".to_string(),

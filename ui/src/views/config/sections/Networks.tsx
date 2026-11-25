@@ -4,7 +4,7 @@ import type { ClusterConfig, NetworkConfig, NetworkKind } from '../../../api/typ
 import { canServeDns, isLastServed, isServingDns, removeDnsNetwork, renameDnsNetwork, toggleDnsNetwork } from '../dnsServerNetworks';
 import { BottomSheet } from '../../../ds';
 import { NetworkGraph } from '../NetworkGraph';
-import { canHaveAccess, validTargets } from '../networkAccess';
+import { canHaveAccess, canHaveShortcut, shortcutOn, validTargets, withShortcut } from '../networkAccess';
 import { Icon } from '../../../components/Icon';
 import { CheckboxField, CidrField, SelectField, TextField } from '../../../components/FormFields';
 import { managedNetworkError } from '../../../lib/managedNetwork';
@@ -34,6 +34,13 @@ export function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newN
   for (const [n, c] of Object.entries(networks)) {
     if (c.access?.includes(oldName)) {
       networks[n] = { ...c, access: c.access.map((a) => (a === oldName ? newName : a)) };
+    }
+  }
+
+  for (const [n, c] of Object.entries(networks)) {
+    if (c.shortcut && oldName in c.shortcut) {
+      const { [oldName]: v, ...rest } = c.shortcut;
+      networks[n] = { ...c, shortcut: { ...rest, [newName]: v } };
     }
   }
 
@@ -73,6 +80,14 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
     const next = { ...draft.networks[from] };
     if (access === undefined) delete next.access;
     else next.access = access;
+    setDraft({ ...draft, networks: { ...draft.networks, [from]: next } });
+  };
+
+  const setShortcut = (from: string, to: string, on: boolean) => {
+    const next = { ...draft.networks[from] };
+    const sc = withShortcut(next, to, on);
+    if (sc) next.shortcut = sc;
+    else delete next.shortcut;
     setDraft({ ...draft, networks: { ...draft.networks, [from]: next } });
   };
 
@@ -129,6 +144,26 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
                 {!disabled && sheetNet.access != null && (
                   <button onClick={() => setAccess(sheetName, undefined)}>Unrestricted host firewall</button>
                 )}
+              </div>
+            )}
+            {canHaveShortcut(sheetNet.type) && (
+              <div className="net-access">
+                <h4>DNS shortcut per target</h4>
+                {validTargets(draft.networks, sheetName)
+                  .filter((t) => draft.networks[t].type !== 'container')
+                  .map((t) => (
+                    <CheckboxField
+                      key={t}
+                      id={`net-${sheetName}-shortcut-${t}`}
+                      label={`Shortcut to ${t}`}
+                      value={shortcutOn(draft.networks, sheetName, t)}
+                      onChange={(v) => setShortcut(sheetName, t, v)}
+                      hint={`Clients on ${sheetName} asking for a route on ${t} get this node's address on ${sheetName}.`}
+                      help={`On (default): the cluster DNS answers clients on ${sheetName} with the node's address on ${sheetName} for routes on ${t}, so traffic stays on ${sheetName}. Off: they get ${t}'s own address. A route's private_shortcut: false also turns it off.`}
+                      configKey={`networks.${sheetName}.shortcut`}
+                      disabled={disabled}
+                    />
+                  ))}
               </div>
             )}
           </>

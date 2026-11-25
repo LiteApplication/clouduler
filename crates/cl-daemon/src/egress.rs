@@ -847,6 +847,7 @@ mod tests {
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: None,
             },
         );
@@ -861,6 +862,7 @@ mod tests {
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: None,
             },
         );

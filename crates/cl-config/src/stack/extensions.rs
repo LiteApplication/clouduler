@@ -373,6 +373,17 @@ pub struct ExposePort {
     /// request, so enable it on the backend first. TCP only; rejected on UDP.
     #[serde(default, skip_serializing_if = "is_false")]
     pub proxy_protocol: bool,
+    /// A hostname published for this port like a proxy route's `host` on
+    /// `network` (DNS only: no TLS and no proxy routing, the port itself is
+    /// what clients connect to). The network must have a domain. Published on
+    /// every node, as the port is bound on each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Same as `ProxyRoute::private_shortcut`, for `host`: false makes the
+    /// client DNS server answer every client with the expose network's own
+    /// address instead of the node's address on the client's network.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub private_shortcut: bool,
 }
 
 fn is_default_protocol(p: &Protocol) -> bool {

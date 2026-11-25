@@ -213,7 +213,9 @@ Clouduler picks the stack's **overlay network** (the one that provides DNS and a
   {"key": "services.SVC.x-clouduler.proxy[].network", "type": "name", "reload": "n/a", "required": true, "description": "Network a route is published on. Decides gating.", "quirks": "Must have a domain."},
   {"key": "services.SVC.x-clouduler.expose[].network", "type": "name", "reload": "n/a", "required": true, "description": "Network whose reachability gates placement.", "quirks": "For public or wireguard, some node must list the port in open_ports."},
   {"key": "services.SVC.x-clouduler.expose[].published", "type": "u16", "reload": "n/a", "required": true, "description": "Port bound on every node.", "quirks": "Unique within a stack. Across stacks the first by name wins and the other is ignored with a warning."},
-  {"key": "services.SVC.x-clouduler.expose[].proxy_protocol", "type": "bool", "default": "false", "reload": "n/a", "description": "Send a PROXY v2 header with the real client address. TCP only."}
+  {"key": "services.SVC.x-clouduler.expose[].proxy_protocol", "type": "bool", "default": "false", "reload": "n/a", "description": "Send a PROXY v2 header with the real client address. TCP only."},
+  {"key": "services.SVC.x-clouduler.expose[].host", "type": "hostname", "reload": "live", "description": "Publish a DNS name for the port on the expose network (needs a domain), for every node. DNS only: no TLS and no proxy routing."},
+  {"key": "services.SVC.x-clouduler.expose[].private_shortcut", "type": "bool", "default": "true", "reload": "live", "description": "false makes the client DNS server answer every client with the expose network's own address for `host` instead of the node's address on the client's network."}
 ]} />
 
 Stack networks must exist in the cluster, and some node must implement each one (except nat and container). Add the node's address first, then deploy. The CLI says `no network named NET declared in the cluster` or `no node implements network NET, this service could never be placed`. The web UI does not check this at deploy time; the same problem shows up on the stack's Placement tab (see [Placement](/docs/features/placement)).
@@ -269,7 +271,7 @@ services:
 {/* TODO verify: code confirms `expose` binds 0.0.0.0 on every node regardless of network; ask the owner whether that is intended. */}
 </Quirk>
 
-`expose` forwards in user space, so the backend sees the node's bridge address as the client. Use `proxy_protocol: true` (TCP only) and enable PROXY protocol v2 on the backend first, or the connection breaks. A published port with no running instance stays bound and refuses connections.
+`expose` forwards in user space, so the backend sees the node's bridge address as the client. Use `proxy_protocol: true` (TCP only) and enable PROXY protocol v2 on the backend first, or the connection breaks. A published port with no running instance stays bound and refuses connections. Set `host:` on an entry to publish a DNS name for it on the expose network (the network needs a domain): one record per node, since every node binds the port, and the client DNS server answers it like a proxy route's hostname, including `private_shortcut: false`. Nothing is served for the name beyond the port itself.
 
 ### Where DNS and proxy settings live
 

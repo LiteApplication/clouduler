@@ -33,6 +33,30 @@ fn private_shortcut_false_is_accepted_on_any_route_network() {
 }
 
 #[test]
+fn expose_host_needs_a_network_with_a_domain() {
+    let cluster = ClusterConfig::parse(include_str!("../../../../../../examples/cluster.yaml"))
+        .expect("reference cluster is valid");
+    let spec = |net: &str| {
+        format!(
+            "services:\n  a:\n    image: x\n    x-clouduler:\n      expose:\n        - {{ port: 53, published: 53, network: {net}, host: dns, private_shortcut: false }}\n"
+        )
+    };
+    let file = StackFile::parse(&spec("lan")).unwrap();
+    file.validate(&cluster).unwrap();
+    let e = &file.services["a"].x_clouduler.as_ref().unwrap().expose[0];
+    assert_eq!(e.host.as_deref(), Some("dns"));
+    assert!(!e.private_shortcut);
+
+    let mut nodomain = cluster.clone();
+    nodomain.networks.get_mut("lan").unwrap().domain = None;
+    let err = StackFile::parse(&spec("lan"))
+        .unwrap()
+        .validate(&nodomain)
+        .unwrap_err();
+    assert!(err.to_string().contains("no domain"), "{err}");
+}
+
+#[test]
 fn cloudflare_proxy_is_public_networks_only() {
     let cluster = ClusterConfig::parse(include_str!("../../../../../../examples/cluster.yaml"))
         .expect("reference cluster is valid");

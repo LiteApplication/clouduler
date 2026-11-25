@@ -52,4 +52,12 @@ open_ports?: Array<ManagedOpenPort>,
  * network's hostnames on any node, and their DNS is published for the
  * network instead of following `proxy.dns_publish`.
  */
-proxy?: boolean, };
+proxy?: boolean, 
+/**
+ * Internal and private networks only: per link (this network as the
+ * client side, the key as the target network a route lives on), whether
+ * the client DNS server (`proxy.dns_server`) answers clients here with the
+ * node's address on this network (the shortcut) instead of the route's own.
+ * A missing key means `true`.
+ */
+shortcut?: { [key in string]: boolean }, };

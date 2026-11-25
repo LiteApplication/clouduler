@@ -511,6 +511,7 @@ services:
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: None,
             },
         );

@@ -16,12 +16,15 @@
   stroke-dasharray: 6 8;
   animation: cl-ng-flow 0.9s linear infinite;
 }
+.cl-ng__edge--noshortcut { stroke: var(--warn); stroke-width: 2; stroke-dasharray: 12 5; }
+.cl-ng__edge--noshortcut-dim { stroke: var(--warn); opacity: 0.6; }
+.cl-ng__head--noshortcut { fill: var(--warn); }
 .cl-ng__edge--solid { stroke: var(--brand); stroke-width: 2; }
 .cl-ng__edge--implicit { stroke: var(--line-strong); stroke-width: 1; opacity: 0.35; stroke-dasharray: 2 5; }
 .cl-ng__head { fill: var(--brand); }
 .cl-ng__head--dim { fill: var(--line-strong); opacity: 0.45; }
 .cl-ng__hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; pointer-events: stroke; }
-.cl-ng__hit:hover + *, .cl-ng__edgeg:hover .cl-ng__edge--flow { stroke: var(--danger); }
+.cl-ng__hit:hover + *, .cl-ng__edgeg:hover .cl-ng__edge--flow, .cl-ng__edgeg:hover .cl-ng__edge--noshortcut { stroke: var(--danger); }
 .cl-ng__hit:focus-visible { stroke: var(--danger); stroke-opacity: 0.35; outline: none; }
 .cl-ng__rubber { stroke: var(--pop); stroke-width: 2; stroke-dasharray: 4 4; pointer-events: none; }
 

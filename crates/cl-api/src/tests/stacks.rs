@@ -101,6 +101,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
                     managed: false,
                     open_ports: Vec::new(),
                     proxy: false,
+                    shortcut: Default::default(),
                     container: None,
                 },
             );

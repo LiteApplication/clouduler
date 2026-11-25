@@ -103,6 +103,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         managed: false,
         open_ports: Vec::new(),
         proxy: false,
+        shortcut: Default::default(),
         container: None,
         domain: plan.internal_domain.clone(),
     };

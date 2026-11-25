@@ -115,6 +115,7 @@ pub(crate) async fn harness() -> Harness {
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: None,
             },
         )]),

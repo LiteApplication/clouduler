@@ -172,7 +172,11 @@ x-clouduler:
       private_shortcut: false
 ```
 
-Clients on private networks are then answered with the route's public address like everyone else. If any route behind a hostname sets it to `false`, the shortcut is off for that hostname. This only changes DNS answers; a client that connects straight to a node's private IP still reaches the proxy.
+Clients on private networks are then answered with the route's public address like everyone else. If any route behind a hostname sets it to `false`, the shortcut is off for that hostname. This only changes DNS answers; a client that connects straight to a node's private IP still reaches the proxy. The same `private_shortcut` exists on an `x-clouduler.expose` entry that sets `host`.
+
+The shortcut can also be set per link in `cluster.yaml`: `networks.<client network>.shortcut` maps a target network name to a bool, and `shortcut: { wan: false }` on `lan` answers LAN clients with the route's own address for every route on `wan`, while other client networks keep the shortcut. Only internal and private networks take it; a missing key means `true`. It combines with the route's `private_shortcut`: the shortcut applies only if neither turns it off.
+
+When the shortcut applies but the node serving a route has no address on the client's network, the client is answered with the address on its own network of every other node that has one, since each node's proxy (or expose forwarder) relays to the real owner. Only if no node has one is the route network's address used.
 </Quirk>
 
 <Quirk title="Only the leader publishes" severity="info">

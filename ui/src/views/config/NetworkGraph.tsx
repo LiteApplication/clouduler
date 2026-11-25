@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as RPointerEvent } from 'react';
 import type { NetworkConfig } from '../../api/types';
 import { useConfirm } from '../../ds';
-import { canHaveAccess, explicitEdges, implicitPublicEdges, isAccessTarget } from './networkAccess';
+import { canHaveAccess, explicitEdges, implicitPublicEdges, isAccessTarget, canHaveShortcut, shortcutOn } from './networkAccess';
 import { createLayout, settle, step, syncNodes, reheat, clampToBounds, type LayoutState, type Size } from './networkGraphLayout';
 import './networkGraph.css';
 
@@ -292,6 +292,9 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
           <marker id="cl-ng-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
             <path className="cl-ng__head" d="M0,1 L9,5 L0,9 z" />
           </marker>
+          <marker id="cl-ng-arrow-noshortcut" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
+            <path className="cl-ng__head cl-ng__head--noshortcut" d="M0,1 L9,5 L0,9 z" />
+          </marker>
           <marker id="cl-ng-arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto" markerUnits="userSpaceOnUse">
             <path className="cl-ng__head cl-ng__head--dim" d="M0,1 L9,5 L0,9 z" />
           </marker>
@@ -299,16 +302,41 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
 
         {implicit.map(([a, b]) => {
           const g = geometry(a, b, 12);
-          return g && <path key={`i-${a}-${b}`} className="cl-ng__edge cl-ng__edge--implicit" d={g.d} markerEnd="url(#cl-ng-arrow-dim)" />;
+          const off = !shortcutOn(networks, a, b);
+          return (
+            g && (
+              <path
+                key={`i-${a}-${b}`}
+                className={`cl-ng__edge cl-ng__edge--implicit${off ? ' cl-ng__edge--noshortcut-dim' : ''}`}
+                d={g.d}
+                markerEnd="url(#cl-ng-arrow-dim)"
+              >
+                {off && <title>{`Shortcut off: clients on ${a} get ${b}'s own addresses`}</title>}
+              </path>
+            )
+          );
         })}
 
         {explicit.map(([a, b]) => {
           const mutual = hasEdge(b, a);
           const g = geometry(a, b, mutual ? 30 : 14);
           if (!g) return null;
+          const off = !shortcutOn(networks, a, b);
+          const tip = canHaveShortcut(networks[a].type)
+            ? off
+              ? `Shortcut off: clients on ${a} get the address of ${b} itself`
+              : `Shortcut on: clients on ${a} get this node's address on ${a}`
+            : null;
           return (
             <g key={`e-${a}-${b}`} className="cl-ng__edgeg">
-              <path className="cl-ng__edge cl-ng__edge--flow" d={g.d} markerEnd="url(#cl-ng-arrow)" />
+              <path
+                className={`cl-ng__edge ${off ? 'cl-ng__edge--noshortcut' : 'cl-ng__edge--flow'}`}
+                d={g.d}
+                markerEnd={off ? 'url(#cl-ng-arrow-noshortcut)' : 'url(#cl-ng-arrow)'}
+                data-shortcut={off ? 'off' : 'on'}
+              >
+                {tip && <title>{tip}</title>}
+              </path>
               {editable && (
                 <path
                   className="cl-ng__hit"
@@ -387,6 +415,10 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
         <li>
           <svg width="34" height="10" aria-hidden="true"><line className="cl-ng__edge cl-ng__edge--flow" x1="1" y1="5" x2="33" y2="5" /></svg>
           Allowed (animated)
+        </li>
+        <li>
+          <svg width="34" height="10" aria-hidden="true"><line className="cl-ng__edge cl-ng__edge--noshortcut" x1="1" y1="5" x2="33" y2="5" /></svg>
+          Shortcut off (DNS answers the target's own address)
         </li>
         <li>
           <svg width="40" height="10" aria-hidden="true">

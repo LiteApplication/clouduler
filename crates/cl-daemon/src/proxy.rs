@@ -1269,6 +1269,21 @@ pub fn desired_dns_hosts(
                 .or_default()
                 .extend(nodes);
         }
+        // An expose port is bound on every node (or, on a managed network,
+        // reached through the nodes holding a healthy container), so its
+        // hostname names those whatever `proxy.dns_publish` says.
+        for expose in &placement.extensions.expose {
+            let Some(host) = &expose.host else { continue };
+            let nodes = if cfg.is_managed_network(&expose.network) {
+                healthy.clone()
+            } else {
+                all_nodes.clone()
+            };
+            hosts
+                .entry((host.clone(), expose.network.clone()))
+                .or_default()
+                .extend(nodes);
+        }
     }
     for entry in StaticRouteStore::load(state).routes {
         let nodes = if cfg.is_managed_network(&entry.network) {
@@ -1426,12 +1441,26 @@ pub fn private_shortcut_denied_hosts(
     cfg: &ClusterConfig,
     state: &ClusterState,
 ) -> BTreeSet<(String, String)> {
-    crate::placement::service_placements(state, cfg)
-        .into_iter()
-        .flat_map(|placement| placement.extensions.proxy)
-        .filter(|entry| !entry.private_shortcut)
-        .map(|entry| (entry.host, entry.network))
-        .collect()
+    let mut denied = BTreeSet::new();
+    for placement in crate::placement::service_placements(state, cfg) {
+        denied.extend(
+            placement
+                .extensions
+                .proxy
+                .into_iter()
+                .filter(|entry| !entry.private_shortcut)
+                .map(|entry| (entry.host, entry.network)),
+        );
+        denied.extend(
+            placement
+                .extensions
+                .expose
+                .into_iter()
+                .filter(|e| !e.private_shortcut)
+                .filter_map(|e| Some((e.host?, e.network))),
+        );
+    }
+    denied
 }
 
 /// The config node matching a raft leader id, if it is known and still in the
@@ -2259,6 +2288,7 @@ services:
                 managed: false,
                 open_ports: Vec::new(),
                 proxy: false,
+                shortcut: Default::default(),
                 container: None,
             },
         );
@@ -2401,6 +2431,35 @@ services:
         // The dashboard hostname is leader-only and handled separately by
         // `desired_records`, not published for every node here.
         assert!(!hosts.contains_key(&("cloud".to_string(), "tailscale".to_string())));
+    }
+
+    /// An expose block with a `host` is published on every node and, with
+    /// `private_shortcut: false`, denied the client DNS shortcut.
+    #[test]
+    fn expose_hosts_are_published_on_every_node() {
+        const EXPOSE_SPEC: &str = "\
+networks:
+  default: {}
+services:
+  dns:
+    image: x
+    networks: [default]
+    x-clouduler:
+      expose:
+        - { port: 53, published: 53, network: lan, host: ns, private_shortcut: false }
+        - { port: 80, published: 8080, network: lan }
+";
+        let cfg = cfg();
+        let state = state_with(EXPOSE_SPEC, 1);
+        let hosts = desired_dns_hosts(&cfg, &state);
+        let key = ("ns".to_string(), "lan".to_string());
+        assert_eq!(
+            hosts[&key],
+            cfg.nodes.keys().cloned().collect::<BTreeSet<_>>()
+        );
+        // The expose block without a host publishes nothing.
+        assert!(!hosts.keys().any(|(h, _)| h.is_empty()));
+        assert!(private_shortcut_denied_hosts(&cfg, &state).contains(&key));
     }
 
     #[test]

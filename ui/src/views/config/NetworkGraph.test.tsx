@@ -92,6 +92,32 @@ describe('network access graph', () => {
     await waitFor(() => expect(latest.networks.lan.access).toEqual([]));
   });
 
+  it('toggles the per-link shortcut and styles the arrow', () => {
+    const initial = {
+      ...base,
+      networks: { ...base.networks, lan: { ...base.networks.lan, access: ['tun'] } },
+    } as unknown as ClusterConfig;
+    render(<Harness initial={initial} />);
+    expect(screen.getByTestId('edge-lan-tun').parentElement!.querySelector('[data-shortcut="on"]')).toBeTruthy();
+    openNet('lan');
+    const sw = screen.getByRole('switch', { name: 'Shortcut to tun' });
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(sw);
+    expect(latest.networks.lan.shortcut).toEqual({ tun: false });
+    expect(screen.getByTestId('edge-lan-tun').parentElement!.querySelector('[data-shortcut="off"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('switch', { name: 'Shortcut to tun' }));
+    expect('shortcut' in latest.networks.lan).toBe(false);
+  });
+
+  it('rewrites shortcut keys on rename', () => {
+    const draft = {
+      ...base,
+      web: { network: 'lan' },
+      networks: { lan: { ...base.networks.lan, shortcut: { tun: false } }, tun: base.networks.tun },
+    } as unknown as ClusterConfig;
+    expect(renameNetworkInDraft(draft, 'tun', 'vpn').networks.lan.shortcut).toEqual({ vpn: false });
+  });
+
   it('rewrites access entries on rename', () => {
     const draft = {
       ...base,

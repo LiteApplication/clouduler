@@ -390,6 +390,15 @@ fn check_expose(cluster: &ClusterConfig, at: &str, expose: &ExposePort) -> Resul
             ),
         ));
     };
+    if expose.host.is_some() && net.domain.is_none() {
+        return Err(ConfigError::invalid(
+            format!("{at}.host"),
+            format!(
+                "network {} has no domain, so a hostname cannot be published on it",
+                expose.network
+            ),
+        ));
+    }
     // Only a public network's router or a wireguard tunnel's far end can make a
     // raw port reachable from outside; at least one node must have it open.
     if matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard) {

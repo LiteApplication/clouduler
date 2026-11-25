@@ -24,6 +24,7 @@ impl ClusterConfig {
                 self.validate_access(name, net.kind, access)?;
             }
             check_publish_dns(name, net)?;
+            self.check_shortcut(name, net)?;
             check_unaddressable_has_no_domain(name, net)?;
             self.check_container_block(name, net)?;
             check_domain(name, net, &mut domains)?;
@@ -45,6 +46,32 @@ impl ClusterConfig {
         } else {
             Ok(())
         }
+    }
+
+    /// `shortcut` is a per link setting of a network with clients of its own.
+    fn check_shortcut(&self, name: &str, net: &Network) -> Result<()> {
+        if net.shortcut.is_empty() {
+            return Ok(());
+        }
+        let at = format!("networks.{name}.shortcut");
+        if !net.kind.is_subnetted() {
+            return Err(ConfigError::invalid(
+                at,
+                format!(
+                    "a {} network has no clients of its own; shortcut is only allowed on internal and private networks",
+                    net.kind
+                ),
+            ));
+        }
+        for target in net.shortcut.keys() {
+            if !self.networks.contains_key(target) {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!("no network named {target}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn check_container_block(&self, name: &str, net: &Network) -> Result<()> {
