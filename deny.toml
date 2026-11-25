@@ -12,6 +12,7 @@ wildcards = "allow"
 
 skip = [
     { crate = "aead@0.5.2", reason = "age 0.11" },
+    { crate = "hmac@0.12.1", reason = "age 0.11" },
     { crate = "base64@0.21.7", reason = "age, openidconnect" },
     { crate = "base64@0.22.1", reason = "axum, bollard, instant-acme, jsonwebtoken, cl-proxy" },
     { crate = "block-buffer@0.10.4", reason = "RustCrypto 0.10 generation (age, sha2 0.10)" },
