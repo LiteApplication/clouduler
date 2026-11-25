@@ -32,10 +32,12 @@
 //! and ping, from the source networks that may reach the network. Nothing
 //! else is ever routed into the subnet, container addresses included.
 //!
-//! Apart from that one forwarding case (`ACCEPT`, since the veth is not
-//! docker's and the `FORWARD` policy would drop it) neither chain accepts: a
-//! verdict of `ACCEPT` in a sub-chain would skip every later chain, so
-//! allowed traffic `RETURN`s and the others still apply.
+//! Apart from two cases (`ACCEPT`) neither chain accepts: the forwarding case
+//! above, since the veth is not docker's and the `FORWARD` policy would drop
+//! it, and a peer node address reaching an open port of this node, whose
+//! source sits in the managed subnet that `CLDR-IN` drops. A verdict of
+//! `ACCEPT` in a sub-chain would skip every later chain, so other allowed
+//! traffic `RETURN`s and the others still apply.
 
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
@@ -220,7 +222,9 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
         ]);
         // Another node's address as the source: traffic that entered that node
         // from outside and was source NATed there (its source networks were
-        // checked on that node). Only the open ports and ping.
+        // checked on that node). Only the open ports and ping. `ACCEPT`, not
+        // `RETURN`: the source is in the managed subnet, which CLDR-IN drops
+        // for everything but the container allowances.
         for peer in &peers {
             let from = format!("{peer}/32");
             inbound.push(&[
@@ -235,7 +239,7 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
                 "--icmp-type",
                 "echo-request",
                 "-j",
-                "RETURN",
+                "ACCEPT",
             ]);
             for (protocol, number) in &ports {
                 inbound.push(&[
@@ -250,7 +254,7 @@ pub fn managed_plan(input: &ManagedInput) -> IptablesPlan {
                     "--dport",
                     &number.to_string(),
                     "-j",
-                    "RETURN",
+                    "ACCEPT",
                 ]);
             }
             inbound.push(&["-s", &from, "-d", &dst, "-i", port, "-j", "DROP"]);
@@ -616,7 +620,7 @@ mod tests {
         let dst = "192.168.32.254/32";
         let peer = "192.168.32.121/32";
         assert!(rules.contains(&format!(
-            "-s {peer} -d {dst} -i clmh-@media -p tcp --dport 8096 -j RETURN"
+            "-s {peer} -d {dst} -i clmh-@media -p tcp --dport 8096 -j ACCEPT"
         )));
         let drop = rules
             .iter()
