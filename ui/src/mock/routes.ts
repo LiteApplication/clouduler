@@ -5,6 +5,7 @@
 // generated from the Rust API.
 
 import { encodeText } from '../api/client';
+import { isNewer } from '../components/version';
 import type {
   AlertSettingsUpdate,
   BackupDestination,
@@ -1100,8 +1101,12 @@ export function buildHttpRoutes(): HttpRoute[] {
     route('GET', '/api/self-update/repo', ({ db }) => db.selfUpdate.repo),
     route('GET', '/api/self-update/releases', ({ db }) => ({ tags: db.selfUpdate.releases })),
     route('POST', '/api/self-update/run', ({ db, body }) => {
-      const tag = (body as { tag?: string } | undefined)?.tag;
+      const { tag, downgrade } = (body ?? {}) as { tag?: string; downgrade?: boolean };
       if (tag !== undefined && (!tag || /[\s/]/.test(tag))) throw new HttpError(400, 'invalid release tag');
+      const running = db.selfUpdate.latest.running_version;
+      if (tag !== undefined && !downgrade && isNewer(running, tag)) {
+        throw new HttpError(400, `tag ${tag} is older than the running version ${running}; downgrading is unsupported and must be requested explicitly`);
+      }
       const nodes = Object.keys(db.state.nodes);
       db.selfUpdate.run = {
         id: newId(db, 'upd'),

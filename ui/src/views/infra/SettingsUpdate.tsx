@@ -9,6 +9,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, KV, Panel, Tag, TextField, useConfirm, useToast, type TagTone } from '../../ds';
 import { useClusterState } from '../../state/store';
 import { bare, isNewer, planUpdatePath } from '../../components/version';
+import { RollbackRelease } from './RollbackRelease';
 
 const RUN_CONFIG = '_clouduler_self_update_run';
 const CHECK_CONFIG = '_clouduler_self_update_check';
@@ -174,6 +175,8 @@ export function SettingsUpdate() {
           )}
         </Panel>
       )}
+
+      {repo && isAdmin && <RollbackRelease />}
     </div>
   );
 }

@@ -451,7 +451,8 @@ export const api = {
   selfUpdateLatest: () => get<SelfUpdateLatest>('/api/self-update/latest'),
   selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
   selfUpdateReleases: () => get<SelfUpdateReleases>('/api/self-update/releases'),
-  startSelfUpdate: (tag?: string) => post<SelfUpdateRunState>('/api/self-update/run', tag ? { tag } : undefined),
+  startSelfUpdate: (tag?: string, opts?: { downgrade?: boolean }) =>
+    post<SelfUpdateRunState>('/api/self-update/run', tag ? (opts?.downgrade ? { tag, downgrade: true } : { tag }) : undefined),
   selfUpdateRun: () => get<SelfUpdateRunState | null>('/api/self-update/run'),
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 

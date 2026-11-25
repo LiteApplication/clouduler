@@ -105,6 +105,23 @@ Other routes: `PUT /api/self-update/repo` (write-once), `PUT /api/self-update/ch
 </UiCli.Cli>
 </UiCli>
 
+### Rolling back to an older release (unsupported) {#rollback-release}
+
+:::danger Not supported, and it will most probably break your cluster
+Clouduler only supports moving forward. An older binary probably cannot read the newer cluster state or database schema: a node that already ran a newer build refuses to start with `local state machine is schema_version N, newer than this build's M`, and cannot install a snapshot from a newer cluster. The nodes will most probably fail to start. The automatic per-node rollback only helps when the new binary crashes before rejoining; it does nothing when the old binary runs but cannot read the data. If the run fails part-way the cluster is left on mixed versions. Take a git config backup and drive and database backups first, and never do this on a cluster you cannot afford to lose.
+:::
+
+In the web UI, open **Settings**, then **Updates**, and expand the collapsed section **Advanced: roll back to an older release (unsupported)** at the bottom (admins only, once a release source is set). It repeats the warning, lists the releases older than the running version, and has a **Roll back to X** button. The dialog asks you to type the release tag before the button is enabled. Progress is shown on the **Updates** page.
+
+Through the API, a tag older than the running version is refused unless the request says so:
+
+```bash title="Unsupported: install an older release"
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"tag": "v0.17.3", "downgrade": true}' https://cloud.example.com/api/self-update/run
+```
+
+Without `"downgrade": true` the answer is 400 `tag v0.17.3 is older than the running version 0.19.0; downgrading is unsupported and must be requested explicitly`. Versions are compared as dotted numbers. The same tag as the running version is still allowed. Apart from that check the rollout works as for any other tag.
+
 ### Options
 
 <OptionTable rows={[

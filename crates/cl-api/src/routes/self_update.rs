@@ -174,6 +174,38 @@ async fn get_repo(
 struct StartRunRequest {
     #[serde(default)]
     tag: Option<String>,
+    /// Explicit opt-in to install a tag older than the running version (unsupported).
+    #[serde(default)]
+    downgrade: bool,
+}
+
+/// Dotted numeric parts of a tag or version; a leading `v` is dropped and a non-numeric part counts as 0.
+fn version_parts(v: &str) -> Vec<u64> {
+    v.trim_start_matches('v')
+        .split(['.', '-'])
+        .map(|p| p.parse().unwrap_or(0))
+        .collect()
+}
+
+/// True when `tag` names a strictly older release than `running`.
+fn is_older(tag: &str, running: &str) -> bool {
+    let (a, b) = (version_parts(tag), version_parts(running));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+fn check_downgrade(tag: &str, running: &str, downgrade: bool) -> Result<(), ApiError> {
+    if !downgrade && is_older(tag, running) {
+        return Err(ApiError::BadRequest(format!(
+            "tag {tag} is older than the running version {running}; downgrading is unsupported and must be requested explicitly"
+        )));
+    }
+    Ok(())
 }
 
 async fn start_run(
@@ -186,6 +218,7 @@ async fn start_run(
     } else {
         let req: StartRunRequest = serde_json::from_slice(&body)
             .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?;
+        let downgrade = req.downgrade;
         match req.tag {
             None => None,
             Some(tag) => {
@@ -195,6 +228,7 @@ async fn start_run(
                         "tag must be non-empty with no '/' or whitespace".into(),
                     ));
                 }
+                check_downgrade(&tag, cl_config::version(), downgrade)?;
                 Some(tag)
             }
         }
@@ -401,4 +435,30 @@ async fn unseal_github_token(state: &AppState) -> Option<String> {
     let key = state.key.read().await.clone()?;
     let plaintext = sealed.open(&key, GITHUB_TOKEN_SECRET).ok()?;
     String::from_utf8(plaintext).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_tags_need_the_downgrade_flag() {
+        assert!(check_downgrade("v0.18.2", "0.19.0", false).is_err());
+        assert!(check_downgrade("v0.9.9", "0.10.0", false).is_err());
+        assert!(check_downgrade("v0.18.2", "0.19.0", true).is_ok());
+        assert!(check_downgrade("v0.19.0", "0.19.0", false).is_ok());
+        assert!(check_downgrade("v0.19.1", "0.19.0", false).is_ok());
+        assert!(check_downgrade("v0.19", "0.19.0", false).is_ok());
+    }
+
+    #[test]
+    fn the_error_names_both_versions() {
+        let ApiError::BadRequest(msg) = check_downgrade("v0.1.0", "0.2.0", false).unwrap_err() else {
+            panic!("expected a 400");
+        };
+        assert_eq!(
+            msg,
+            "tag v0.1.0 is older than the running version 0.2.0; downgrading is unsupported and must be requested explicitly"
+        );
+    }
 }
