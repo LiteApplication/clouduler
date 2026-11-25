@@ -22,6 +22,7 @@ mod exec;
 mod read;
 mod secrets;
 mod stack;
+mod updates;
 mod volume;
 
 pub struct Ctx {
@@ -294,6 +295,16 @@ pub fn catalog() -> &'static [ToolSpec] {
             spec::<stack::RemoveStackArgs>("remove_stack", true, "Remove the focused stack and stop all its instances. `confirm` must equal the focused stack's name."),
             spec::<stack::InstanceArgs>("restart_instance", true, "Restart an instance of the focused stack (the scheduler re-places it, possibly on another node)."),
             spec::<stack::InstanceArgs>("update_instance", true, "Pull the instance's image again and recreate its container, for an instance of the focused stack."),
+            spec::<NoArgs>(
+                "refresh_updates",
+                true,
+                "Ask the image registries again whether any deployed image has a newer digest, then list the instances that are behind (cluster-wide). Can take several seconds. Follow with update_behind.",
+            ),
+            spec::<updates::UpdateBehindArgs>(
+                "update_behind",
+                true,
+                "Pull and recreate the instances of the FOCUSED stack that are behind their image (all of them, or narrowed with `service` and/or `instances`), per the last registry check (run refresh_updates first for fresh data). Rolls one restart per node at a time and stops at the first failure, rolling that instance back. Returns once scheduled; check list_problems.",
+            ),
             spec::<secrets::PutConfigArgs>(
                 "put_config",
                 true,
@@ -386,6 +397,8 @@ pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
         "remove_stack" => stack::remove_stack(ctx, parse(args)?).await,
         "restart_instance" => stack::restart_instance(ctx, parse(args)?).await,
         "update_instance" => stack::update_instance(ctx, parse(args)?).await,
+        "refresh_updates" => updates::refresh_updates(ctx, parse(args)?).await,
+        "update_behind" => updates::update_behind(ctx, parse(args)?).await,
         "put_config" => secrets::put_config(ctx, parse(args)?).await,
         "generate_secret" => secrets::generate_secret(ctx, parse(args)?).await,
         "freeze_volume" => volume::freeze_volume(ctx, parse(args)?).await,

@@ -39,7 +39,7 @@ The two grants:
 | Grant | The client can |
 |---|---|
 | **Read-only** | Use the 17 read tools: inspect nodes, stacks, containers and logs. Secrets stay redacted. The admin tools are not even listed. |
-| **Admin** | Use all 27 tools, including deploy, remove, exec and reading files inside containers. Only an admin can grant it. |
+| **Admin** | Use all 30 tools, including deploy, remove, exec and reading files inside containers. Only an admin can grant it. |
 
 A viewer can approve **Read-only** only; asking for admin returns `only an admin can grant admin access`. An admin client keeps its admin grant until you revoke it, even if the person who approved is demoted later. A leader change drops pending approvals and sessions, so the client has to be approved again and focus is lost.
 
@@ -140,7 +140,7 @@ An assistant works on **one stack at a time**. Call `focus_stack` first. Every w
 | `inspect_secret` | `name` | Facts only: exists, revision, owner, where used, instances running an older revision, length, whitespace and character classes. No hash, prefix or suffix. |
 | `validate_stack` | `spec`, `name` (optional) | Validates a stack without deploying: `{valid, errors, requirements, per_service}`. |
 
-11 admin tools (Admin grant only):
+13 admin tools (Admin grant only):
 
 | Tool | Arguments | What it does |
 |---|---|---|
@@ -149,6 +149,8 @@ An assistant works on **one stack at a time**. Call `focus_stack` first. Every w
 | `remove_stack` | `confirm` | Removes the focused stack. `confirm` must equal its name. |
 | `restart_instance` | `id` | Re-places the instance (it can move node). Must be in the focused stack. |
 | `update_instance` | `id` | Pulls the image again and recreates the container. Refuses if an update is already running. |
+| `refresh_updates` | none | Checks the image registries again (can take several seconds), then lists every instance, in any stack, that is behind its image. |
+| `update_behind` | `service`, `instances` (both optional) | Updates the instances of the focused stack that are behind their image (all of them, or only one `service` and/or the listed instance ids), per the last registry check (run `refresh_updates` first). One restart per node at a time; the first failure stops the batch and rolls that instance back. Returns once scheduled. |
 | `put_config` | `name`, `content` | Stores a config (max 1 MiB). Refuses reserved names, configs owned by another stack, and plaintext secrets. |
 | `generate_secret` | `name`, `length`, character options, `overwrite` | Generates and seals a secret on the server and returns only its facts. Refuses an existing secret unless `overwrite=true`. |
 | `freeze_volume` | `volume` (`drive/volume`), `node`, `force`, `wait_seconds` | Pauses replication so a volume can be edited on one node. Fails if containers on other nodes use it unless `force=true` stops them. Default wait 120 s, max 600 s. |

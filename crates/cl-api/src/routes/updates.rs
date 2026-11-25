@@ -206,6 +206,27 @@ pub(crate) async fn check_images(state: &AppState) {
     crate::auto_update::record_detections(state, seen).await;
 }
 
+/// An instance whose registry digest differs from the one it runs, for callers outside this module.
+pub(crate) struct BehindInstance {
+    pub(crate) id: InstanceId,
+    pub(crate) image: Option<String>,
+}
+
+/// Every instance with an update available, from the cached registry answers (see `check_images`).
+pub(crate) async fn behind(state: &AppState) -> Vec<BehindInstance> {
+    rows(state)
+        .await
+        .into_iter()
+        .filter(|row| row.update_available)
+        .filter_map(|row| {
+            Some(BehindInstance {
+                id: row.id.parse().ok()?,
+                image: row.image,
+            })
+        })
+        .collect()
+}
+
 async fn rows(state: &AppState) -> Vec<UpdateRow> {
     let cluster_state = state.cluster.snapshot().await;
 
@@ -444,6 +465,12 @@ async fn pin(
 #[derive(Serialize)]
 pub(crate) struct Accepted {
     accepted: Vec<String>,
+}
+
+impl Accepted {
+    pub(crate) fn accepted(&self) -> &[String] {
+        &self.accepted
+    }
 }
 
 /// Answers `202` once the work is scheduled: a pull can take far longer than the reverse
