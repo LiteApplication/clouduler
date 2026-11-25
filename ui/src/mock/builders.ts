@@ -440,6 +440,7 @@ export class ScenarioBuilder {
         githubTokenSet: false,
       },
       gitBackup: { configured: false, deploy_public_key: null, last_export: null, last_pull: null },
+      gitBackupCommits: [],
       gitWebhookSecretSet: false,
       cloudflareTokenSet: false,
       oidcSecretSet: false,

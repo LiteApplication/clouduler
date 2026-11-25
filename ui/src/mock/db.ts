@@ -13,6 +13,7 @@ import type {
   ClusterKeyStatus,
   ClusterState,
   Connectivity,
+  GitBackupCommit,
   GitBackupStatus,
   Identity,
   InstanceState,
@@ -96,6 +97,7 @@ export interface MockDb {
     githubTokenSet: boolean;
   };
   gitBackup: GitBackupStatus;
+  gitBackupCommits: GitBackupCommit[];
   gitWebhookSecretSet: boolean;
   cloudflareTokenSet: boolean;
   oidcSecretSet: boolean;

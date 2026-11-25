@@ -1140,6 +1140,28 @@ export function buildHttpRoutes(): HttpRoute[] {
       putReservedConfig(db, '_clouduler_git_backup_last_pull', db.gitBackup.last_pull);
       commit(db);
     }),
+    route('GET', '/api/git-backup/commits', ({ db }) => {
+      if (!db.gitBackup.configured) throw new HttpError(409, 'git backup is not configured');
+      return db.gitBackupCommits;
+    }),
+    route('POST', '/api/git-backup/rollback', ({ db, body }) => {
+      if (!db.gitBackup.configured) throw new HttpError(409, 'git backup is not configured');
+      const prefix = (body as { commit?: string } | undefined)?.commit ?? '';
+      const matches = prefix ? db.gitBackupCommits.filter((c) => c.sha.startsWith(prefix)) : [];
+      if (matches.length !== 1) throw new HttpError(400, matches.length ? 'ambiguous commit' : 'unknown commit');
+      const sha = fakeDigest('rollback' + db.gitBackupCommits.length).slice(7, 47).padEnd(40, '0');
+      db.gitBackupCommits.unshift({
+        sha,
+        short: sha.slice(0, 12),
+        message: `Roll back configuration to ${matches[0].short}`,
+        author: 'clouduler',
+        time: nowSecs(),
+      });
+      db.gitBackup.last_pull = { at: nowSecs(), commit: sha.slice(0, 7), rejected: null };
+      putReservedConfig(db, '_clouduler_git_backup_last_pull', db.gitBackup.last_pull);
+      commit(db);
+      return { commit: sha };
+    }),
     route('POST', '/api/git-backup/reconcile-now', () => undefined),
     route('GET', '/api/git-backup/webhook-secret', ({ db }) => ({ configured: db.gitWebhookSecretSet })),
     route('PUT', '/api/git-backup/webhook-secret', ({ db }) => {

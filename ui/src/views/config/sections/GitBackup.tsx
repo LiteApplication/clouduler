@@ -5,6 +5,7 @@ import type { ClusterConfig, GitBackupStatus, GitBackupWebhookSecretStatus } fro
 import { Tag } from '../../../ds';
 import { Icon } from '../../../components/Icon';
 import { CheckboxField, TextField } from '../../../components/FormFields';
+import { GitBackupRollback } from './GitBackupRollback';
 import type { SectionProps } from './types';
 
 const DEFAULT_GIT_BACKUP: NonNullable<ClusterConfig['backup']> = {
@@ -242,6 +243,7 @@ function GitBackupDeployKey() {
           <Icon name="alert-circle" /> {tokenError}
         </p>
       )}
+      <GitBackupRollback configured={status.configured} />
       {status.last_pull && (
         <p className={status.last_pull.rejected ? 'field-error' : 'muted'} style={{ marginTop: 8 }}>
           {status.last_pull.rejected ? (

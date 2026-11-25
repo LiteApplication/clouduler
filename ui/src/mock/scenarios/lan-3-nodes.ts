@@ -92,6 +92,11 @@ export default function lan3Nodes() {
       last_export: { at: exportedAt, summary: 'update stack nextcloud', commit: '9c2e7b1', error: null },
       last_pull: { at: db.now - 86400, commit: null, rejected: null },
     };
+    db.gitBackupCommits = [
+      ['9c2e7b1a04d35f6e8b7c1d2e3f40516273849a0b', 'update stack nextcloud', 3600],
+      ['4f1d0c9e8b7a6f5e4d3c2b1a0f9e8d7c6b5a4938', 'update stack vaultwarden', 86400],
+      ['e83b5a2c7d914f60a1b2c3d4e5f60718293a4b5c', 'update cluster.yaml', 86400 * 3],
+    ].map(([sha, message, ago]) => ({ sha: sha as string, short: (sha as string).slice(0, 12), message: message as string, author: 'clouduler', time: db.now - (ago as number) }));
     reserved('_clouduler_git_backup_last_export', db.gitBackup.last_export);
     reserved('_clouduler_git_backup_last_pull', db.gitBackup.last_pull);
 

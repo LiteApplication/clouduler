@@ -1089,6 +1089,19 @@ export interface GitBackupStatus {
   last_pull: GitBackupLastPull | null;
 }
 
+/** One commit of the configured git backup branch, from GET /api/git-backup/commits. */
+export interface GitBackupCommit {
+  /** 40 hex chars. */
+  sha: string;
+  /** First 12 chars of sha. */
+  short: string;
+  /** First line of the message. */
+  message: string;
+  author: string;
+  /** Unix seconds. */
+  time: number;
+}
+
 /** GET /api/git-backup/webhook-secret. The token itself is write-only, like
  *  the self-update github token. */
 export interface GitBackupWebhookSecretStatus {
