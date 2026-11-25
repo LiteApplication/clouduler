@@ -4,6 +4,6 @@
  * Whether AI clients may connect over MCP.
  * Whether AI clients may connect over MCP.
  *
- * On by default; every grant still needs an admin or viewer approval.
+ * Off by default; every grant still needs an admin or viewer approval.
  */
 export type McpConfig = { enabled: boolean, };
