@@ -36,8 +36,10 @@ export function useNavBadges() {
   const instances = useInstances();
   return useMemo(() => {
     const failedUpdates = Object.values(cluster?.instance_updates ?? {}).filter((u) => u.phase === 'failed').length;
-    const nodeProblems = (cluster?.unreachable.length ?? 0) +
-      Object.values(cluster?.nodes ?? {}).filter((n) => n.availability === 'drain').length;
+    const down = new Set(cluster?.unreachable ?? []);
+    // A drained node that is also down is expected, so it is not a problem.
+    const nodeProblems = [...down].filter((n) => (cluster?.nodes[n]?.availability ?? 'active') === 'active').length +
+      Object.values(cluster?.nodes ?? {}).filter((n) => n.availability === 'drain' && !down.has(n.name)).length;
     return { stacks: failedStacks(instances).size, nodes: nodeProblems, updates: failedUpdates };
   }, [cluster, instances]);
 }

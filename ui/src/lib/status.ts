@@ -36,6 +36,8 @@ export function instanceStatus(i: Pick<InstanceState, 'state' | 'health'>): Stat
 }
 
 export function nodeStatus(node: Pick<NodeState, 'availability'>, unreachable: boolean): StatusView {
+  // Down on purpose: drained (or decommissioned) nodes are expected to be offline.
+  if (unreachable && node.availability !== 'active') return { status: 'stopped', label: 'Drained · offline' };
   if (unreachable) return { status: 'unreachable', label: 'Unreachable' };
   if (node.availability === 'drain') return { status: 'degraded', label: 'Draining' };
   if (node.availability === 'decommissioned') return { status: 'stopped', label: 'Decommissioned' };

@@ -102,14 +102,15 @@ export function Nodes() {
 
   if (!cluster) return <p className="cl-muted">Loading nodes…</p>;
 
-  const unreachable = cluster.unreachable;
+  // A drained node being down is expected, so it is not reported as a fault.
+  const unreachable = cluster.unreachable.filter((n) => (cluster.nodes[n]?.availability ?? 'active') === 'active');
   const rows: Row[] = [
     ...Object.values(cluster.nodes).map((n) => ({
       id: n.name,
       name: n.name,
       role: n.role,
       availability: n.availability,
-      unreachable: unreachable.includes(n.name),
+      unreachable: cluster.unreachable.includes(n.name),
       pending: false,
       address: n.rpc_addr,
     })),

@@ -71,6 +71,8 @@ export function Overview() {
 
   const nodes = Object.values(cluster.nodes).sort((a, b) => a.name.localeCompare(b.name));
   const unreachable = new Set(cluster.unreachable);
+  // Down but drained on purpose: not a fault.
+  const faulty = new Set([...unreachable].filter((n) => (cluster.nodes[n]?.availability ?? 'active') === 'active'));
   const hasQuorumProblem = status ? !status.has_quorum : false;
   const volumes = Object.values(cluster.volumes);
 
@@ -138,9 +140,9 @@ export function Overview() {
             The cluster cannot accept writes until enough managers are reachable.
           </Banner>
         )}
-        {unreachable.size > 0 && (
-          <Banner tone="danger" title={`${unreachable.size} node${unreachable.size > 1 ? 's' : ''} unreachable`} action="View nodes" onAction={() => navigate('/nodes')}>
-            {[...unreachable].join(', ')}
+        {faulty.size > 0 && (
+          <Banner tone="danger" title={`${faulty.size} node${faulty.size > 1 ? 's' : ''} unreachable`} action="View nodes" onAction={() => navigate('/nodes')}>
+            {[...faulty].join(', ')}
           </Banner>
         )}
         {failedInstances.slice(0, 3).map((i) => (
@@ -195,7 +197,7 @@ export function Overview() {
               />
             )}
           </div>
-          {status && status.has_quorum && unreachable.size === 0 && (
+          {status && status.has_quorum && faulty.size === 0 && (
             <p className="sub">
               Cluster healthy, quorum held. All {nodes.length} node{nodes.length === 1 ? '' : 's'} purring.
             </p>

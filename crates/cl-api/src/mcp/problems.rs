@@ -37,6 +37,14 @@ pub(crate) fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A node that is down and was drained on purpose is expected, not a fault.
+fn drained(state: &ClusterState, node: &str) -> bool {
+    state
+        .nodes
+        .get(node)
+        .is_some_and(|n| n.availability != cl_raft::state::Availability::Active)
+}
+
 pub(crate) fn classify(
     state: &ClusterState,
     summaries: &[InstanceSummary],
@@ -147,7 +155,7 @@ fn instance_problems(state: &ClusterState, s: &InstanceSummary) -> Vec<Problem> 
     }
 
     if let Some(a) = assignment {
-        if state.unreachable.contains(&a.node) {
+        if state.unreachable.contains(&a.node) && !drained(state, &a.node) {
             out.push(mk(
                 "node_unreachable",
                 format!("node {} is unreachable", a.node),
@@ -306,6 +314,9 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
         );
     }
     for node in &state.unreachable {
+        if drained(state, node) {
+            continue;
+        }
         add(
             "node_unreachable",
             node.clone(),

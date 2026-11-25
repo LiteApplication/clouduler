@@ -213,6 +213,14 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
         .assignments
         .values()
         .map(|a| a.node.clone())
+        // A drained node that is down is offline on purpose: scanning it only waits for a timeout.
+        .filter(|node| {
+            let drained = cluster_state
+                .nodes
+                .get(node)
+                .is_some_and(|n| n.availability != cl_raft::state::Availability::Active);
+            !(drained && cluster_state.unreachable.contains(node))
+        })
         .collect();
 
     let scans = futures::future::join_all(nodes.iter().map(|node| scan_node(state, node))).await;
