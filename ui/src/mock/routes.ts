@@ -1173,6 +1173,17 @@ export function buildHttpRoutes(): HttpRoute[] {
       commit(db);
       return { commit: sha };
     }),
+    route('POST', '/api/git-backup/reset', ({ db, body }) => {
+      if (!db.gitBackup.configured) throw new HttpError(409, 'git backup is not configured');
+      const b = body as { commit?: string; release_tag?: string | null; keep_current_release?: boolean } | undefined;
+      if (b?.keep_current_release && b.release_tag) throw new HttpError(400, 'keep_current_release and release_tag are mutually exclusive');
+      const prefix = b?.commit ?? '';
+      const matches = prefix.length >= 4 ? db.gitBackupCommits.filter((c) => c.sha.startsWith(prefix)) : [];
+      if (matches.length !== 1) throw new HttpError(400, matches.length ? 'ambiguous commit' : 'unknown commit');
+      const sha = matches[0].sha;
+      const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+      return { commit: sha, branch: `rolled-back/${ts}-${sha.slice(0, 12)}`, release_tag: b?.release_tag ?? null, release_source: b?.release_tag ? 'explicit' : b?.keep_current_release ? 'current' : 'commit' };
+    }),
     route('POST', '/api/git-backup/reconcile-now', () => undefined),
     route('GET', '/api/git-backup/webhook-secret', ({ db }) => ({ configured: db.gitWebhookSecretSet })),
     route('PUT', '/api/git-backup/webhook-secret', ({ db }) => {

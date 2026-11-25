@@ -148,6 +148,53 @@ pub async fn rollback(
     Ok(())
 }
 
+/// `git-backup reset <commit>`: force the remote branch and every node back to that commit, with
+/// a simultaneous restart of the whole cluster. Asks for confirmation unless `yes`.
+pub async fn reset(
+    cfg: &ClusterConfig,
+    via: Option<&str>,
+    commit: &str,
+    release_tag: Option<&str>,
+    keep_current_release: bool,
+    yes: bool,
+) -> Result<()> {
+    if !yes {
+        eprintln!(
+            "This force-pushes the git branch back to commit {commit} (the current tip is kept on a rolled-back/ branch) and \
+             resets the cluster to it WITHOUT the usual pull checks: cluster.yaml, stacks and configs are replaced on every node, \
+             the chosen release (by default the one recorded at that commit) is installed everywhere, and ALL nodes restart at the same time (downtime).\n\
+             Secrets and terraform state are kept. An older release may refuse the newer raft data.\n\
+             Type 'yes' to continue:"
+        );
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("reading the answer")?;
+        if line.trim() != "yes" {
+            anyhow::bail!("aborted");
+        }
+    }
+    let mut query = vec![("commit", commit)];
+    if let Some(tag) = release_tag {
+        query.push(("release_tag", tag));
+    }
+    if keep_current_release {
+        query.push(("keep_current_release", "true"));
+    }
+    let query = serde_urlencoded::to_string(query).unwrap_or_default();
+    let path = format!("/api/git-backup/internal-reset?{query}");
+    let body = call(cfg, via, reqwest::Method::POST, &path).await?;
+    let done: serde_json::Value = serde_json::from_str(&body).context("decoding the response")?;
+    println!(
+        "reset to {}; the previous tip is on branch {}; release: {} ({}). The nodes download the release, then restart together.",
+        done["commit"].as_str().unwrap_or_default(),
+        done["branch"].as_str().unwrap_or_default(),
+        done["release_tag"].as_str().unwrap_or("(unchanged)"),
+        done["release_source"].as_str().unwrap_or("current")
+    );
+    Ok(())
+}
+
 pub async fn pull(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     trigger(cfg, via, "/api/git-backup/pull").await?;
     println!("triggered a git backup pull");

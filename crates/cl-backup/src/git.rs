@@ -762,6 +762,77 @@ impl GitBackup {
         Ok(root.write()?)
     }
 
+    /// Fetches the remote tip and resolves `spec` (a sha or unique prefix of at least 4 hex
+    /// characters) to a commit in its history, so only an ancestor of the tip is accepted. Also
+    /// reads the release recorded in `.clouduler-version.json` at that commit. Pushes nothing:
+    /// the caller validates the target's tree first, then calls [`Self::push_reset`].
+    pub fn prepare_reset(&self, spec: &str, private_key_pem: &str) -> Result<ResetTarget> {
+        let tip = self.fetch_remote_tip(private_key_pem)?.ok_or_else(|| {
+            BackupError::BadCommit("the remote branch has no commits to reset to".to_string())
+        })?;
+        let target = self.resolve_commit(tip, spec)?;
+        let version = self
+            .repo
+            .find_commit(target)?
+            .tree()?
+            .get_path(Path::new(crate::upgrade::VERSION_PATH))
+            .ok()
+            .and_then(|entry| entry.to_object(&self.repo).ok()?.into_blob().ok())
+            .and_then(|blob| serde_json::from_slice::<serde_json::Value>(blob.content()).ok())
+            .and_then(|json| json.get("version")?.as_str().map(str::to_string))
+            .filter(|v| !v.is_empty());
+        Ok(ResetTarget {
+            tip,
+            target,
+            version,
+        })
+    }
+
+    /// Moves the tracked branch of the remote back to `reset.target`, a force push. The old tip
+    /// first goes to a new `rolled-back/<utc-timestamp>-<sha12 of the target>` branch (pushed
+    /// before anything is destroyed), so nothing done since is lost. Refuses (`PushRejected`) when
+    /// the remote tip is no longer the one `prepare_reset` saw. Returns the new branch name.
+    pub fn push_reset(
+        &self,
+        reset: &ResetTarget,
+        now_unix: i64,
+        private_key_pem: &str,
+    ) -> Result<String> {
+        let branch = format!(
+            "rolled-back/{}-{}",
+            utc_timestamp(now_unix),
+            &reset.target.to_string()[..12]
+        );
+        let preserved_ref = format!("refs/heads/{branch}");
+        self.repo.reference(
+            &preserved_ref,
+            reset.tip,
+            true,
+            "preserve the tip before a reset",
+        )?;
+        if self.fetch_remote_tip(private_key_pem)? != Some(reset.tip) {
+            return Err(BackupError::PushRejected(
+                "the remote branch moved since the reset was prepared".to_string(),
+            ));
+        }
+        self.push_refspecs(
+            &[format!("{preserved_ref}:{preserved_ref}")],
+            private_key_pem,
+        )?;
+        self.repo.reference(
+            &format!("refs/heads/{}", self.branch),
+            reset.target,
+            true,
+            "reset to an earlier commit",
+        )?;
+        let force = format!(
+            "+refs/heads/{branch}:refs/heads/{branch}",
+            branch = self.branch
+        );
+        self.push_refspecs(&[force], private_key_pem)?;
+        Ok(branch)
+    }
+
     /// Where trust-on-first-use host key pins for this repo's remote are
     /// kept - inside the bare repo's own `.git`-style directory.
     fn known_hosts_path(&self) -> PathBuf {
@@ -1017,6 +1088,39 @@ pub struct CommitInfo {
     pub author: String,
     /// Unix seconds.
     pub time: u64,
+}
+
+/// What [`GitBackup::prepare_reset`] resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetTarget {
+    /// The remote tip being replaced.
+    pub tip: git2::Oid,
+    /// The commit to go back to; an ancestor of (or equal to) `tip`.
+    pub target: git2::Oid,
+    /// `version` of `.clouduler-version.json` at `target`, if it has one.
+    pub version: Option<String>,
+}
+
+/// `YYYYMMDDTHHMMSSZ` for a unix time (branch names must not contain colons).
+fn utc_timestamp(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        secs / 3_600,
+        secs % 3_600 / 60,
+        secs % 60
+    )
 }
 
 /// What `reject_and_restore` did with a rejected commit.
@@ -1684,6 +1788,161 @@ mod tests {
         assert!(backup
             .secrets_changed_against_baseline(Some(first_oid), third_oid)
             .expect("diff"));
+    }
+
+    #[test]
+    fn utc_timestamps_are_formatted_without_colons() {
+        assert_eq!(utc_timestamp(0), "19700101T000000Z");
+        assert_eq!(utc_timestamp(1_700_000_000), "20231114T221320Z");
+    }
+
+    #[test]
+    fn reset_force_pushes_the_target_and_keeps_the_old_tip_on_a_branch() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let key = "not-a-real-key";
+        let (backup, first, _local) = seeded_backup(
+            &bare_dir,
+            &rollback_files("v1", "ct-1", "state-1", Some(r#"{"version": "v0.1.0"}"#)),
+        );
+        let second = backup
+            .sync(
+                &rollback_files("v2", "ct-2", "state-2", None),
+                "two",
+                key,
+                None,
+            )
+            .expect("sync")
+            .expect("commit");
+        let third = backup
+            .sync(
+                &rollback_files("v3", "ct-3", "state-3", None),
+                "three",
+                key,
+                None,
+            )
+            .expect("sync")
+            .expect("commit");
+
+        let prefix = &first.to_string()[..8];
+        let reset = backup.prepare_reset(prefix, key).expect("prepare");
+        assert_eq!(reset.tip, third);
+        assert_eq!(reset.target, first);
+        assert_eq!(reset.version.as_deref(), Some("v0.1.0"));
+
+        let branch = backup.push_reset(&reset, 1_700_000_000, key).expect("push");
+        assert_eq!(
+            branch,
+            format!("rolled-back/20231114T221320Z-{}", &first.to_string()[..12])
+        );
+
+        let remote = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let target_of = |name: &str| {
+            remote
+                .find_reference(name)
+                .expect("remote ref")
+                .target()
+                .expect("target")
+        };
+        assert_eq!(target_of("refs/heads/main"), first);
+        assert_eq!(target_of(&format!("refs/heads/{branch}")), third);
+        // The history between the two is reachable from the preserved branch only.
+        assert!(remote.graph_descendant_of(third, second).expect("graph"));
+        // The local tracked ref follows so the next export commits on top of the target.
+        assert_eq!(
+            backup
+                .repo
+                .find_reference("refs/heads/main")
+                .expect("local")
+                .target(),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn reset_accepts_only_commits_in_the_history_of_the_remote_tip() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let key = "not-a-real-key";
+        let (backup, _first, _local) =
+            seeded_backup(&bare_dir, &rollback_files("v1", "ct-1", "state-1", None));
+        backup
+            .sync(
+                &rollback_files("v2", "ct-2", "state-2", None),
+                "two",
+                key,
+                None,
+            )
+            .expect("sync");
+        // A commit that exists locally but was never pushed is not an ancestor of the tip.
+        let tree = backup
+            .repo
+            .find_commit(backup.fetch_remote_tip(key).expect("tip").expect("some"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        let stray = backup
+            .repo
+            .commit(
+                None,
+                &Signature::now("t", "t@localhost").expect("sig"),
+                &Signature::now("t", "t@localhost").expect("sig"),
+                "stray",
+                &tree,
+                &[],
+            )
+            .expect("stray commit");
+
+        for bad in [stray.to_string(), "abc".to_string(), "zzzz1234".to_string()] {
+            let err = backup.prepare_reset(&bad, key).expect_err("rejected");
+            assert!(matches!(err, BackupError::BadCommit(_)), "{bad}: {err}");
+        }
+        // The tip itself is a valid target; nothing was pushed by the failures above.
+        let tip = backup.fetch_remote_tip(key).expect("tip").expect("some");
+        let reset = backup.prepare_reset(&tip.to_string(), key).expect("tip");
+        assert_eq!(reset.target, tip);
+        assert_eq!(reset.version, None);
+    }
+
+    #[test]
+    fn reset_refuses_when_the_remote_moved_after_it_was_prepared() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let key = "not-a-real-key";
+        let (backup, first, _local) =
+            seeded_backup(&bare_dir, &rollback_files("v1", "ct-1", "state-1", None));
+        let second = backup
+            .sync(
+                &rollback_files("v2", "ct-2", "state-2", None),
+                "two",
+                key,
+                None,
+            )
+            .expect("sync")
+            .expect("commit");
+        let reset = backup
+            .prepare_reset(&first.to_string(), key)
+            .expect("prepare");
+
+        // Someone else pushes before the reset lands.
+        let other_dir = tempfile::tempdir().expect("other tempdir");
+        let repo_url = format!("file://{}", bare_dir.path().display());
+        let other = GitBackup::open_or_init(other_dir.path(), &repo_url, "main").expect("open");
+        other.fetch_remote_tip(key).expect("fetch");
+        other
+            .sync(
+                &rollback_files("v9", "ct-9", "state-9", None),
+                "nine",
+                key,
+                None,
+            )
+            .expect("sync");
+
+        let err = backup.push_reset(&reset, 0, key).expect_err("moved");
+        assert!(matches!(err, BackupError::PushRejected(_)), "{err}");
+        let remote = Repository::open_bare(bare_dir.path()).expect("open bare");
+        assert_ne!(
+            remote.find_reference("refs/heads/main").unwrap().target(),
+            Some(first)
+        );
+        let _ = second;
     }
 
     #[test]

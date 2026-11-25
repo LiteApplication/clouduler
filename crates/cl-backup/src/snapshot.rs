@@ -29,7 +29,12 @@ pub fn is_bookkeeping_config(name: &str) -> bool {
         || name == MCP_CLIENTS_CONFIG
         || name == UPDATE_CHECK_CONFIG
         || name == RUN_CONFIG
+        || name == RESET_PLAN_CONFIG
 }
+
+/// The configuration reset plan (`cl_update::reset::RESET_CONFIG`): a one-off operation record,
+/// not configuration, so it stays out of git.
+const RESET_PLAN_CONFIG: &str = "_clouduler_reset_plan";
 
 /// The self-update release check (`cl_update::plan::CHECK_CONFIG`), rewritten
 /// on every periodic check; it is observation, not configuration, so it stays

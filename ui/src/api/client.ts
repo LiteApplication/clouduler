@@ -29,6 +29,8 @@ import type {
   DnsRecordState,
   DriveStatus,
   GitBackupCommit,
+  GitBackupResetRelease,
+  GitBackupResetResult,
   GitBackupStatus,
   GitBackupWebhookSecretStatus,
   Identity,
@@ -462,6 +464,15 @@ export const api = {
   gitBackupPullNow: () => post<void>('/api/git-backup/pull-now'),
   gitBackupCommits: () => get<GitBackupCommit[]>('/api/git-backup/commits'),
   gitBackupRollback: (commit: string) => post<{ commit: string }>('/api/git-backup/rollback', { commit }),
+  gitBackupReset: (commit: string, release: GitBackupResetRelease) =>
+    post<GitBackupResetResult>(
+      '/api/git-backup/reset',
+      release.mode === 'tag'
+        ? { commit, release_tag: release.tag }
+        : release.mode === 'current'
+          ? { commit, keep_current_release: true }
+          : { commit },
+    ),
   gitBackupReconcileNow: () => post<void>('/api/git-backup/reconcile-now'),
   gitBackupWebhookSecret: () => get<GitBackupWebhookSecretStatus>('/api/git-backup/webhook-secret'),
   setGitBackupWebhookSecret: (token: string) => put<void>('/api/git-backup/webhook-secret', { token }),

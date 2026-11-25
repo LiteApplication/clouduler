@@ -1209,6 +1209,7 @@ dependencies = [
  "cl-raft",
  "cl-secret",
  "octocrab",
+ "openraft",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

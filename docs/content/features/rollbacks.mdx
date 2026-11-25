@@ -1,0 +1,106 @@
+---
+title: Rollbacks
+sidebar_position: 16
+---
+
+# Rollbacks
+
+Clouduler can return the cluster to an earlier commit of its git-backed configuration in two ways. A **revert** adds a new commit on top and applies it like a pull. A **reset** force-pushes the branch back and also moves every node to a release, with downtime.
+
+|   | Revert ([details](#revert-to-a-commit)) | Reset ([details](#reset-to-a-commit)) |
+| --- | --- | --- |
+| Git branch | New commit on top; history kept | Branch force-pushed back; old tip kept on a `rolled-back/` branch |
+| Checks | The normal pull checks apply | The pull checks are skipped |
+| Applied | Like a pull: stacks redeployed, no restart | Every node restarts at the same moment |
+| Release | Not changed | Chosen independently of the commit |
+| Downtime | No | Yes |
+
+Neither one rolls back secrets or terraform state. Installing an older release is only possible through a reset, or through the unsupported procedure in [Updates](/docs/features/updates#rollback-release).
+
+## Revert to a commit
+
+You can return the configuration to an earlier commit of the tracked branch. List the newest commits (at most 50) with `clouduler git-backup commits [--via NODE]`, then run `clouduler git-backup rollback <commit> [--via NODE] [--yes]`. The commit is a full sha or a unique prefix of at least 4 hex characters; without `--yes` the command asks you to type `yes`. The API has the same two actions: `GET /api/git-backup/commits` and `POST /api/git-backup/rollback` with the body `{"commit": "<sha or unique prefix>"}`, which answers `{"commit": "<new head sha>"}`. In the web UI, the **Advanced: roll back the configuration to a commit** control in the git backup settings runs the revert with the **Rollback method** set to revert.
+
+- **A new commit, never a rewrite.** The leader fetches the remote tip and pushes a new commit on top of it, named `Roll back configuration to <sha12>`, whose content is the target commit's. History is kept.
+- **Secrets and terraform state are not rolled back.** `secrets/`, every `*.tfstate.age` and the bookkeeping files (`.clouduler-*.json`) are taken from the current tip, because git cannot supply secret content. A stack from the old commit that needs a secret the cluster no longer has is rejected.
+- **Applied like a pull.** The new commit goes through the normal pull, so the usual rules apply: `cluster.yaml` is applied (the cluster's current generation is used, so an old file is not stale), stacks that exist now but not in the target commit are **removed**, stacks whose spec differs are **redeployed**, and configs and terraform modules follow the target. A rolled-back `cluster.yaml` can change nodes, networks and drives, so check it first.
+- **Refusals.** An unknown or ambiguous commit is a 400. If the pull rejects the result (see the reasons in [Git backup](/docs/features/git-backup#what-a-pull-does)), the request fails with 409 and the reason; the branch is restored and the rolled-back commit is kept on a `rejected/` branch. A target whose content already equals the current one is a 409 too. A concurrent push to the remote also gives a 409; retry.
+- **Leader only.** A non-leader forwards the request. Exports are paused while a rollback runs, so a stale export cannot overwrite it.
+
+## Reset to a commit
+
+A reset returns the cluster to exactly the configuration a commit describes, whatever the pull checks would say. Use it when the cluster must go back to that state, or to an older release together with it. The commit and the release are chosen separately; see [Choosing the release](#choosing-the-release).
+
+### What happens
+
+1. **Validation, before any change.** The leader checks, in this order:
+   - the commit is unknown or ambiguous (400), or is not in the history of the remote tip (400);
+   - the chosen release resolves the way the download will (the configured release URL and GitHub token) and has a binary for the architecture of every active node (400). A tag taken from `.clouduler-version.json` that does not exist or lacks a binary gives the same 400;
+   - a release is chosen but no self-update release is configured (409);
+   - the commit's `cluster.yaml` or a stack does not parse, or the `cluster.yaml` does not declare an active node (409). The node would be unable to start, so a reset cannot go back to before that node joined;
+   - the resulting plan does not fit the 1 MiB (1,048,576-byte) config object limit (409).
+2. **The branch is force-pushed back.** The old tip is first pushed to a new branch `rolled-back/<utc-timestamp>-<sha12 of the commit>`, so nothing done since is lost, then the tracked branch is force-pushed to the commit. A remote that moved in the meantime gives a 409 and nothing is changed. The commit also becomes the last known good commit, so the pull sees the force push as nothing new.
+3. **Every node downloads the release.** This step only runs when a release is installed (see below). It reuses the self-update run in hold mode: every node must report `Ready`, and the usual hash agreement applies. Nodes are not restarted one by one. If a download fails or the run is cancelled, the reset is abandoned before any node was touched. The branch has already been pushed back; the next export then commits the cluster's current state on top of the commit.
+4. **All nodes switch at the same time.** The leader records a go signal in raft, 20 seconds ahead. At that instant every node stops cleanly. On restart, still on the current binary, it rewrites its raft store: the log is cut off and replaced by one identical synthetic entry, and the full voter membership is kept. Then `cluster.yaml` (generation: current + 1), the stacks and the configs are replaced by the commit's, and the node's own config file is rewritten. The staged older binary is installed with the usual probation rollback armed, and the node restarts into it. A marker file in the data directory lets a node that dies midway resume.
+5. **Checks skipped, state kept.** Secrets rotation, terraform state and history checks do not apply, and no secret is re-sealed. Secrets, terraform state and all other raft data (assignments, volumes, certificates, DNS) stay as they are on each node. `.tf` terraform modules in the commit are **not applied**; the modules already in the cluster stay. Raft data written after the commit is not reverted either.
+6. **Exports resume afterwards.** The git export is paused while the reset is pending, so it cannot overwrite the force push, and resumes once the plan is done.
+
+### Choosing the release
+
+The release is independent of the commit.
+
+| Choice | UI | CLI | API | What is installed |
+| --- | --- | --- | --- | --- |
+| Auto (default) | **Release** select: auto | neither flag | neither field | The `version` in `.clouduler-version.json` at that commit. A commit with no version record installs nothing. |
+| Keep the running release | **Release** select: Keep the running release | `--keep-current-release` | `"keep_current_release": true` | Nothing; the running binary is kept. |
+| An explicit tag | **Release** select: a listed release, or Other (type a tag) with **Release tag** | `--release-tag TAG` | `"release_tag": "TAG"` | That release. It may be older than the running one (a downgrade). |
+
+- A chosen release equal to the running one installs nothing; the nodes keep their binary.
+- Giving both `--release-tag` and `--keep-current-release` (CLI) or both fields (API) is a 400. A tag containing `/` or whitespace is a 400.
+- The API response's `release_source` says which rule picked the release: `explicit`, `commit` or `current`.
+
+### Downgrades and the schema warning
+
+A reset can install an older release. The [unsupported release rollback](/docs/features/updates#rollback-release) warns that moving back to an older release will most probably break the cluster; the same applies here. An older binary may refuse the newer raft data: a node that already ran a newer build fails with `local state machine is schema_version N, newer than this build's M`, and the raft schema is not downgraded. Only reset across releases that share a schema version, and take git, drive and database backups first.
+
+### Quorum and the simultaneous restart
+
+:::danger All nodes restart at the same time
+Every node stops and restarts at the same instant, so the cluster has no quorum while they are down. It is typically back within a minute; longer if a node has to install the binary or Docker is slow. Containers are down during that time too.
+:::
+
+### Failure cases
+
+- **Refused before anything changes** (400 or 409 from the validation list above): nothing is pushed and no node is touched.
+- **The remote moved or refused the push** (409): nothing is changed.
+- **A release download fails or the run is cancelled** (before the go signal): the branch stays pushed back, nodes keep their binaries and configuration. See step 3.
+- **A node dies after the go signal:** on restart it finds its marker and completes the rewrite.
+- **A node cannot install the older binary:** the node stays on the binary it runs, which can carry the reset configuration, and logs the error on that node.
+- **Emergency mode, another reset, or a self-update run is active** (409); git backup is off (409).
+- **The commit's configuration cannot be applied** (409), with the reason in the message.
+
+### Using a reset
+
+**Web UI.** In the git backup settings, under **Advanced: roll back the configuration to a commit**, set the **Rollback method** to reset. Enter the **Config commit hash** (a full sha or a prefix of at least 4 hex characters), choose the **Release**, and check the **Will install** line. The confirmation dialog warns that the cluster will be reset and all nodes will reboot; its button is **Reset and reboot all nodes**. The result reports the new head and the `rolled-back/` branch. Progress of the release download is shown on the **Updates** page.
+
+**CLI.**
+
+```bash
+clouduler git-backup reset <commit> [--release-tag TAG | --keep-current-release] [--via NODE] [--yes]
+```
+
+Without `--yes` the command asks you to type `yes`. It prints the release it installs, or `(unchanged)` when the running binary is kept.
+
+**HTTP API.** `POST /api/git-backup/reset` (admin, forwarded to the leader):
+
+```json
+{"commit": "<sha or unique prefix>", "release_tag": "v0.18.1", "keep_current_release": false}
+```
+
+Both release fields are optional and mutually exclusive. A 202 answers:
+
+```json
+{"commit": "<full sha>", "branch": "rolled-back/<utc-timestamp>-<sha12>", "release_tag": "v0.18.1", "release_source": "explicit"}
+```
+
+`release_tag` is `null` when the running binary is kept. The rest of the reset continues on the nodes after the 202. See the [HTTP API reference](/docs/reference/http-api#git-backup) for the error table.

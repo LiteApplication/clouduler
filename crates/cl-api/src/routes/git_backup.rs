@@ -70,6 +70,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/git-backup/commits", get(list_commits))
         .route("/api/git-backup/rollback", post(rollback_admin))
         .route("/api/git-backup/internal-rollback", post(internal_rollback))
+        .route("/api/git-backup/reset", post(reset_admin))
+        .route("/api/git-backup/internal-reset", post(internal_reset))
         .route("/api/git-backup/internal-commits", get(internal_commits))
         .route("/api/git-backup/pull", post(pull_now))
         .route("/api/git-backup/reconcile", post(reconcile_now))
@@ -1025,6 +1027,404 @@ async fn run_rollback(
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct ResetRequest {
+    commit: String,
+    #[serde(default)]
+    release_tag: Option<String>,
+    #[serde(default)]
+    keep_current_release: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ResetResponse {
+    commit: String,
+    branch: String,
+    /// The release the nodes download; `None` keeps the running one.
+    release_tag: Option<String>,
+    /// Where `release_tag` came from: "explicit", "commit" or "current".
+    release_source: String,
+}
+
+/// `POST /api/git-backup/reset`: leader-only, so a non-leader forwards. 202: the work continues
+/// on every node (see `cl_update::reset`).
+async fn reset_admin(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<ResetRequest>,
+) -> Result<(StatusCode, Json<ResetResponse>), ApiError> {
+    if state.cluster.is_leader() {
+        let done = run_reset(
+            &state,
+            &body.commit,
+            body.release_tag.as_deref(),
+            body.keep_current_release,
+        )
+        .await?;
+        return Ok((StatusCode::ACCEPTED, Json(done)));
+    }
+    let leader = leader_node_name(&state)
+        .await
+        .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+    let mut query = vec![("commit", body.commit.as_str())];
+    if let Some(tag) = body.release_tag.as_deref() {
+        query.push(("release_tag", tag));
+    }
+    if body.keep_current_release {
+        query.push(("keep_current_release", "true"));
+    }
+    let path = format!(
+        "/api/git-backup/internal-reset?{}",
+        serde_urlencoded::to_string(query).unwrap_or_default()
+    );
+    let done = internal_peer::post_json_relay(&state, &leader, &path).await?;
+    Ok((StatusCode::ACCEPTED, Json(done)))
+}
+
+async fn internal_reset(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(StatusCode, Json<ResetResponse>), ApiError> {
+    let commit = params
+        .get("commit")
+        .ok_or_else(|| ApiError::BadRequest("missing commit".into()))?;
+    let done = run_reset(
+        &state,
+        commit,
+        params.get("release_tag").map(String::as_str),
+        params.get("keep_current_release").is_some_and(|v| v == "true"),
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(done)))
+}
+
+/// The distinct arches of the active nodes: each needs an asset in the release.
+fn node_arches(state: &cl_raft::ClusterState) -> std::collections::BTreeSet<String> {
+    state
+        .nodes
+        .values()
+        .filter(|n| n.availability == cl_raft::state::Availability::Active)
+        .map(|n| n.arch.clone())
+        .collect()
+}
+
+/// The 400 for a release the nodes could not download. Nothing was changed yet.
+fn release_unusable(tag: &str, source: &str, reason: &str) -> ApiError {
+    let hint = if source == "commit" {
+        "the tag comes from .clouduler-version.json at that commit; set an explicit release_tag or keep the running release"
+    } else {
+        "pick another release_tag or keep the running release"
+    };
+    ApiError::BadRequest(format!(
+        "release {tag} cannot be used for the reset ({reason}); {hint}. Nothing was changed."
+    ))
+}
+
+/// Same release, whatever the `v` prefix.
+fn same_release(tag: &str, version: &str) -> bool {
+    tag.trim_start_matches('v') == version.trim_start_matches('v')
+}
+
+/// Resets the cluster to the configuration of `commit`: moves the remote branch back (the old tip
+/// goes to a `rolled-back/` branch), then hands the cluster a plan that every node carries out
+/// together once they all hold the release recorded at that commit (or `release_override`). No pull
+/// checks run: secrets, terraform state and the rest of raft are not touched. What is still
+/// checked is only what would leave a node unable to start: the commit's cluster.yaml and stacks
+/// must parse and must still declare every node the cluster has.
+async fn run_reset(
+    state: &AppState,
+    commit: &str,
+    release_override: Option<&str>,
+    keep_current_release: bool,
+) -> Result<ResetResponse, ApiError> {
+    let override_tag = match release_override.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tag) if tag.contains('/') || tag.contains(char::is_whitespace) => {
+            return Err(ApiError::BadRequest(
+                "release_tag must have no '/' or whitespace".into(),
+            ))
+        }
+        other => other.map(str::to_string),
+    };
+    if keep_current_release && override_tag.is_some() {
+        return Err(ApiError::BadRequest(
+            "keep_current_release and release_tag are mutually exclusive".into(),
+        ));
+    }
+    let cluster_state = state.cluster.snapshot().await;
+    if cluster_state.in_emergency() {
+        return Err(ApiError::Conflict(
+            "the cluster is in emergency mode; end it before resetting the configuration".into(),
+        ));
+    }
+    if cl_update::reset::in_flight(&cluster_state) {
+        return Err(ApiError::Conflict(
+            "a configuration reset is already in progress".into(),
+        ));
+    }
+    if cl_update::orchestrator::load_run(&cluster_state).is_some_and(|run| run.in_progress()) {
+        return Err(ApiError::Conflict(
+            "a self-update run is in progress; wait for it or cancel it".into(),
+        ));
+    }
+    let (cfg, pem) = git_credentials(state).await?;
+    let _guard = export_guard().lock().await;
+
+    let dir = state.data_dir.join("git-backup");
+    let spec = commit.to_string();
+    let (target, parsed, pem) = {
+        let pem = pem.clone();
+        tokio::task::spawn_blocking(move || {
+            let _repo_guard = cl_backup::git::lock_repo();
+            let backup = cl_backup::git::GitBackup::open_or_init(&dir, &cfg.repo_url, &cfg.branch)?;
+            let target = backup.prepare_reset(&spec, &pem)?;
+            let tree = backup.repo().find_commit(target.target)?.tree()?.id();
+            let parsed = parse_tree(backup.repo(), tree)?;
+            Ok::<_, cl_backup::BackupError>((target, parsed, pem))
+        })
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(backup_error)?
+    };
+
+    let release_source = if keep_current_release {
+        "current"
+    } else if override_tag.is_some() {
+        "explicit"
+    } else if target.version.is_some() {
+        "commit"
+    } else {
+        "current"
+    };
+    let release_tag = override_tag
+        .or_else(|| target.version.clone())
+        .filter(|_| !keep_current_release)
+        .filter(|tag| !same_release(tag, cl_config::version()));
+    if release_tag.is_some() && state.cluster_config.read().await.self_update.is_none() {
+        return Err(ApiError::Conflict(
+            "that commit was exported by another release but no self-update release is configured to download it".into(),
+        ));
+    }
+
+    // Resolve the release the way the hold-mode run will, before anything is pushed.
+    if let Some(tag) = release_tag.as_deref() {
+        let self_update = state.cluster_config.read().await.self_update.clone();
+        if let Some(self_update) = self_update {
+            let arches = node_arches(&cluster_state);
+            let token = super::self_update::unseal_github_token(state).await;
+            cl_update::release::validate_pinned(
+                &self_update.release_url,
+                tag,
+                token.as_deref(),
+                arches.iter().map(String::as_str),
+            )
+            .await
+            .map_err(|e| release_unusable(tag, release_source, &e))?;
+        }
+    }
+
+    let now = super::self_update::now();
+    let content = build_reset_content(&parsed, &cluster_state, now).map_err(ApiError::Conflict)?;
+    let id = format!("reset-{now}");
+    let run_id = release_tag.as_ref().map(|_| format!("run-{id}"));
+    let mut plan = cl_update::reset::ResetPlan {
+        id,
+        commit: target.target.to_string(),
+        branch: String::new(),
+        release_tag: release_tag.clone(),
+        run_id: run_id.clone(),
+        started_at: now,
+        phase: cl_update::reset::ResetPhase::Preparing,
+        content,
+    };
+    // The plan rides a config object, which raft caps.
+    let encoded_len = plan.encode().map_err(ApiError::Internal)?.len();
+    if encoded_len > cl_raft::MAX_OBJECT_BYTES {
+        return Err(ApiError::Conflict(format!(
+            "the configuration at that commit is too large to hand to every node ({encoded_len} bytes, limit {})",
+            cl_raft::MAX_OBJECT_BYTES
+        )));
+    }
+
+    // The point of no return: the remote is rewritten. Everything before only read.
+    let dir = state.data_dir.join("git-backup");
+    let cfg = state
+        .cluster_config
+        .read()
+        .await
+        .backup
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
+    let pushed = target.clone();
+    let branch = tokio::task::spawn_blocking(move || {
+        let _repo_guard = cl_backup::git::lock_repo();
+        cl_backup::git::GitBackup::open_or_init(&dir, &cfg.repo_url, &cfg.branch)?
+            .push_reset(&pushed, now, &pem)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(backup_error)?;
+    plan.branch = branch.clone();
+
+    // The target is the last known good commit, so the pull path sees the force push as nothing new.
+    publish_last_pull(
+        state,
+        LastPull {
+            at: unix_now(),
+            commit: Some(target.target.to_string()),
+            rejected: None,
+        },
+    )
+    .await?;
+
+    let revision = cl_update::reset::load_revision(&cluster_state)
+        .map(|(_, r)| r)
+        .unwrap_or(0);
+    if release_tag.is_none() {
+        plan.phase = cl_update::reset::ResetPlan::go_phase(&state.cluster, now);
+    }
+    store_reset_plan(state, &plan, revision).await?;
+
+    if let (Some(tag), Some(run_id)) = (release_tag.clone(), run_id) {
+        let started = start_reset_run(state, run_id, tag).await;
+        if let Err(e) = started {
+            plan.phase = cl_update::reset::ResetPhase::Failed {
+                reason: format!("could not start the release download: {e}"),
+            };
+            let latest = cl_update::reset::load_revision(&*state.cluster.snapshot().await)
+                .map(|(_, r)| r)
+                .unwrap_or(0);
+            let _ = store_reset_plan(state, &plan, latest).await;
+            return Err(e);
+        }
+    }
+
+    Ok(ResetResponse {
+        commit: target.target.to_string(),
+        branch,
+        release_tag,
+        release_source: release_source.into(),
+    })
+}
+
+async fn store_reset_plan(
+    state: &AppState,
+    plan: &cl_update::reset::ResetPlan,
+    revision: u64,
+) -> Result<(), ApiError> {
+    let request = plan.put_request(revision).map_err(ApiError::Internal)?;
+    let response = state
+        .cluster
+        .submit(request)
+        .await
+        .map_err(ApiError::not_leader)?;
+    match response.error {
+        Some(msg) => Err(ApiError::Conflict(msg)),
+        None => Ok(()),
+    }
+}
+
+/// The hold-mode self-update run that makes every node download `tag`.
+async fn start_reset_run(state: &AppState, id: String, tag: String) -> Result<(), ApiError> {
+    let cluster_state = state.cluster.snapshot().await;
+    let revision = cl_update::orchestrator::load_run_revision(&cluster_state)
+        .map(|(_, r)| r)
+        .unwrap_or(0);
+    let nodes = cluster_state
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.availability == cl_raft::state::Availability::Active)
+        .map(|(name, _)| name.clone());
+    let mut run = cl_update::plan::UpdateRunState::new(id, nodes, super::self_update::now());
+    run.target_tag = Some(tag);
+    run.hold = true;
+    super::self_update::submit_run(state, &run, revision).await
+}
+
+/// What every node will write: the commit's cluster.yaml, stacks and plain configs. The only
+/// checks are the ones that keep a node from starting: parseable yaml, and every node of the
+/// cluster still declared (a node missing from the file wipes itself on its next start).
+fn build_reset_content(
+    parsed: &ParsedTree,
+    current: &cl_raft::ClusterState,
+    now: i64,
+) -> Result<cl_raft::store::ResetContent, String> {
+    let yaml = parsed
+        .cluster_yaml
+        .clone()
+        .ok_or("that commit has no cluster.yaml")?;
+    let config =
+        ClusterConfig::parse(&yaml).map_err(|e| format!("cluster.yaml at that commit: {e}"))?;
+    let missing: Vec<&str> = current
+        .nodes
+        .iter()
+        .filter(|(name, node)| {
+            node.availability == cl_raft::state::Availability::Active
+                && !config.nodes.contains_key(name.as_str())
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "cluster.yaml at that commit does not declare node(s) {}, which would leave them unable to start; \
+             a reset cannot go back to before they joined",
+            missing.join(", ")
+        ));
+    }
+
+    let mut owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut stacks = Vec::new();
+    for (name, spec) in &parsed.stacks {
+        let file = StackFile::parse(spec).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
+        let requirements = file.requirements();
+        for config in &requirements.file_configs {
+            owners.insert(config.clone(), name.clone());
+        }
+        stacks.push(cl_raft::store::ResetStack {
+            name: name.clone(),
+            spec: spec.clone(),
+            configs: requirements.file_configs,
+            secrets: requirements.file_secrets,
+            used_configs: requirements.configs,
+            used_secrets: requirements.secrets,
+        });
+    }
+
+    let kept = |name: &str| {
+        !cl_backup::snapshot::is_bookkeeping_config(name) && !super::objects::is_reserved(name)
+    };
+    let configs = parsed
+        .configs
+        .iter()
+        .filter(|(name, _)| kept(name))
+        .map(|(name, bytes)| cl_raft::store::ResetConfig {
+            name: name.clone(),
+            content: cl_backup::tree::encode_config_content(bytes),
+            owner: owners.get(name).cloned(),
+        })
+        .collect();
+    let remove_configs = current
+        .configs
+        .keys()
+        .filter(|name| kept(name) && !parsed.configs.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    Ok(cl_raft::store::ResetContent {
+        cluster_yaml: Some(yaml),
+        generation: current
+            .cluster_config
+            .as_ref()
+            .map(|c| c.generation)
+            .unwrap_or(0)
+            + 1,
+        at: now,
+        stacks,
+        configs,
+        remove_configs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,6 +1487,156 @@ mod tests {
             .await
             .expect_err("not configured");
         assert!(matches!(err, ApiError::Conflict(m) if m == "git backup is not configured"));
+    }
+
+    #[test]
+    fn unusable_release_message_guides_by_source() {
+        let ApiError::BadRequest(m) = release_unusable("v1", "commit", "no asset") else {
+            panic!("expected 400")
+        };
+        assert!(m.contains("keep the running release") && m.contains("explicit release_tag"));
+        assert!(m.contains("Nothing was changed"));
+        let ApiError::BadRequest(m) = release_unusable("v1", "explicit", "not found") else {
+            panic!("expected 400")
+        };
+        assert!(m.contains("pick another release_tag"));
+    }
+
+    #[tokio::test]
+    async fn a_reset_is_refused_while_another_is_in_flight_or_a_run_is_going() {
+        let h = harness().await;
+        let err = run_reset(&h.state, "abcd1234", None, false)
+            .await
+            .expect_err("not configured");
+        assert!(matches!(err, ApiError::Conflict(m) if m == "git backup is not configured"));
+
+        let mut plan = cl_update::reset::ResetPlan {
+            id: "reset-1".into(),
+            commit: "a".repeat(40),
+            branch: "rolled-back/x".into(),
+            release_tag: None,
+            run_id: None,
+            started_at: 0,
+            phase: cl_update::reset::ResetPhase::Preparing,
+            content: cl_raft::store::ResetContent {
+                cluster_yaml: None,
+                generation: 1,
+                at: 0,
+                stacks: vec![],
+                configs: vec![],
+                remove_configs: vec![],
+            },
+        };
+        store_reset_plan(&h.state, &plan, 0)
+            .await
+            .expect("store plan");
+        let err = run_reset(&h.state, "abcd1234", None, false)
+            .await
+            .expect_err("in flight");
+        assert!(matches!(err, ApiError::Conflict(m) if m.contains("already in progress")));
+
+        // A finished plan no longer blocks (the next check is the git one).
+        plan.phase = cl_update::reset::ResetPhase::Done;
+        store_reset_plan(&h.state, &plan, 1).await.expect("done");
+        let err = run_reset(&h.state, "abcd1234", None, false)
+            .await
+            .expect_err("not configured");
+        assert!(matches!(err, ApiError::Conflict(m) if m == "git backup is not configured"));
+
+        let err = run_reset(&h.state, "abcd1234", Some("v1/2"), false)
+            .await
+            .expect_err("bad tag");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+
+        let err = run_reset(&h.state, "abcd1234", Some("v1.0.0"), true)
+            .await
+            .expect_err("both given");
+        assert!(matches!(err, ApiError::BadRequest(m) if m.contains("mutually exclusive")));
+    }
+
+    #[test]
+    fn backup_errors_map_to_400_and_409() {
+        assert!(matches!(
+            backup_error(cl_backup::BackupError::BadCommit("no".into())),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            backup_error(cl_backup::BackupError::PushRejected("moved".into())),
+            ApiError::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn the_reset_content_comes_from_the_tree_without_touching_secrets() {
+        let mut parsed = tree(&[("site", "services:\n  web:\n    image: nginx\n")]);
+        parsed.cluster_yaml = Some(CLUSTER_YAML.to_string());
+        parsed.configs.insert("kept.conf".into(), b"a".to_vec());
+        parsed
+            .secrets
+            .insert("db".into(), b"age-ciphertext".to_vec());
+        // Reserved bookkeeping that happens to be in the tree is never written back.
+        parsed
+            .configs
+            .insert(cl_backup::status::LAST_PULL_CONFIG.into(), b"{}".to_vec());
+
+        let mut current = cl_raft::ClusterState {
+            cluster_config: Some(cl_raft::state::ClusterConfigEntry {
+                yaml: "x".into(),
+                generation: 7,
+            }),
+            ..Default::default()
+        };
+        for name in ["stale.conf", cl_backup::status::LAST_PULL_CONFIG] {
+            current.configs.insert(
+                name.into(),
+                cl_raft::state::ConfigEntry {
+                    name: name.into(),
+                    content: String::new(),
+                    revision: 1,
+                    owner: None,
+                },
+            );
+        }
+
+        let content = build_reset_content(&parsed, &current, 50).expect("content");
+        assert_eq!(content.generation, 8);
+        assert_eq!(content.at, 50);
+        assert_eq!(content.stacks.len(), 1);
+        assert_eq!(content.stacks[0].name, "site");
+        let names: Vec<&str> = content.configs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["kept.conf"]);
+        assert_eq!(content.remove_configs, vec!["stale.conf".to_string()]);
+
+        // No cluster.yaml, or one that drops a node of the cluster, is refused.
+        let mut no_yaml = tree(&[]);
+        no_yaml.cluster_yaml = None;
+        assert!(build_reset_content(&no_yaml, &current, 0).is_err());
+        let mut with_node = cl_raft::ClusterState::default();
+        with_node.nodes.insert(
+            "ghost".into(),
+            cl_raft::state::NodeState {
+                name: "ghost".into(),
+                id: uuid::Uuid::new_v4(),
+                role: cl_raft::state::Role::Worker,
+                rpc_addr: "10.0.0.9:7373".parse().unwrap(),
+                drives: Default::default(),
+                availability: cl_raft::state::Availability::Active,
+                labels: Default::default(),
+                last_resort: false,
+                egress_networks: Default::default(),
+                networks: Default::default(),
+                open_ports: Default::default(),
+                arch: String::new(),
+                binary_hash: String::new(),
+                node_pubkey: None,
+                memory_total_bytes: 0,
+                gpus: Default::default(),
+                images: Default::default(),
+                version: Default::default(),
+            },
+        );
+        let err = build_reset_content(&parsed, &with_node, 0).expect_err("ghost node");
+        assert!(err.contains("ghost"), "{err}");
     }
 
     #[test]

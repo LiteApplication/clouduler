@@ -113,13 +113,7 @@ Export is leader-only and runs a pull first, so it does not overwrite a manual p
 
 ## Roll back the configuration
 
-You can return the configuration to an earlier commit of the tracked branch. List the newest commits (at most 50) with `clouduler git-backup commits [--via NODE]`, then run `clouduler git-backup rollback <commit> [--via NODE] [--yes]`. The commit is a full sha or a unique prefix of at least 4 hex characters; without `--yes` the command asks you to type `yes`. The same two actions are in the API: `GET /api/git-backup/commits` and `POST /api/git-backup/rollback`.
-
-- **A new commit, never a rewrite.** The leader fetches the remote tip and pushes a new commit on top of it, named `Roll back configuration to <sha12>`, whose content is the target commit's. History is kept.
-- **Secrets and terraform state are not rolled back.** `secrets/`, every `*.tfstate.age` and the bookkeeping files (`.clouduler-*.json`) are taken from the current tip, because git cannot supply secret content. A stack from the old commit that needs a secret the cluster no longer has is rejected.
-- **Applied like a pull.** The new commit goes through the normal pull, so the usual rules apply: `cluster.yaml` is applied (the cluster's current generation is used, so an old file is not stale), stacks that exist now but not in the target commit are **removed**, stacks whose spec differs are **redeployed**, and configs and terraform modules follow the target. A rolled-back `cluster.yaml` can change nodes, networks and drives, so check it first.
-- **Refusals.** An unknown or ambiguous commit is a 400. If the pull rejects the result (any reason in the list above), the request fails with 409 and the reason; the branch is restored and the rolled-back commit is kept on a `rejected/` branch. A target whose content already equals the current one is a 409 too. A concurrent push to the remote also gives a 409; retry.
-- **Leader only.** A non-leader forwards the request. Exports are paused while a rollback runs, so a stale export cannot overwrite it.
+Returning the configuration to an earlier commit (a revert) and resetting the cluster to a commit together with a release are described on the [Rollbacks](/docs/features/rollbacks) page. Revert with `clouduler git-backup rollback <commit>`; reset with `clouduler git-backup reset <commit>`.
 
 ## Disaster recovery
 

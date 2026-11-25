@@ -106,6 +106,10 @@ Other routes: `PUT /api/self-update/repo` (write-once), `PUT /api/self-update/ch
 </UiCli.Cli>
 </UiCli>
 
+### Resetting the configuration and release together {#reset-release}
+
+`clouduler git-backup reset` also moves the cluster to a release, together with the configuration of a git commit, with downtime. See [Rollbacks](/docs/features/rollbacks#reset-to-a-commit).
+
 ### Rolling back to an older release (unsupported) {#rollback-release}
 
 :::danger Not supported, and it will most probably break your cluster

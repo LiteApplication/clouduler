@@ -88,6 +88,19 @@ pub async fn run(
         warn!(%reason, "the last update was rolled back, this is the previous version");
     }
 
+    // A configuration reset to a git commit is finished before raft is opened: the node stopped
+    // for it, and this is the restart. It exits again so the release it installed is the one that
+    // starts.
+    if crate::reset::apply_pending(
+        &data_dir,
+        &config_path,
+        &self_update_artifact_path(&data_dir),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
     let rpc_addr = cfg
         .rpc_addr(node)
         .context("node has no address on the internal network")?;
@@ -238,6 +251,7 @@ pub async fn run(
     // route can trigger it after swapping in a new binary.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
     let rollback_shutdown = shutdown_tx.clone();
+    let reset_shutdown = shutdown_tx.clone();
 
     // Shared by the api's cross-node forwarding and self-update's peer calls.
     // Accepts invalid certs: peers are authenticated by an HMAC header, not TLS
@@ -509,6 +523,9 @@ pub async fn run(
         node_name.clone(),
     );
 
+    let reset_watcher =
+        crate::reset::start_watcher(cluster.clone(), data_dir.clone(), reset_shutdown);
+
     let watchdog = crate::systemd::spawn_watchdog();
     crate::systemd::ready(&format!("node {node_name} running"));
 
@@ -543,6 +560,7 @@ pub async fn run(
     backup_runner.abort();
     terraform_runner.abort();
     restore_watcher.abort();
+    reset_watcher.abort();
     docker_api.abort();
     if let Some((orchestrator, worker)) = self_update {
         orchestrator.abort();
@@ -1091,6 +1109,11 @@ async fn watch_git_backup(
         // export rebuilds the tree from raft on top of it.
         let _export_guard = cl_api::routes::git_backup::export_guard().lock().await;
         let state = cluster.state().await;
+        // A configuration reset to a git commit has already put the remote back; exporting the
+        // cluster's current state now would undo it. The export resumes once the nodes are back.
+        if cl_update::reset::in_flight(&state) {
+            continue;
+        }
         let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
         if last_snapshot.as_ref() == Some(&snapshot) {
             continue;

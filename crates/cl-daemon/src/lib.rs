@@ -25,6 +25,7 @@ pub mod placement;
 pub mod proxy;
 pub mod quorum_stamp;
 pub mod relay;
+pub mod reset;
 pub mod restrict;
 pub mod supervisor;
 pub mod systemd;

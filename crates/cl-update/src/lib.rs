@@ -9,5 +9,6 @@ pub mod orchestrator;
 pub mod peers;
 pub mod plan;
 pub mod release;
+pub mod reset;
 pub mod rollback;
 pub mod worker;

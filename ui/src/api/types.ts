@@ -829,6 +829,11 @@ export interface NetworkConfig {
    *  hostnames on any node and their DNS is published for the network.
    *  Absent = false. */
   proxy?: boolean;
+  /** Internal and private networks only. Key = target network (the one a
+   *  route lives on); false = clients on THIS network get the route's own
+   *  address from the cluster DNS instead of this network's node address.
+   *  Missing key = true. */
+  shortcut?: Record<string, boolean>;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';
@@ -1100,6 +1105,25 @@ export interface GitBackupCommit {
   author: string;
   /** Unix seconds. */
   time: number;
+}
+
+/** Which release a git-backup reset installs: the one recorded at the commit
+ *  ('auto'), the running one ('current') or an explicit tag (downgrade allowed). */
+export type GitBackupResetRelease =
+  | { mode: 'auto' }
+  | { mode: 'current' }
+  | { mode: 'tag'; tag: string };
+
+/** 202 body of POST /api/git-backup/reset. */
+export interface GitBackupResetResult {
+  /** Full sha the main branch was reset to. */
+  commit: string;
+  /** Branch (rolled-back/<utc-ts>-<sha12>) now holding the discarded history. */
+  branch: string;
+  /** Release the nodes are told to download, null when the current one is kept. */
+  release_tag: string | null;
+  /** Where release_tag came from. */
+  release_source: 'explicit' | 'commit' | 'current';
 }
 
 /** GET /api/git-backup/webhook-secret. The token itself is write-only, like

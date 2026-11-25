@@ -1019,6 +1019,25 @@ pub enum GitBackupCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Reset the cluster to the configuration of a commit: the remote branch is force-pushed back
+    /// to it (the old tip is kept on a `rolled-back/` branch), every node downloads the release
+    /// recorded at that commit, then all nodes rewrite their raft store without any pull checks
+    /// and restart at the same time (downtime). Secrets and terraform state are kept.
+    Reset {
+        /// Commit sha or unique prefix of at least 4 hex characters (see `git-backup commits`).
+        commit: String,
+        /// Install this release (a downgrade is allowed) instead of the one recorded at the commit.
+        #[arg(long, conflicts_with = "keep_current_release")]
+        release_tag: Option<String>,
+        /// Do not download anything: keep the running release whatever the commit recorded.
+        #[arg(long)]
+        keep_current_release: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

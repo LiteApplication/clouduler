@@ -21,7 +21,9 @@ use crate::error::ApiError;
 use crate::server::AppState;
 
 pub fn is_reserved_config(name: &str) -> bool {
-    name == RUN_CONFIG || name == cl_update::plan::CHECK_CONFIG
+    name == RUN_CONFIG
+        || name == cl_update::plan::CHECK_CONFIG
+        || name == cl_update::reset::RESET_CONFIG
 }
 
 pub fn is_reserved_secret(name: &str) -> bool {
@@ -245,6 +247,11 @@ async fn start_run(
     drop(config);
 
     let cluster_state = state.cluster.snapshot().await;
+    if cl_update::reset::in_flight(&cluster_state) {
+        return Err(ApiError::Conflict(
+            "a configuration reset to a git commit is in progress".into(),
+        ));
+    }
     let existing = cl_update::orchestrator::load_run_revision(&cluster_state);
     let revision = existing.as_ref().map(|(_, r)| *r).unwrap_or(0);
     if let Some((existing, _)) = existing {
@@ -291,7 +298,11 @@ async fn cancel_run(
 }
 
 /// Stores `run` if the object is still at `revision`: the orchestrator and workers write it too. A lost race is a retryable 409.
-async fn submit_run(state: &AppState, run: &UpdateRunState, revision: u64) -> Result<(), ApiError> {
+pub(crate) async fn submit_run(
+    state: &AppState,
+    run: &UpdateRunState,
+    revision: u64,
+) -> Result<(), ApiError> {
     let request = cl_update::orchestrator::put_run_request(run, revision)
         .map_err(|e| ApiError::internal(std::io::Error::other(e)))?;
     let response = state
@@ -305,7 +316,7 @@ async fn submit_run(state: &AppState, run: &UpdateRunState, revision: u64) -> Re
     Ok(())
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -431,7 +442,7 @@ async fn releases(
     Ok(Json(answer))
 }
 
-async fn unseal_github_token(state: &AppState) -> Option<String> {
+pub(crate) async fn unseal_github_token(state: &AppState) -> Option<String> {
     let cluster_state = state.cluster.snapshot().await;
     let entry = cluster_state.secrets.get(GITHUB_TOKEN_SECRET)?;
     let sealed = Sealed::from_blob(entry.sealed.clone());

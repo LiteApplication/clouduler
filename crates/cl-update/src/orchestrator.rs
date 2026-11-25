@@ -17,6 +17,7 @@ use crate::plan::{
     NodePhase, UpdateCheck, UpdateRunState, CHECK_CONFIG, GITHUB_TOKEN_SECRET, RUN_CONFIG,
 };
 use crate::release;
+use crate::reset::{self, ResetPhase, ResetPlan};
 
 /// How often the leader checks the run's progress.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -156,6 +157,9 @@ impl Orchestrator {
         let Some((mut run, revision)) = load_run_revision(&state) else {
             return Ok(());
         };
+        if run.hold {
+            self.settle_failed_reset(&state, &run).await;
+        }
         if !run.in_progress() {
             return Ok(());
         }
@@ -179,6 +183,13 @@ impl Orchestrator {
             return Ok(());
         }
 
+        // A reset takes it from here: every node holds the release, none is restarted one by one.
+        if run.hold {
+            self.commit_reset_go(&state, &run).await?;
+            run.finish(now());
+            return self.save(run, revision).await;
+        }
+
         if let Some(name) = restarting_node(&run) {
             self.check_restart_progress(&mut run, &state, &name);
             return self.save(run, revision).await;
@@ -200,6 +211,54 @@ impl Orchestrator {
             self.save(run, revision).await
         } else {
             Ok(())
+        }
+    }
+
+    /// The reset waiting on `run` goes `Go`: every node has the release staged. Idempotent.
+    async fn commit_reset_go(
+        &self,
+        state: &cl_raft::ClusterState,
+        run: &UpdateRunState,
+    ) -> Result<(), String> {
+        let Some((mut plan, revision)) = reset::load_revision(state) else {
+            return Ok(());
+        };
+        if plan.phase != ResetPhase::Preparing || plan.run_id.as_deref() != Some(run.id.as_str()) {
+            return Ok(());
+        }
+        plan.phase = ResetPlan::go_phase(&self.cluster, now());
+        info!(commit = %plan.commit, "every node holds the release, starting the configuration reset");
+        self.store_reset_plan(&plan, revision).await
+    }
+
+    /// The run a reset waits on stopped without every node ready (a failed download, a
+    /// cancellation): the reset fails with it, before any node was touched.
+    async fn settle_failed_reset(&self, state: &cl_raft::ClusterState, run: &UpdateRunState) {
+        let Some(reason) = run.failure_reason.clone() else {
+            return;
+        };
+        let Some((mut plan, revision)) = reset::load_revision(state) else {
+            return;
+        };
+        if plan.phase != ResetPhase::Preparing || plan.run_id.as_deref() != Some(run.id.as_str()) {
+            return;
+        }
+        warn!(%reason, "the configuration reset's release download failed, abandoning the reset");
+        plan.phase = ResetPhase::Failed { reason };
+        if let Err(e) = self.store_reset_plan(&plan, revision).await {
+            warn!(error = %e, "could not record the failed configuration reset");
+        }
+    }
+
+    async fn store_reset_plan(&self, plan: &ResetPlan, revision: u64) -> Result<(), String> {
+        let response = self
+            .cluster
+            .submit(plan.put_request(revision)?)
+            .await
+            .map_err(|e| format!("submitting the reset plan: {e}"))?;
+        match response.error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 

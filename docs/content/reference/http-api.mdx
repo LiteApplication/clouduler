@@ -271,6 +271,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | POST | `/api/git-backup/pull-now` | admin | none | 202 or 204 | |
 | POST | `/api/git-backup/reconcile-now` | admin | none | 202 or 204 | |
 | GET | `/api/git-backup/commits` | admin | none | `[{sha, short, message, author, time}]` | Newest first, at most 50, from the configured branch (fetched first). `short` is 12 characters, `message` the first line, `time` unix seconds. 409 `git backup is not configured`. |
+| POST | `/api/git-backup/reset` | admin | `{"commit": "<sha or unique prefix>", "release_tag": "<tag>", "keep_current_release": false}` (release fields optional, mutually exclusive) | 202 `{commit, branch, release_tag, release_source}` | Resets the configuration and release to a commit, with downtime. 400 and 409 for refusals. See [Rollbacks](/docs/features/rollbacks#reset-to-a-commit). |
 | POST | `/api/git-backup/rollback` | admin | `{"commit": "<sha or unique prefix>"}` | `{"commit": "<new head sha>"}` | Pushes a new commit `Roll back configuration to <sha12>` and applies it through the pull. Secrets, terraform state and bookkeeping files are kept from the current tip. 400 for an unknown, ambiguous or malformed commit; 409 if git backup is off, nothing would change, the remote moved, or the pull rejected it (the reason is the message). Forwarded to the leader. |
 
 ### Restic backups and restore

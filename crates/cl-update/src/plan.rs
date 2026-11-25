@@ -111,6 +111,10 @@ pub struct UpdateRunState {
     /// latest (the ui steps through releases one series at a time).
     #[serde(default)]
     pub target_tag: Option<String>,
+    /// A configuration reset's run (`crate::reset`): every node downloads and stages the release,
+    /// then the leader hands over to the reset instead of restarting nodes one by one.
+    #[serde(default)]
+    pub hold: bool,
 }
 
 impl UpdateRunState {
@@ -128,6 +132,7 @@ impl UpdateRunState {
             failure_reason: None,
             restart_started_at: None,
             target_tag: None,
+            hold: false,
         }
     }
 

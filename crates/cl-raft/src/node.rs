@@ -110,6 +110,17 @@ pub async fn restore(
     Ok(())
 }
 
+/// Offline: see `Store::reset_to`.
+pub async fn reset(
+    data_dir: &std::path::Path,
+    go: &crate::store::ResetGo,
+    content: &crate::store::ResetContent,
+) -> Result<()> {
+    let store = Store::open(data_dir.join("raft.redb"))?;
+    store.reset_to(go, content).await?;
+    Ok(())
+}
+
 /// Offline, after `restore`: refills the terraform modules and sealed states.
 pub async fn restore_terraform(
     data_dir: &std::path::Path,

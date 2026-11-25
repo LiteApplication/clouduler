@@ -441,6 +441,23 @@ async fn main() -> Result<()> {
             GitBackupCommand::Rollback { commit, via, yes } => {
                 cl_cli::git_backup_cli::rollback(&cfg, via.as_deref(), &commit, yes).await
             }
+            GitBackupCommand::Reset {
+                commit,
+                release_tag,
+                keep_current_release,
+                via,
+                yes,
+            } => {
+                cl_cli::git_backup_cli::reset(
+                    &cfg,
+                    via.as_deref(),
+                    &commit,
+                    release_tag.as_deref(),
+                    keep_current_release,
+                    yes,
+                )
+                .await
+            }
         },
         Command::Update { instances, via } => {
             cl_cli::update_cli::apply(&cfg, instances, via.as_deref()).await

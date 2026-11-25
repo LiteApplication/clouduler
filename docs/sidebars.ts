@@ -43,6 +43,7 @@ const sidebars: SidebarsConfig = {
         {type: 'doc', id: 'features/updates', label: 'Updates'},
         {type: 'doc', id: 'features/backups', label: 'Backups'},
         {type: 'doc', id: 'features/git-backup', label: 'Git backup'},
+        {type: 'doc', id: 'features/rollbacks', label: 'Rollbacks'},
         {type: 'doc', id: 'features/alerts', label: 'Alerts'},
         {type: 'doc', id: 'features/access-and-login', label: 'Access and login'},
         {type: 'doc', id: 'features/mcp', label: 'MCP server'},

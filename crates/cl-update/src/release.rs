@@ -158,6 +158,42 @@ pub fn pinned_source(source: &str, tag: &str) -> Result<String, String> {
     ))
 }
 
+/// The arches in `arches` that `assets` has no binary for, sorted and deduplicated.
+pub fn missing_arches<'a>(
+    assets: &BTreeMap<String, ReleaseAsset>,
+    arches: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut missing: Vec<String> = arches
+        .into_iter()
+        .filter(|arch| !assets.contains_key(*arch))
+        .map(str::to_string)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Resolves `tag` of `source` exactly as a self-update run pinned to it would, and checks it has
+/// an asset for every arch in `arches`. Lets a caller refuse before it changes anything.
+pub async fn validate_pinned<'a>(
+    source: &str,
+    tag: &str,
+    token: Option<&str>,
+    arches: impl IntoIterator<Item = &'a str>,
+) -> Result<ResolvedRelease, String> {
+    let pinned = pinned_source(source, tag)?;
+    let resolved = resolve(&pinned, token).await?;
+    let missing = missing_arches(&resolved.assets, arches);
+    if !missing.is_empty() {
+        return Err(format!(
+            "release {} has no binary for node arch {}",
+            resolved.tag,
+            missing.join(", ")
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Resolve `source` to its release and the assets published per architecture.
 pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
     tokio::time::timeout(RESOLVE_TIMEOUT, resolve_inner(source, token))
@@ -260,6 +296,23 @@ pub async fn download_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_arches_lists_only_absent_ones() {
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "x86_64".to_string(),
+            ReleaseAsset {
+                id: 1,
+                name: asset_name("x86_64"),
+            },
+        );
+        assert!(missing_arches(&assets, ["x86_64", "x86_64"]).is_empty());
+        assert_eq!(
+            missing_arches(&assets, ["aarch64", "x86_64", "aarch64"]),
+            vec!["aarch64".to_string()]
+        );
+    }
 
     #[test]
     fn pinned_source_replaces_any_tag() {

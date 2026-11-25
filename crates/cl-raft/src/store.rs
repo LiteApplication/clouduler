@@ -235,6 +235,126 @@ impl Store {
         Ok(())
     }
 
+    /// Offline half of "reset the configuration to a git commit" (`cl-update::reset`): breaks quorum
+    /// on this node by purging the whole log and stamping one synthetic committed entry whose id
+    /// (`go`) comes from the replicated plan, so every node writes the same one, then replaces
+    /// the cluster config, stacks and configs with `content`. Unlike `force_quorum` the full voter
+    /// membership is kept, so the nodes re-form the same cluster when they start together.
+    /// Secrets, terraform state and every other part of the state are left alone.
+    ///
+    /// Everything lands in one transaction and a node already at `go`'s log id is left untouched,
+    /// so a crash and re-run is harmless. Must only run while the daemon is stopped.
+    pub async fn reset_to(&self, go: &ResetGo, content: &ResetContent) -> Result<(), StorageError> {
+        use crate::state::{ClusterConfigEntry, Request};
+
+        let mut sm = self.sm.write().await;
+        let log_id = LogId::new(
+            openraft::CommittedLeaderId::new(go.term, go.leader),
+            go.index,
+        );
+        if sm.last_applied == Some(log_id) {
+            return Ok(());
+        }
+
+        {
+            let data = sm.data_mut();
+            data.cluster_config = content.cluster_yaml.clone().map(|yaml| ClusterConfigEntry {
+                yaml,
+                generation: content.generation,
+            });
+
+            // Same state machine transitions as the api would submit, so ownership, previous
+            // specs and the cleanup of removed stacks match a normal deploy/remove.
+            let wanted: std::collections::BTreeSet<&str> =
+                content.stacks.iter().map(|s| s.name.as_str()).collect();
+            let gone: Vec<String> = data
+                .stacks
+                .keys()
+                .filter(|name| !wanted.contains(name.as_str()))
+                .cloned()
+                .collect();
+            for name in gone {
+                data.apply(&Request::RemoveStack { name });
+            }
+            for stack in &content.stacks {
+                if data
+                    .stacks
+                    .get(&stack.name)
+                    .is_some_and(|s| s.spec == stack.spec)
+                {
+                    // Unchanged: a redeploy would bump the revision and recreate its containers.
+                } else {
+                    data.apply(&Request::DeployStack {
+                        name: stack.name.clone(),
+                        spec: stack.spec.clone(),
+                        at: content.at,
+                    });
+                }
+                data.apply(&Request::SetStackObjects {
+                    name: stack.name.clone(),
+                    configs: stack.configs.clone(),
+                    secrets: stack.secrets.clone(),
+                    used_configs: stack.used_configs.clone(),
+                    used_secrets: stack.used_secrets.clone(),
+                });
+            }
+            for config in &content.configs {
+                let unchanged = data
+                    .configs
+                    .get(&config.name)
+                    .is_some_and(|c| c.content == config.content && c.owner == config.owner);
+                if !unchanged {
+                    data.apply(&Request::PutConfig {
+                        name: config.name.clone(),
+                        content: config.content.clone(),
+                        owner: config.owner.clone(),
+                    });
+                }
+            }
+            for name in &content.remove_configs {
+                if !content.configs.iter().any(|c| &c.name == name) {
+                    data.apply(&Request::RemoveConfig { name: name.clone() });
+                }
+            }
+            data.version += 1;
+        }
+
+        let membership = sm.membership.membership().clone();
+        sm.last_applied = Some(log_id);
+        sm.membership = StoredMembership::new(Some(log_id), membership);
+        sm.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
+
+        // A stored snapshot at the synthetic id keeps a node that is behind it (or joins later)
+        // installable: the log it would otherwise read from is gone.
+        let snapshot = StoredSnapshot {
+            meta: SnapshotMeta {
+                last_log_id: sm.last_applied,
+                last_membership: sm.membership.clone(),
+                snapshot_id: format!("reset-{}-{}", go.term, go.index),
+            },
+            data: encode(&*sm)?,
+        };
+
+        let txn = self.db.begin_write().map_err(write_err)?;
+        {
+            let mut logs = txn.open_table(LOGS).map_err(write_err)?;
+            logs.retain(|_, _| false).map_err(write_err)?;
+            let mut meta = txn.open_table(META).map_err(write_err)?;
+            let vote = crate::types::Vote::new_committed(go.term, go.leader);
+            for (key, value) in [
+                (KEY_PURGED, encode(&log_id)?),
+                (KEY_COMMITTED, encode(&Some(log_id))?),
+                (KEY_VOTE, encode(&vote)?),
+                (KEY_STATE_MACHINE, encode(&*sm)?),
+                (KEY_SNAPSHOT, encode(&snapshot)?),
+            ] {
+                meta.insert(key, value.as_slice()).map_err(write_err)?;
+            }
+        }
+        txn.commit().map_err(write_err)?;
+        Ok(())
+    }
+
     /// Companion to `restore_state` for `clouduler restore`: replaces the terraform
     /// modules and sealed states (`terraform_runs`/`requests`/`applied` are cleared,
     /// so a restored cluster re-applies once rather than trusting stale fingerprints).
@@ -324,6 +444,51 @@ impl Store {
 
         Ok(membership)
     }
+}
+
+/// The synthetic committed log entry every node stamps in `Store::reset_to`. Chosen once by the
+/// leader (see `cl_update::reset`) so it is identical everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetGo {
+    pub term: u64,
+    pub index: u64,
+    /// A voter; the committed vote the nodes restart with points at it.
+    pub leader: NodeId,
+}
+
+/// A stack as `Store::reset_to` deploys it (the fields `DeployStack` + `SetStackObjects` take).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetStack {
+    pub name: String,
+    pub spec: String,
+    pub configs: std::collections::BTreeSet<String>,
+    pub secrets: std::collections::BTreeSet<String>,
+    pub used_configs: std::collections::BTreeSet<String>,
+    pub used_secrets: std::collections::BTreeSet<String>,
+}
+
+/// A config as `Store::reset_to` writes it; `content` is already base64.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetConfig {
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// What `Store::reset_to` writes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetContent {
+    pub cluster_yaml: Option<String>,
+    pub generation: u64,
+    /// Unix seconds recorded as the stacks' `deployed_at`.
+    pub at: i64,
+    /// Every stack of the target; stacks not listed here are removed.
+    pub stacks: Vec<ResetStack>,
+    pub configs: Vec<ResetConfig>,
+    /// Existing configs to delete (the caller leaves reserved ones out).
+    #[serde(default)]
+    pub remove_configs: Vec<String>,
 }
 
 // -- log --------------------------------------------------------------------
