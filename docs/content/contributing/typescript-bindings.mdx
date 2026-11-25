@@ -1,0 +1,59 @@
+---
+title: TypeScript bindings
+sidebar_position: 3
+---
+
+# TypeScript bindings
+
+The UI's view of the API is partly generated from the Rust types, so those types cannot drift from what the server serialises. [ts-rs](https://github.com/Aleph-Alpha/ts-rs) derives one `.ts` file per Rust type into `ui/src/api/generated/`. The files are committed, and CI fails when they are stale.
+
+Normal builds and releases are unaffected: ts-rs is an optional dependency behind a `ts` cargo feature that is off by default.
+
+## Regenerating
+
+```bash
+scripts/gen-ts-bindings.sh
+```
+
+The script runs the ts-rs export tests of every crate that has the `ts` feature (`cl-alert`, `cl-api`, `cl-backup`, `cl-config`, `cl-raft`, `cl-restic`, `cl-sched`) with `TS_RS_EXPORT_DIR` pointing at a scratch directory and `TS_RS_LARGE_INT=number`, so 64-bit integers are `number` as in the JSON. It then writes `index.ts` (one `export type` per file) and swaps the result into `ui/src/api/generated/`, so a type you removed in Rust loses its file.
+
+Never edit `ui/src/api/generated/` by hand. Run the script after changing any serialised Rust type that has the derive, and commit the result together with the Rust change.
+
+The script sets `CL_API_SKIP_UI_BUILD=1`, which makes `cl-api`'s build script skip its `npm run build`. Without it the UI typecheck would fail on a generated file the script has not written yet, for example right after you re-export a new type from `types.ts`.
+
+CI (the `rust` job) runs the script and fails when `git status --porcelain -- ui/src/api/generated` shows any change, modified, deleted or new file.
+
+## Adding a type
+
+Add the derive next to the serde derive, and `export` so the script picks the type up:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct MyResponse { /* ... */ }
+```
+
+Every type it refers to needs the derive too, or the `ts` build fails with "the trait `TS` is not implemented"; crates that gain a derive need a `ts` feature (`ts = ["dep:ts-rs", "other-crate/ts"]`) and an entry in the script's `-p` list. ts-rs reads `#[serde(...)]` (`rename`, `rename_all`, `tag`, `flatten`, `default`, `skip`), with these exceptions that need a hand-written override:
+
+- `#[serde(with = "...")]` (for example `humantime_serde`) is a compile error until the field has `#[cfg_attr(feature = "ts", ts(type = "string"))]`, or `ts(optional, as = "Option<String>")` for an `Option` that is skipped when `None`.
+- `#[serde(into = "...")]`, `try_from`, `from` and hand-written `Serialize` impls are ignored. Describe the real wire shape with a container `ts(type = "...")` (see `Middleware`, `ByteSize`, `InstanceId`) or a shadow enum renamed to the type (see `InterfaceAddressWire`).
+- A field that is `Option<T>` and skipped when `None` is generated as `field: T | null`. Add `#[cfg_attr(feature = "ts", ts(optional))]` if the server omits it.
+- `#[serde(default)]` fields are generated as required, because the server always sends them. The UI cannot omit them when it builds such an object itself.
+
+ts-rs names files after the Rust type (or its `ts(rename = "...")`), flat in one directory, so two exported types must not share a name.
+
+## Using them in the UI
+
+`ui/src/api/types.ts` re-exports the generated types it can and declares the rest by hand. It stays the one module the UI imports from. To move a hand-written type over, delete its declaration and add an `import type` plus an `export type` for it from `./generated/<Name>`, then run `npx tsc` and `npx vitest run` in `ui/`. If the generated shape is stricter than what the UI builds (test fixtures and the mock backend construct these objects), either fix the fixture or keep the hand-written type.
+
+What stays hand-written, and why (the header of `types.ts` says the same):
+
+- Responses the handlers build with `json!` or by adding fields to a stored record (for example `DnsRecordState`, `ProxyRoute`, `Identity`), which have no single Rust type.
+- Request bodies and config objects the UI edits and sends back, where `#[serde(default)]` fields must stay optional (`ClusterConfig` and its section types, `NodeState` in test fixtures, `NodeReport`, `AlertSettings`).
+- `InstanceProgressEvent.state`, which is a union of known states in the UI and a plain string in Rust.
+
+The existing [api/ui contract](/docs/contributing/testing#the-apiui-contract) still covers the hand-written types: the fixture check catches a field the server stopped sending.
+
+## Related
+
+- [Testing](/docs/contributing/testing), [Building](/docs/contributing/building)

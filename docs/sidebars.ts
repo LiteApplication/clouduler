@@ -104,6 +104,7 @@ const sidebars: SidebarsConfig = {
       items: [
         {type: 'doc', id: 'contributing/building', label: 'Building'},
         {type: 'doc', id: 'contributing/testing', label: 'Testing'},
+        {type: 'doc', id: 'contributing/typescript-bindings', label: 'TypeScript bindings'},
         {type: 'doc', id: 'contributing/docs-screens', label: 'Docs components demo'},
       ],
     },

@@ -54,6 +54,8 @@ UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
 cd ui && npx vitest run && npm run build
 ```
 
+Interfaces that come from the Rust types are generated rather than written by hand; see [TypeScript bindings](/docs/contributing/typescript-bindings).
+
 CI regenerates the fixture in the Rust job and hands it to the UI job, and `release.sh` regenerates it before tagging. Endpoints that return arrays keyed by cluster contents the harness does not have (stacks, instances, certificates) are deliberately not covered, because an empty array proves nothing about the item shape.
 
 ## The docs mock contract
