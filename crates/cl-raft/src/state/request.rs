@@ -457,6 +457,12 @@ pub(super) const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "RequestTerraformRun",
 ];
 
+// Why this mirror (and the hand-written `Deserialize`) must exist: deriving `Deserialize`
+// on `Request` directly with `#[serde(untagged)] Unknown` would also turn a *known* tag
+// with a malformed body into `Unknown` (a silent no-op on this node while others apply it),
+// instead of the hard error we require. Only a never-heard-of tag may fall back, so the tag
+// check must run before variant parsing, which needs a separate derived impl (`serde(remote)`).
+//
 // Mirrors `Request` field-for-field so `#[derive(Deserialize)]` can generate the
 // per-variant parsing under `serde(remote)`. Every new `Request` variant must be
 // added here too: nothing forces it, and drift would make a known variant
