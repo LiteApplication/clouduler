@@ -6,12 +6,14 @@ pub const DEFAULT_TERRAFORM_IMAGE: &str = "ghcr.io/opentofu/opentofu:1.10";
 
 /// How clouduler runs the OpenTofu modules stored with stacks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct TerraformConfig {
     /// The OpenTofu image used for init, plan and apply.
     #[serde(default = "default_terraform_image")]
     pub image: String,
     /// Wall-clock limit for one run.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_terraform_timeout")]
     pub timeout: Duration,
     /// Docker network the `tofu init` container (provider downloads) runs on.
@@ -31,9 +33,11 @@ impl Default for TerraformConfig {
 
 /// How often the leader checks registries for newer image digests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ImageUpdatesConfig {
     /// Time between checks, raised to `MIN_IMAGE_CHECK_INTERVAL` if lower.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_image_check_interval")]
     pub check_interval: Duration,
 }
@@ -61,6 +65,7 @@ impl ImageUpdatesConfig {
 ///
 /// On by default; every grant still needs an admin or viewer approval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     #[serde(default = "default_true_bool")]
@@ -79,6 +84,7 @@ impl Default for McpConfig {
 /// A GitHub api token (private repo / rate limits) lives sealed in the cluster
 /// secrets, not here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
     /// Either a repo url (`https://github.com/OWNER/REPO`), which tracks
@@ -89,6 +95,7 @@ pub struct SelfUpdateConfig {
     #[serde(default = "default_true_bool")]
     pub check_updates: bool,
     /// How often that lookup runs.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_update_check_interval")]
     pub check_interval: Duration,
 }
@@ -99,6 +106,7 @@ pub struct SelfUpdateConfig {
 /// a deploy key (`GET /api/git-backup/status`). Secrets are re-encrypted for
 /// `age_recipient`, so the private key can live outside the cluster.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct GitBackupConfig {
     /// SSH url, e.g. `git@github.com:org/repo.git`. Only ssh push (deploy
     /// key) auth is implemented, so http(s) urls are rejected.
@@ -137,6 +145,7 @@ impl<'de> Deserialize<'de> for GitBackupConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct CloudflareConfig {
     /// Zones clouduler may write records into. The api token is a sealed cluster

@@ -8,6 +8,7 @@ pub mod session;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Identity {
     /// Api key id, or the OIDC subject claim; stable but not human-readable (see `username`).
     pub subject: String,
@@ -17,6 +18,7 @@ pub struct Identity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "UserRole"))]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Admin,

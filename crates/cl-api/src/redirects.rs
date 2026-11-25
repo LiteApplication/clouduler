@@ -9,6 +9,7 @@ use cl_raft::ClusterState;
 pub const REDIRECTS_CONFIG: &str = "_clouduler_redirects";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RedirectRule {
     pub id: String,
     pub host: String,

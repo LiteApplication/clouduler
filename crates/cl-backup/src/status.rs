@@ -51,6 +51,7 @@ pub struct LastPull {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RejectedPull {
     pub reason: String,
     pub preserved_branch: String,

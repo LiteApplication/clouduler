@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ts-rs = { workspace = true, optional = true }
 parking_lot.workspace = true
 hcl-rs.workspace = true
 humantime-serde.workspace = true
@@ -15,6 +16,10 @@ serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[features]
+# Derive TypeScript bindings for the wire types (see docs/content/contributing/typescript-bindings).
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tempfile.workspace = true

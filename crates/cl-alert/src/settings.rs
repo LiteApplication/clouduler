@@ -26,6 +26,7 @@ pub fn auth_secret(destination: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Info,
@@ -44,6 +45,7 @@ impl Severity {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct AlertSettings {
     /// Master switch for outbound deliveries. In-app alerts are always kept.
@@ -51,6 +53,7 @@ pub struct AlertSettings {
     pub enabled: bool,
     /// A warning is only sent once it has lasted this long. Critical alerts
     /// go out immediately; info never interrupts anyone.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(default = "default_debounce", with = "humantime_serde")]
     pub warning_debounce: Duration,
     /// Local time (`HH:MM`) the daily digest of info alerts is sent.
@@ -71,6 +74,7 @@ pub struct AlertSettings {
     #[serde(default)]
     pub display_pending_warnings: bool,
     /// How long resolved and one-shot alerts are kept in the in-app feed.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(default = "default_retention", with = "humantime_serde")]
     pub retention: Duration,
     /// Base URL used for links in messages, e.g. `https://cloud.example.com`.
@@ -110,6 +114,7 @@ impl Default for AlertSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Destination {
     /// Unique, `[a-z0-9-]`, shown in lists and at the top of each message.
     pub name: String,
@@ -133,6 +138,7 @@ pub struct Destination {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DestinationKind {
     /// JSON POST to any URL (ntfy, Gotify, Home Assistant, your own service).
@@ -145,6 +151,7 @@ pub enum DestinationKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct DiscordOptions {
     #[serde(default)]
@@ -181,6 +188,7 @@ impl Default for DiscordOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum DiscordStyle {
     /// A coloured embed with fields.
@@ -192,6 +200,7 @@ pub enum DiscordStyle {
 
 /// How a message announces itself in Discord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum DiscordNotify {
     /// Mention [`DiscordOptions::mention`].
@@ -203,6 +212,7 @@ pub enum DiscordNotify {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct DiscordNotifyLevels {
     #[serde(default = "ping")]
@@ -228,6 +238,7 @@ impl Default for DiscordNotifyLevels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct SmtpSettings {
     pub host: String,
@@ -242,6 +253,7 @@ pub struct SmtpSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum SmtpSecurity {
     /// Plain connection upgraded with STARTTLS (port 587).
@@ -255,6 +267,7 @@ pub enum SmtpSecurity {
 
 /// Overrides for one catalog event.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct EventOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +278,7 @@ pub struct EventOverride {
 
 /// Where an event goes instead of its severity's default routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
     Muted,
@@ -275,6 +289,7 @@ pub enum Route {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Thresholds {
     /// Percent used on a drive's filesystem that raises `node.disk_low`.
@@ -285,6 +300,7 @@ pub struct Thresholds {
     /// Percent of RAM in use, sustained for `memory_for`.
     #[serde(default = "default_mem")]
     pub memory_percent: u8,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(default = "default_mem_for", with = "humantime_serde")]
     pub memory_for: Duration,
     /// Days before expiry that raise `cert.expiring` as a warning / critical.

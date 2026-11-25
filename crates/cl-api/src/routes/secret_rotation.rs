@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Delivery {
     File,
@@ -46,6 +47,7 @@ pub enum Delivery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Freshness {
     Current,
@@ -54,6 +56,7 @@ pub enum Freshness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SecretUse {
     pub instance: String,
     pub stack: String,

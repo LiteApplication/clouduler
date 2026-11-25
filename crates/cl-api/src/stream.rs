@@ -105,6 +105,7 @@ pub fn cpu_percent(
 const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InstanceProgressEvent {
     pub instance_id: String,
     pub state: String,

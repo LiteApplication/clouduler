@@ -9,6 +9,7 @@ use std::time::Duration;
 /// itself sits in a file on at least one node. A node without it replicates
 /// secrets but cannot start a container that uses one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     /// Path to the key file.
@@ -39,6 +40,7 @@ impl Default for SecretsConfig {
 
 /// How people authenticate to the web ui and the api.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// OIDC is the recommended way in. Without it, api keys are the only option.
@@ -51,6 +53,7 @@ pub struct AuthConfig {
     pub api_keys: bool,
 
     /// How long a ui session lasts.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_session_ttl")]
     pub session_ttl: Duration,
 }
@@ -68,6 +71,7 @@ impl Default for AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
     /// Issuer URL. Discovery happens at `<issuer>/.well-known/openid-configuration`.

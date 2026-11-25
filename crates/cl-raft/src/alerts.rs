@@ -14,6 +14,7 @@ pub const MAX_ALERT_RECORDS: usize = 2500;
 pub const MAX_RECORD_DELIVERIES: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum AlertState {
     /// Seen, but a warning that has not yet lasted the debounce.
@@ -33,6 +34,7 @@ impl AlertState {
 
 /// A path in the UI (`/instances/gitlab-web-0`) and what to call it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AlertLink {
     pub label: String,
     pub path: String,
@@ -45,6 +47,7 @@ pub struct AlertLink {
 
 /// One attempt-series to one destination for one transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AlertDelivery {
     pub destination: String,
     pub at: i64,
@@ -63,6 +66,7 @@ pub struct AlertDelivery {
 
 /// One entry of the in-app feed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AlertRecord {
     pub id: String,
     /// Catalog key.
@@ -112,6 +116,7 @@ pub struct AlertRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum SignalAction {
     /// The condition holds (idempotent: repeated opens refresh it).
@@ -124,6 +129,7 @@ pub enum SignalAction {
 
 /// Something a node saw that the leader's engine turns into a record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AlertSignal {
     /// Unique per signal (a uuid), so `TakeAlertSignals` removes exactly it.
     pub id: String,
@@ -157,6 +163,7 @@ fn one() -> u32 {
 
 /// Last delivery outcome of a destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DestinationHealth {
     pub ok: bool,
     pub at: i64,

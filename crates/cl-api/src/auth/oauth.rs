@@ -51,6 +51,7 @@ pub const MAX_UNAPPROVED_CLIENTS: usize = 100;
 const MAX_IN_MEMORY: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum McpGrant {
     Read,
@@ -89,6 +90,7 @@ pub async fn require_enabled(state: &AppState) -> Result<(), ApiError> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct McpClient {
     pub client_id: String,
     pub client_name: String,

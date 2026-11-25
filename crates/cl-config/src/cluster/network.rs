@@ -7,6 +7,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkKind {
     /// The one network every node talks to every other node on. Carries raft,
@@ -41,6 +42,7 @@ impl NetworkKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Network {
     #[serde(rename = "type")]
@@ -48,6 +50,7 @@ pub struct Network {
     /// Required for internal and private networks, where it must contain the
     /// node addresses, and for a container network, where it is the address
     /// space routed through the router (IPv4 only, `0.0.0.0/0` allowed).
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<String>"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<IpNet>,
     /// Records under this domain resolve to node addresses on this network.
@@ -91,6 +94,7 @@ pub struct Network {
 /// One port a managed network exposes on the address of the node holding the
 /// container of `stack`/`service`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ManagedOpenPort {
     /// Port on the node address.
@@ -115,6 +119,7 @@ impl ManagedOpenPort {
 /// A `container` network: the router and what its side may reach. The routed
 /// range is the network's own `subnet`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ContainerNetwork {
     /// Stack holding the router service.
@@ -139,6 +144,7 @@ pub struct ContainerNetwork {
 
 /// One host port opened to the router side of a container network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ContainerOpenPort {
     pub port: u16,

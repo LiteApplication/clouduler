@@ -30,6 +30,7 @@ pub fn terraform_key(stack: &str, service: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TerraformModule {
     pub source: String,
     /// Bumped by `SetStackTerraform` only when `source` changes.
@@ -38,6 +39,7 @@ pub struct TerraformModule {
 
 /// The tofu state, sealed with the cluster key (base64, like `SecretEntry::sealed`).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TerraformState {
     pub sealed: String,
     /// Compare-and-set counter: starts at 1 on the first put.
@@ -56,12 +58,14 @@ impl fmt::Debug for TerraformState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum TerraformMode {
     Plan,
     Apply,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum TerraformOutcome {
     Running,
     Succeeded { summary: String },
@@ -69,6 +73,7 @@ pub enum TerraformOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TerraformRun {
     pub id: String,
     pub mode: TerraformMode,
@@ -98,6 +103,7 @@ impl TerraformRun {
 
 /// Which store a module output is written to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum OutputKind {
     Secret,
@@ -107,6 +113,7 @@ pub enum OutputKind {
 /// A cluster secret or config written by a module's `outputs:` mapping. The element of
 /// `ClusterState::terraform_outputs`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct OutputObject {
     pub kind: OutputKind,
     pub name: String,

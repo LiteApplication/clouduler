@@ -875,17 +875,16 @@ impl Scheduler {
             }
 
             // A missing secret or key blocks this container, not the whole pass.
-            let mut objects =
-                match blocking_fs(|| {
-                    self.materializer
-                        .prepare(state, instance, &service.configs, &service.secrets)
-                }) {
-                    Ok(objects) => objects,
-                    Err(e) => {
-                        warn!(instance = %instance, error = %e, "cannot prepare objects, skipping");
-                        continue;
-                    }
-                };
+            let mut objects = match blocking_fs(|| {
+                self.materializer
+                    .prepare(state, instance, &service.configs, &service.secrets)
+            }) {
+                Ok(objects) => objects,
+                Err(e) => {
+                    warn!(instance = %instance, error = %e, "cannot prepare objects, skipping");
+                    continue;
+                }
+            };
             config_edits.append(&mut objects.config_edits);
 
             let managed_attached = file.managed_attachments(&live, &instance.service);
@@ -1219,7 +1218,9 @@ async fn is_mounted(path: PathBuf) -> bool {
         Ok(Ok(mounted)) => mounted.unwrap_or(false),
         Ok(Err(_)) => false,
         Err(_) => {
-            warn!("timed out checking whether a drive volume is mounted; treating it as not mounted");
+            warn!(
+                "timed out checking whether a drive volume is mounted; treating it as not mounted"
+            );
             false
         }
     }

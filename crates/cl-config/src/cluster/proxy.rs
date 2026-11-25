@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct WebConfig {
     /// Hostname the UI is served on, always over HTTPS. A bare label gets the
@@ -40,6 +41,7 @@ pub const DEFAULT_WEB_BACKEND_PORT: u16 = 8444;
 /// to wherever the container runs. `dns_publish` only decides what the public
 /// DNS answer says.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     #[serde(default = "default_true_bool")]
@@ -74,6 +76,7 @@ pub struct ProxyConfig {
 /// one-time-token URL that sets the app's cookie. Sessions are replicated in
 /// raft, so any node accepts any login.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ProxyAuthConfig {
     /// Portal hostname. A bare label gets each network's domain appended.
@@ -96,6 +99,7 @@ pub struct ProxyAuthConfig {
     pub username_claim: String,
     /// How long a login lasts, for the portal and every app cookie it hands out.
     /// An app cookie never outlives the portal session.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_session_ttl")]
     pub session_ttl: Duration,
     /// Heading of the login page.
@@ -114,6 +118,7 @@ pub struct ProxyAuthConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remember_ip: Vec<String>,
     /// How long a remembered address stays trusted, from the login that saved it.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_remember_ip_ttl")]
     pub remember_ip_ttl: Duration,
     /// Publish the portal hostname's DNS records through Cloudflare's proxy
@@ -125,6 +130,7 @@ pub struct ProxyAuthConfig {
 
 /// Colour sets for the login page: a dark background with a few loud shapes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "kebab-case")]
 pub enum PortalPalette {
     /// Deep grape with pink and lime.
@@ -208,6 +214,7 @@ impl Default for ProxyConfig {
 /// reach are refused; other names are forwarded upstream for clients inside a
 /// subnetted network and refused otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct DnsServerConfig {
     #[serde(default)]
@@ -239,6 +246,7 @@ impl Default for DnsServerConfig {
 
 /// Who a proxied hostname's DNS record names.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "kebab-case")]
 pub enum DnsPublishMode {
     /// Every node's address is published for every proxied hostname (like
@@ -254,6 +262,7 @@ pub enum DnsPublishMode {
 /// Certificate issuance for proxy routes. Needs `cloudflare`, since the only
 /// challenge implemented is DNS-01 against Cloudflare.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct AcmeConfig {
     /// Off by default: issuing against production Let's Encrypt from an

@@ -20,6 +20,7 @@ pub fn is_reserved_wireguard_secret(name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct WireguardIngressRule {
     pub id: String,
     pub network: String,

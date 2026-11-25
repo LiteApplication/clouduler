@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 /// Mirrors `cl_alert::Severity`; `cl-config` stays free of that crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum AlertSeverity {
     Info,

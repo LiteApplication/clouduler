@@ -33,6 +33,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=CL_API_PREBUILT_UI");
+    println!("cargo:rerun-if-env-changed=CL_API_SKIP_UI_BUILD");
 
     // A cross-build drives one cargo per target, which would otherwise run the
     // whole tsc + vite build once each. `CL_API_PREBUILT_UI=1` says the caller
@@ -40,7 +41,15 @@ fn main() {
     let prebuilt =
         std::env::var_os("CL_API_PREBUILT_UI").is_some() && real_dist.join("index.html").is_file();
 
-    let embed_dir = if !prebuilt && ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
+    // `CL_API_SKIP_UI_BUILD=1` never runs npm: `scripts/gen-ts-bindings.sh` sets it,
+    // since the ui imports the files that script is about to write.
+    let skip_build = std::env::var_os("CL_API_SKIP_UI_BUILD").is_some();
+
+    let embed_dir = if !prebuilt
+        && !skip_build
+        && ui_dir.join("node_modules").is_dir()
+        && which_npm_on_path()
+    {
         // Built into this build's own OUT_DIR, never the shared `ui/dist`:
         // vite empties its output directory first, so two cargo builds running
         // at once (one per target in a cross-build) would wipe `ui/dist`

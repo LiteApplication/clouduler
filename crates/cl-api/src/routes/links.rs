@@ -56,6 +56,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PeerLink {
     pub peer: String,
     pub raft: bool,
@@ -88,6 +89,7 @@ pub struct NodeLinks {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct NodeReport {
     pub node: String,
     pub reported: bool,
@@ -96,6 +98,7 @@ pub struct NodeReport {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Connectivity {
     pub reports: Vec<NodeReport>,
 }

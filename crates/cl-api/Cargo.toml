@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ts-rs = { workspace = true, optional = true }
 parking_lot.workspace = true
 cl-alert.workspace = true
 cl-backup.workspace = true
@@ -59,6 +60,10 @@ rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess
 # For `git2::Oid` only, in `routes::git_backup` - the git2 IO itself all lives
 # in `cl-backup`.
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }
+
+[features]
+# Derive TypeScript bindings for the wire types (see docs/content/contributing/typescript-bindings).
+ts = ["dep:ts-rs", "cl-alert/ts", "cl-backup/ts", "cl-config/ts", "cl-raft/ts", "cl-restic/ts", "cl-sched/ts"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

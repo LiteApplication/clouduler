@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A size in bytes. Accepts `1048576`, `"1MiB"`, `"1MB"`, `"10 kb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export), ts(type = "string"))]
 pub struct ByteSize(pub u64);
 
 impl ByteSize {

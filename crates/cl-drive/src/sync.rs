@@ -397,7 +397,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     id: id.clone(),
                     node: self.registry.node().to_string(),
                 })
-                .await {
+                .await
+            {
                 tracing::warn!(error = %e, "could not acknowledge the removed volume");
             }
         }
@@ -493,7 +494,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                         .map_or(0, |d| d.as_secs() as i64),
                 },
             })
-            .await {
+            .await
+        {
             tracing::warn!(error = %e, "could not record the served-drive conflict");
         }
     }
@@ -513,7 +515,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     id: id.clone(),
                     refusal: None,
                 })
-                .await {
+                .await
+            {
                 tracing::warn!(error = %e, "could not clear the recorded sync refusal");
             }
         }
@@ -631,7 +634,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                                     drive: id.drive.clone(),
                                     op: cl_raft::served::ServedOp::ClearOverwrite,
                                 })
-                                .await {
+                                .await
+                            {
                                 tracing::warn!(error = %e, "could not clear the served-drive overwrite marker");
                             }
                         }

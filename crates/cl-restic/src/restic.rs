@@ -335,6 +335,7 @@ fn parse_backup_line(line: &str) -> Option<BackupLine> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SnapshotInfo {
     pub id: String,
     pub time: String,

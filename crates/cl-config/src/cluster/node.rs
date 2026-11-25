@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum NodeRole {
     /// Votes in the raft quorum, can be elected leader.
@@ -16,6 +17,7 @@ pub enum NodeRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     /// Identity for raft membership and the removed-node tombstone. Minted fresh
@@ -78,6 +80,7 @@ pub struct Node {
 /// value (`net:` or `net: null`) on a private network means the node
 /// implements it for access only: it routes into it but holds no address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(untagged)]
 pub enum NodeAddress {
     /// No address; only valid on a private network. Listed first so a null
@@ -128,6 +131,11 @@ impl NodeAddress {
 /// Serializes as a bare string when `open_ports` is empty and `fallback` is
 /// unset, so `vpn: wg0` round trips unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    ts(export, as = "InterfaceAddressWire")
+)]
 pub struct InterfaceAddress {
     pub interface: String,
     pub open_ports: BTreeSet<OpenPort>,
@@ -136,6 +144,22 @@ pub struct InterfaceAddress {
     /// every reconcile tick, so it switches back when the primary recovers. See
     /// `docs/networking.md`.
     pub fallback: Option<EgressFallback>,
+}
+
+/// The wire shape of `InterfaceAddress` for the generated TypeScript bindings:
+/// a bare interface name, or the full object once ports or a fallback are set.
+#[cfg(feature = "ts")]
+#[derive(ts_rs::TS)]
+#[ts(rename = "InterfaceAddress", untagged)]
+#[allow(dead_code)]
+enum InterfaceAddressWire {
+    Bare(String),
+    Full {
+        interface: String,
+        open_ports: BTreeSet<OpenPort>,
+        #[ts(optional)]
+        fallback: Option<EgressFallback>,
+    },
 }
 
 impl InterfaceAddress {
@@ -152,6 +176,7 @@ impl InterfaceAddress {
 /// address used to tell whether the primary interface still has a route to
 /// the internet.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct EgressFallback {
     pub interface: String,
@@ -221,6 +246,7 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
 /// How the node is reached on a public network. At least one field must be set.
 /// ipv4 publishes an A record, ipv6 an AAAA, domain a CNAME.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct PublicAddress {
     #[serde(default)]
@@ -243,6 +269,7 @@ impl PublicAddress {
 
 /// One port a node's public router forwards to it, e.g. `25/tcp` for SMTP.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct OpenPort {
     pub port: u16,

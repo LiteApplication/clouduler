@@ -26,6 +26,12 @@ use crate::stack::port::Protocol;
 ///         - Server
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    // Serialized through `RawMiddleware`: a bare name, or a one-key map of settings.
+    ts(export, type = "string | { [key: string]: unknown }")
+)]
 #[serde(try_from = "RawMiddleware", into = "RawMiddleware")]
 pub enum Middleware {
     /// Answer plain HTTP with a redirect to the same URL over HTTPS.
@@ -50,6 +56,7 @@ pub enum Middleware {
 ///       groups: [family, admins]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Authenticated {
     /// The user needs at least one of these groups (from the identity
@@ -193,6 +200,7 @@ impl Middleware {
 
 /// Cross-origin access control for one route.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct CorsPolicy {
     /// Origins allowed to read the response. `["*"]` is rejected together with
@@ -209,6 +217,7 @@ pub struct CorsPolicy {
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_credentials: bool,
     /// How long a browser may cache a preflight result.
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<String>"))]
     #[serde(
         default,
         with = "humantime_serde::option",
@@ -238,6 +247,7 @@ fn is_true(b: &bool) -> bool {
 
 /// Header rewriting in both directions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Headers {
     /// Set on the request going to the container.
@@ -255,6 +265,7 @@ pub struct Headers {
 /// Rewrites a request's URL via regex and redirects to the result, instead of
 /// the fixed-string target a UI-managed redirect rule uses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct RedirectRegex {
     /// Matched against the full request URL (`scheme://host/path?query`), not
@@ -270,6 +281,11 @@ pub struct RedirectRegex {
 
 /// One HTTP route published through the reverse proxy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    ts(export, rename = "ProxyRouteConfig")
+)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyRoute {
     /// Bare label gets the network's domain appended.
@@ -304,6 +320,7 @@ pub struct ProxyRoute {
     /// How long to wait for the backend's response headers, connection time
     /// included. Unset means 30s, or no limit on an `http2` route; `0s`
     /// removes the limit on any route.
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<String>"))]
     #[serde(
         default,
         with = "humantime_serde::option",

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 /// How a drive's data is made available to the nodes using it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum DriveMode {
     /// Every implementing node keeps its own copy, kept in step by periodic
@@ -20,6 +21,7 @@ pub enum DriveMode {
 /// What a served drive does when the node it prefers comes back after a
 /// failover.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Failback {
     /// Hand the drive back on its own once the preferred node has caught up.
@@ -37,10 +39,12 @@ impl Failback {
 
 /// A cluster wide directory namespace. Nodes opt in by mapping it to a local path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct Drive {
     /// How often this drive syncs: each node's copy for a replicated drive, the
     /// active server's push to the `served_by` standbys for a served drive.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_sync_interval")]
     pub sync_interval: Duration,
 

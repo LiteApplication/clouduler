@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 const MAX_FILES: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
     VerifyMismatch,
@@ -24,6 +25,7 @@ pub enum ProblemKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CoWriter {
     pub instance: String,
     pub node: String,
@@ -31,6 +33,7 @@ pub struct CoWriter {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProblemAction {
     /// The last three are navigation the ui performs itself.
     pub id: String,
@@ -43,6 +46,7 @@ pub struct ProblemAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct MigrationProblem {
     pub kind: ProblemKind,
     pub title: String,

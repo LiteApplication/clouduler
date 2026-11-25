@@ -8,30 +8,36 @@ use std::time::Duration;
 /// shorter than `node_timeout` (cluster reschedules them), or the same
 /// container runs in two places and volumes corrupt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct FailoverConfig {
     /// How long a node may be unreachable before its containers are
     /// rescheduled elsewhere.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_node_timeout")]
     pub node_timeout: Duration,
 
     /// How long a node may run without a manager quorum before it stops its own
     /// containers. Must be shorter than `node_timeout`.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_fence_timeout")]
     pub fence_timeout: Duration,
 
     /// How often the leader probes the other nodes.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_probe_interval")]
     pub probe_interval: Duration,
 
     /// Time a container gets to stop cleanly before being killed, for services
     /// without their own `stop_grace_period`. Counts against the margin between
     /// `fence_timeout` and `node_timeout`.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_stop_grace")]
     pub stop_grace: Duration,
 
     /// How long a node that is rebooting or powering off may spend pushing its
     /// volumes to other nodes before it goes down. `0s` skips the push.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "humantime_serde", default = "default_shutdown_push_timeout")]
     pub shutdown_push_timeout: Duration,
 }

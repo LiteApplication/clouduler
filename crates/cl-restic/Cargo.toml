@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ts-rs = { workspace = true, optional = true }
 cl-raft.workspace = true
 cl-secret.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# Derive TypeScript bindings for the wire types (see docs/content/contributing/typescript-bindings).
+ts = ["dep:ts-rs", "cl-raft/ts"]
 
 [dev-dependencies]
 tempfile.workspace = true

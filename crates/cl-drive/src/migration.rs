@@ -343,7 +343,8 @@ async fn fail(node: &ClusterNode, instance: &InstanceId, err: DriveError) -> Dri
                 reason: err.to_string(),
             },
         })
-        .await {
+        .await
+    {
         tracing::warn!(error = %e, "could not record the migration failure");
     }
     err

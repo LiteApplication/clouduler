@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ts-rs = { workspace = true, optional = true }
 cl-config.workspace = true
 cl-secret.workspace = true
 
@@ -22,6 +23,10 @@ bytes.workspace = true
 futures.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[features]
+# Derive TypeScript bindings for the wire types (see docs/content/contributing/typescript-bindings).
+ts = ["dep:ts-rs", "cl-config/ts"]
 
 [dev-dependencies]
 tempfile.workspace = true

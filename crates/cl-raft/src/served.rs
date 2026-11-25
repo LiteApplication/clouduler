@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ServedAuthority {
     pub holder: String,
     pub epoch: u64,
@@ -37,12 +38,14 @@ pub struct ServedAuthority {
 pub const FAILBACK_RETRY_SECS: i64 = 3600;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ServedHandover {
     pub to: String,
     pub at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ServedConflict {
     /// The node that was serving when the conflict was found.
     pub holder: String,
@@ -53,6 +56,7 @@ pub struct ServedConflict {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct FailbackBlock {
     pub node: String,
     pub reason: String,

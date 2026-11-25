@@ -13,6 +13,7 @@ use crate::cluster::{qualify, ClusterConfig};
 /// A raw `x-clouduler.expose` entry, carried through so the ui can check it
 /// against a node's `open_ports` without re-deriving it from the stack yaml.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BoundPort {
     pub network: String,
     pub protocol: Protocol,
@@ -21,6 +22,7 @@ pub struct BoundPort {
 
 /// One NVIDIA device request: what a node must have to satisfy it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct GpuRequirement {
     /// The least GPUs needed: `count`, the number of `device_ids`, or one for
     /// "all".
@@ -29,6 +31,7 @@ pub struct GpuRequirement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct StackRequirements {
     /// Networks any service attaches to.
     pub networks: BTreeSet<String>,

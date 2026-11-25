@@ -1,6 +1,7 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Availability {
     Active,
@@ -10,6 +11,7 @@ pub enum Availability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Manager,
@@ -18,6 +20,7 @@ pub enum Role {
 
 /// A node as the cluster sees it; seeded from config, edited at runtime via the ui.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct NodeState {
     pub name: String,
     /// Config-declared identity (`cl_config::Node::id`); see `ClusterState::removed`.
@@ -84,6 +87,7 @@ impl NodeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct NvidiaGpu {
     pub index: u32,
     pub uuid: String,
@@ -91,6 +95,7 @@ pub struct NvidiaGpu {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RenderNode {
     pub path: String,
     #[serde(default)]
@@ -98,6 +103,7 @@ pub struct RenderNode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct NodeGpus {
     #[serde(default)]
     pub nvidia_devices: Vec<String>,
@@ -178,6 +184,7 @@ impl NodeState {
 /// Transport protocol for a router-forwarded port; mirrors `cl_config::stack::Protocol`
 /// so `cl-raft` does not depend on `cl-config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum PortProtocol {
     Tcp,
@@ -186,6 +193,7 @@ pub enum PortProtocol {
 
 /// A deployed stack; the spec is the raw submitted yaml so the ui can round trip it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct StackState {
     pub name: String,
     pub spec: String,
@@ -215,6 +223,7 @@ pub struct StackState {
 /// node's file (a node down during the edit would otherwise return stale). Raw
 /// yaml so `cl-raft` does not depend on `cl-config` and comments/key order survive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ClusterConfigEntry {
     pub yaml: String,
     /// Bumped on every accepted edit; a node writes the file only when this moves.
@@ -223,6 +232,7 @@ pub struct ClusterConfigEntry {
 
 /// A cluster wide config object, mounted read only into referencing containers. Stored in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ConfigEntry {
     pub name: String,
     pub content: String,
@@ -250,6 +260,7 @@ impl ConfigEntry {
 /// reaches here, so the database, snapshots and backups hold only ciphertext; a
 /// node without the cluster key replicates it but cannot run containers needing it.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SecretEntry {
     pub name: String,
     pub sealed: String,
@@ -273,6 +284,7 @@ impl fmt::Debug for SecretEntry {
 
 /// The cluster secret key encrypted to one node's public key; the plaintext never appears in this state.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct WrappedKeyEntry {
     pub ephemeral_public: String,
     pub sealed: String,
@@ -300,6 +312,7 @@ pub(crate) fn validate_object_name(name: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum DesiredState {
     Running,
@@ -307,6 +320,7 @@ pub enum DesiredState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Assignment {
     pub instance: InstanceId,
     pub node: String,
@@ -317,6 +331,7 @@ pub struct Assignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Migration {
     /// The node driving the move (where the instance started). Recorded because
     /// `Switching` repoints the assignment at the target, after which a node that
@@ -327,6 +342,7 @@ pub struct Migration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum MigrationPhase {
     Stopping,
@@ -357,6 +373,7 @@ impl MigrationPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct VolumeState {
     pub id: VolumeId,
     /// Bumped by whichever node last wrote the volume; shows if a copy is behind without hashing.
@@ -377,6 +394,7 @@ pub struct VolumeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SyncRefusal {
     pub from: String,
     pub to: String,
@@ -386,6 +404,7 @@ pub struct SyncRefusal {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct FrozenVolume {
     /// Node being edited; primary again on unfreeze.
     pub node: String,
@@ -405,6 +424,7 @@ impl VolumeState {
 
 /// A certificate distributed to every node so any can terminate TLS.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CertificateState {
     pub fqdn: String,
     pub chain_pem: String,
@@ -417,6 +437,7 @@ pub struct CertificateState {
 
 /// A DNS record clouduler created, tracked so ownership survives a leader change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DnsRecordState {
     pub fqdn: String,
     pub record_type: String,
@@ -430,6 +451,7 @@ pub struct DnsRecordState {
 /// as soon as it becomes desired so the ui has something to show, removed once
 /// the real record lands (so presence there always means "ready").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ReconcileStatus {
     Pending,
     Error { message: String, at: i64 },
@@ -437,6 +459,7 @@ pub enum ReconcileStatus {
 
 /// A place restic can keep a drive's backup history; see `DriveBackupTarget`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BackupDestination {
     pub id: String,
     pub name: String,
@@ -449,6 +472,7 @@ pub struct BackupDestination {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase", tag = "kind")]
 pub enum BackupDestinationKind {
     /// A path on one node's disk. If that node does not hold the drive, the runner
@@ -473,6 +497,7 @@ pub enum BackupDestinationKind {
 
 /// One drive's backup schedule and retention against one destination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DriveBackupTarget {
     pub id: String,
     pub drive: String,
@@ -505,6 +530,7 @@ pub struct DriveBackupTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BackupRun {
     pub id: String,
     pub target_id: String,
@@ -518,6 +544,7 @@ pub struct BackupRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum BackupRunOutcome {
     /// restic's `percent_done` from its last status line, updated in place by repeated
     /// `RecordBackupRun` submits for the same run id; `None` until the first.
@@ -585,6 +612,7 @@ impl<'de> Deserialize<'de> for BackupRunOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum BackupTrigger {
     Schedule,
     Manual { by: String },
@@ -595,6 +623,7 @@ pub const MAX_BACKUP_RUNS_PER_TARGET: usize = 50;
 
 /// What a restore covers: a drive, one volume, or every volume a service uses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum RestoreScope {
     Drive { drive: String },
     Volume { volume: VolumeId },
@@ -602,6 +631,7 @@ pub enum RestoreScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum RestoreStatus {
     Pending,
     Running,
@@ -613,6 +643,7 @@ pub enum RestoreStatus {
 /// primary, or the holder of a node-local repository; see `backup_restore.rs`)
 /// claims it (`Pending` -> `Running`) and executes, like `BackupRun`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RestoreRequest {
     pub id: String,
     pub scope: RestoreScope,
@@ -641,6 +672,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const CRASH_MOVE_RETENTION_SECS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ClusterState {
     pub nodes: BTreeMap<String, NodeState>,
     pub stacks: BTreeMap<String, StackState>,
@@ -779,6 +811,7 @@ pub struct ClusterState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SessionRecord {
     pub subject: String,
     pub username: String,
@@ -791,6 +824,7 @@ pub struct SessionRecord {
 pub const REMEMBERED_IP_HOST_PREFIX: &str = "ip:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProxySessionRecord {
     /// Hostname the cookie was issued for (lowercase, no port); honoured only there.
     pub host: String,
@@ -807,6 +841,7 @@ pub struct ProxySessionRecord {
 
 /// A one-time pass from the login portal to one protected hostname. See `Request::RedeemProxyToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProxyTokenRecord {
     pub host: String,
     pub subject: String,
@@ -820,6 +855,7 @@ pub struct ProxyTokenRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ContainerStatus {
     /// The reporting node, so a fresh report replaces exactly its own prior entries (including dropped instances).
     pub node: String,
@@ -838,6 +874,7 @@ pub struct ContainerStatus {
 /// Where one instance's image update or redeploy stands; written via
 /// `Request::SetInstanceUpdate` at each docker step, cleared by the owner a while after a terminal phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InstanceUpdate {
     /// The node whose docker runs the steps (the instance's node when the update began).
     pub node: String,
@@ -849,6 +886,7 @@ pub struct InstanceUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ImageCheck {
     /// The registry's digest for the reference; kept from the previous check when the latest lookup failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -859,6 +897,7 @@ pub struct ImageCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AutoUpdateRecord {
     /// The registry digest this record is about; a different one replaces it and restarts the countdown.
     pub digest: String,
@@ -870,6 +909,7 @@ pub struct AutoUpdateRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum AutoUpdateOutcome {
     /// Seen, and waiting out the configured delay.
@@ -886,6 +926,7 @@ pub enum AutoUpdateOutcome {
 
 /// The steps of an update in order; the old container keeps serving through `Queued` and `Pulling`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
     /// Accepted, waiting its turn (per node, one image download and one restart at a time).

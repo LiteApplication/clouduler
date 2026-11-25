@@ -28,6 +28,7 @@ pub fn node_id(id: uuid::Uuid) -> NodeId {
 /// Serialized as `stack.service.index` because these are used as map keys and
 /// json only takes string keys.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export), ts(type = "string"))]
 pub struct InstanceId {
     pub stack: String,
     pub service: String,
@@ -91,6 +92,12 @@ impl<'de> Deserialize<'de> for InstanceId {
 
 /// A volume, which always lives inside a drive. Serialized as `drive/volume`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    ts(export),
+    ts(type = "string", rename = "VolumeIdStr")
+)]
 pub struct VolumeId {
     pub drive: String,
     pub volume: String,

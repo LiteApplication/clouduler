@@ -16,6 +16,7 @@ pub const STATIC_ROUTES_CONFIG: &str = "_clouduler_static_routes";
 
 /// Resolved by DNS on every reconcile pass, so a hostname backend picks up a changed address.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct StaticRouteRule {
     pub id: String,
     pub host: String,
@@ -37,6 +38,7 @@ pub struct StaticRouteRule {
     pub websockets: bool,
     #[serde(default)]
     pub preserve_host: bool,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(default, with = "humantime_serde::option")]
     pub response_timeout: Option<Duration>,
     #[serde(default)]

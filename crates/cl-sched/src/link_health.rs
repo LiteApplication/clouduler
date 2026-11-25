@@ -21,6 +21,7 @@ pub const FLAPPING_FAILURES: usize = 2;
 
 /// One probe round of one link, as seen from this node.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct LinkSample {
     /// Unix seconds.
     pub at: i64,
@@ -39,6 +40,7 @@ impl LinkSample {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum LinkState {
     /// No more than one failed sample in the window, or nothing recorded yet.

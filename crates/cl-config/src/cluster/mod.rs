@@ -28,6 +28,7 @@ pub const DEFAULT_RPC_PORT: u16 = 7373;
 
 /// Root of the cluster config file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     pub cluster: ClusterMeta,
@@ -70,6 +71,7 @@ pub struct ClusterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(deny_unknown_fields)]
 pub struct ClusterMeta {
     pub name: String,
