@@ -483,7 +483,7 @@ export class ScenarioBuilder {
 }
 
 export function migrationTo(to: string, phase: Migration['phase'] = 'syncing'): Migration {
-  return { to, phase };
+  return { from: '', to, phase };
 }
 
 export function defaultAlertCatalog(): AlertCatalogEntry[] {

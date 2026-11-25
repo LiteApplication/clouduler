@@ -63,7 +63,7 @@ describe('DriveDetail served drive', () => {
   });
 
   it('shows a conflict banner instead and resolves after confirming', async () => {
-    drive = { ...base, served: { ...base.served!, conflict: { holder: 'n1', other: 'n0', reason: 'both written' } } };
+    drive = { ...base, served: { ...base.served!, conflict: { holder: 'n1', other: 'n0', reason: 'both written', at: 0 } } };
     renderPage();
     expect(screen.getByText(/were both changed while they were apart/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fail back now' })).not.toBeInTheDocument();

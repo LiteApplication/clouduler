@@ -143,6 +143,7 @@ describe('NodeDetail configuration section', () => {
       nvidia_devices: ['/dev/nvidia0'],
       nvidia: [{ index: 0, uuid: 'GPU-abc', name: 'RTX 3090' }],
       nvidia_runtime: false,
+      nvidia_hook: null,
       render_nodes: [{ path: '/dev/dri/renderD128', driver: 'i915' }],
       dev_paths: [],
     };
