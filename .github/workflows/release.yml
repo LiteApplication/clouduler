@@ -134,16 +134,24 @@ jobs:
           gh release edit "$PRE_TAG" \
             --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
 
-      # Only the newest pre-release is kept: drop every earlier one and its tag.
-      - name: delete the previous pre-releases
+      # Keep the 5 newest pre-releases, plus every pre-release newer than the
+      # last full release; drop the rest and their tags.
+      - name: delete the old pre-releases
         if: github.ref_type == 'branch'
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT: ${{ env.PRE_TAG }}
         run: |
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
-            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease and (.tagName | (startswith("pre-") or test("-next-")))) | .tagName' |
+          releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,isPrerelease,createdAt)
+          # createdAt is ISO 8601 UTC, so string comparison orders by time.
+          last_full=$(jq -r '[.[] | select(.isPrerelease | not) | .createdAt] | max // ""' <<< "$releases")
+          jq -r --arg last "$last_full" --arg cur "$CURRENT" '
+            [.[] | select(.isPrerelease and (.tagName | (startswith("pre-") or test("-next-"))))]
+            | sort_by(.createdAt) | reverse
+            | to_entries[]
+            | select(.key >= 5 and .value.createdAt <= $last and .value.tagName != $cur)
+            | .value.tagName' <<< "$releases" |
           while read -r tag; do
-            [ "$tag" = "$CURRENT" ] && continue
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           done
