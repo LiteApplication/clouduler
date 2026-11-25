@@ -116,6 +116,34 @@ case "$CONFIRM" in
     *) echo "Aborted." >&2; exit 1 ;;
 esac
 
+# The api schema (api-shapes fixture and generated ts bindings) may only change
+# between minor or major releases. Regenerate both, and in a patch release abort
+# if they differ from what is committed.
+LAST_VER="${LAST_TAG#v}"
+IFS=. read -r LAST_MAJOR LAST_MINOR _ <<< "${LAST_VER%%-*}"
+IFS=. read -r NEW_MAJOR NEW_MINOR _ <<< "${VERSION%%-*}"
+PATCH_RELEASE=0
+if [ "$LAST_MAJOR" = "$NEW_MAJOR" ] && [ "$LAST_MINOR" = "$NEW_MINOR" ]; then PATCH_RELEASE=1; fi
+SCHEMA_FILES=(ui/src/api/__fixtures__/api-shapes.json ui/src/api/generated)
+
+echo "Regenerating api-shapes fixture..."
+UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+# The regenerating run returns before comparing, so run it again without the
+# flag: the written fixture must pass before it is committed, tagged and pushed.
+echo "Checking the api-shapes fixture..."
+cargo test -p cl-api api_shapes
+
+echo "Regenerating typescript bindings..."
+scripts/gen-ts-bindings.sh
+
+if [ "$PATCH_RELEASE" = 1 ] && [ -n "$(git status --porcelain -- "${SCHEMA_FILES[@]}")" ]; then
+    echo "error: the api schema changed, which is only allowed in a minor or major release (v${VERSION} is a patch release over $LAST_TAG):" >&2
+    git status --short -- "${SCHEMA_FILES[@]}" >&2
+    echo "Restoring the schema files; pick a new minor/major version or revert the schema change." >&2
+    git checkout -- "${SCHEMA_FILES[@]}"
+    exit 1
+fi
+
 echo "Bumping version to ${VERSION}..."
 
 sed -i -E "/^\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
@@ -133,14 +161,7 @@ if command -v npm >/dev/null 2>&1 && [ -f ui/package-lock.json ]; then
     (cd ui && npm install --package-lock-only --silent)
 fi
 
-echo "Regenerating api-shapes fixture..."
-UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
-# The regenerating run returns before comparing, so run it again without the
-# flag: the written fixture must pass before it is committed, tagged and pushed.
-echo "Checking the api-shapes fixture..."
-cargo test -p cl-api api_shapes
-
-git add Cargo.toml crates/*/Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json
+git add Cargo.toml crates/*/Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json ui/src/api/generated
 
 git commit -m "release: v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"
