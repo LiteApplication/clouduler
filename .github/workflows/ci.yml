@@ -27,6 +27,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The generated typescript bindings (ui/src/api/generated) are committed;
+      # fail when they no longer match the rust types.
+      - name: typescript bindings are up to date
+        run: |
+          scripts/gen-ts-bindings.sh
+          test -z "$(git status --porcelain -- ui/src/api/generated)" || {
+            git status --porcelain -- ui/src/api/generated
+            echo "run scripts/gen-ts-bindings.sh and commit ui/src/api/generated"
+            exit 1
+          }
       # Regenerate the fixture, then fail if it differs from the committed
       # one. The ui typechecks against this file, so a backend shape change
       # that was not committed alongside it (and so never reached
