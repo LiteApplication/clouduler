@@ -32,6 +32,10 @@ pub enum BackupError {
     #[error("cluster state has no {0} deploy key entry")]
     MissingDeployKey(&'static str),
 
+    /// A commit the caller named is not usable (unknown, ambiguous, not in the branch history).
+    #[error("{0}")]
+    BadCommit(String),
+
     #[error("push rejected by remote: {0}")]
     PushRejected(String),
 

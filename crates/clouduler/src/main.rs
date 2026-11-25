@@ -430,6 +430,12 @@ async fn main() -> Result<()> {
             GitBackupCommand::Reconcile { via } => {
                 cl_cli::git_backup_cli::reconcile(&cfg, via.as_deref()).await
             }
+            GitBackupCommand::Commits { via } => {
+                cl_cli::git_backup_cli::commits(&cfg, via.as_deref()).await
+            }
+            GitBackupCommand::Rollback { commit, via, yes } => {
+                cl_cli::git_backup_cli::rollback(&cfg, via.as_deref(), &commit, yes).await
+            }
         },
         Command::Update { instances, via } => {
             cl_cli::update_cli::apply(&cfg, instances, via.as_deref()).await

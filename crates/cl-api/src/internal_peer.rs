@@ -245,6 +245,46 @@ pub async fn post_json_body<B: Serialize, T: DeserializeOwned>(
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
+/// Like `post_json`, but a 400 or 409 from the peer keeps its status and message instead of
+/// becoming a generic 503, for forwarding a leader-only action whose refusal the caller must see.
+pub async fn post_json_relay<T: DeserializeOwned>(
+    state: &AppState,
+    node: &str,
+    path: &str,
+) -> Result<T, ApiError> {
+    let base = peer_base_url(state, node).await?;
+    let resp = signed(
+        state,
+        state.http.post(format!("{base}{path}")),
+        "POST",
+        path,
+        b"",
+    )
+    .await?
+    .timeout(WRITE_TIMEOUT)
+    .send()
+    .await
+    .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<T>()
+            .await
+            .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")));
+    }
+    let message = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{node} answered {status}"));
+    Err(match status {
+        reqwest::StatusCode::BAD_REQUEST => ApiError::BadRequest(message),
+        reqwest::StatusCode::CONFLICT => ApiError::Conflict(message),
+        _ => ApiError::Unavailable(message),
+    })
+}
+
 /// Proxied straight through for the SSE log and stats streams; no timeout, which would cut a `follow=true` stream.
 pub async fn proxy_stream(state: &AppState, node: &str, path: &str) -> Result<Response, ApiError> {
     let base = peer_base_url(state, node).await?;

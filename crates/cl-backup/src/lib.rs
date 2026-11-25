@@ -13,5 +13,6 @@ pub mod git;
 pub mod snapshot;
 pub mod status;
 pub mod tree;
+pub mod upgrade;
 
 pub use error::{BackupError, Result};

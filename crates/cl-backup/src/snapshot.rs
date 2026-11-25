@@ -54,6 +54,10 @@ pub struct Snapshot {
     /// `"stack/service"` -> state serial.
     #[serde(default)]
     pub terraform_states: BTreeMap<String, u64>,
+    /// The last successful self-update (`.clouduler-version.json`), so finishing one makes the
+    /// next export commit even when nothing else changed.
+    #[serde(default)]
+    pub upgrade: Option<crate::upgrade::UpgradeRecord>,
 }
 
 impl Snapshot {
@@ -93,12 +97,14 @@ impl Snapshot {
                 .iter()
                 .map(|(key, st)| (key.clone(), st.serial))
                 .collect(),
+            upgrade: crate::upgrade::successful_upgrade(state),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
+    Upgraded(String),
     ClusterConfigChanged,
     StackAdded(String),
     StackUpdated(String),
@@ -119,6 +125,12 @@ pub enum Change {
 /// changed (e.g. only scheduling activity happened).
 pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
     let mut changes = Vec::new();
+
+    if let Some(record) = &new.upgrade {
+        if old.upgrade.as_ref() != Some(record) {
+            changes.push(Change::Upgraded(record.version.clone()));
+        }
+    }
 
     if old.cluster_config_generation != new.cluster_config_generation {
         changes.push(Change::ClusterConfigChanged);
@@ -214,6 +226,7 @@ pub fn commit_message(changes: &[Change]) -> String {
 
 fn describe(change: &Change) -> String {
     match change {
+        Change::Upgraded(version) => format!("Upgrade Clouduler to {version}"),
         Change::ClusterConfigChanged => "update cluster.yaml".to_string(),
         Change::StackAdded(name) => format!("add stack {name}"),
         Change::StackUpdated(name) => format!("update stack {name}"),
@@ -233,6 +246,24 @@ fn describe(change: &Change) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_upgrade_is_a_change_with_its_own_commit_message() {
+        let old = Snapshot::default();
+        let new = Snapshot {
+            upgrade: Some(crate::upgrade::UpgradeRecord {
+                version: "v0.18.0".to_string(),
+                upgraded_at: 5,
+            }),
+            ..Default::default()
+        };
+        let changes = diff(&old, &new);
+        assert_eq!(changes, vec![Change::Upgraded("v0.18.0".to_string())]);
+        assert_eq!(commit_message(&changes), "Upgrade Clouduler to v0.18.0");
+        // Unchanged record: nothing; record vanishing (emergency): nothing either.
+        assert!(diff(&new, &new).is_empty());
+        assert!(diff(&new, &old).is_empty());
+    }
+
     #[test]
     fn the_update_check_is_bookkeeping_not_exported_content() {
         assert!(super::is_bookkeeping_config("_clouduler_self_update_check"));

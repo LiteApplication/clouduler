@@ -590,6 +590,178 @@ impl GitBackup {
         })
     }
 
+    /// The newest commits of the tracked branch (fetched first), newest first, at most `limit`.
+    /// Empty when the remote has no such branch yet.
+    pub fn list_commits(&self, private_key_pem: &str, limit: usize) -> Result<Vec<CommitInfo>> {
+        let Some(tip) = self.fetch_remote_tip(private_key_pem)? else {
+            return Ok(Vec::new());
+        };
+        let mut walk = self.repo.revwalk()?;
+        walk.push(tip)?;
+        walk.set_sorting(git2::Sort::TIME)?;
+        let mut out = Vec::new();
+        for oid in walk.take(limit) {
+            let commit = self.repo.find_commit(oid?)?;
+            let sha = commit.id().to_string();
+            out.push(CommitInfo {
+                short: sha[..12].to_string(),
+                sha,
+                message: String::from_utf8_lossy(commit.message_bytes())
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                author: commit.author().name().unwrap_or_default().to_string(),
+                time: u64::try_from(commit.time().seconds()).unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Resolves a full sha or unique hex prefix (at least 4 characters) to a commit in the history
+    /// of `tip`.
+    pub fn resolve_commit(&self, tip: git2::Oid, spec: &str) -> Result<git2::Oid> {
+        let spec = spec.trim().to_ascii_lowercase();
+        if spec.len() < 4 || spec.len() > 40 || !spec.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(BackupError::BadCommit(format!(
+                "{spec:?} is not a commit sha (give at least 4 hex characters)"
+            )));
+        }
+        let mut walk = self.repo.revwalk()?;
+        walk.push(tip)?;
+        let mut found = Vec::new();
+        for oid in walk {
+            let oid = oid?;
+            if oid.to_string().starts_with(&spec) {
+                found.push(oid);
+            }
+        }
+        match found.len() {
+            0 => Err(BackupError::BadCommit(format!(
+                "no commit {spec} in the history of branch {}",
+                self.branch
+            ))),
+            1 => Ok(found[0]),
+            _ => Err(BackupError::BadCommit(format!(
+                "commit prefix {spec} is ambiguous"
+            ))),
+        }
+    }
+
+    /// Reverts the configuration to `target` (a sha or unique prefix in the branch history) by
+    /// pushing a NEW commit on top of the freshly fetched remote tip; history is never rewritten.
+    /// The new tree is the target's, except `secrets/`, every `*.tfstate.age` and the bookkeeping
+    /// files (revision maps, version record), which come from the tip: git cannot supply secret
+    /// content and the pull path rejects any change to them. Returns `None` when that tree equals
+    /// the tip's (nothing to roll back). A push rejection is not retried: the caller decides.
+    pub fn rollback(
+        &self,
+        target: &str,
+        private_key_pem: &str,
+        author: Option<(&str, &str)>,
+    ) -> Result<Option<git2::Oid>> {
+        let tip = self.fetch_remote_tip(private_key_pem)?.ok_or_else(|| {
+            BackupError::BadCommit("the remote branch has no commits to roll back to".to_string())
+        })?;
+        let target = self.resolve_commit(tip, target)?;
+        let tip_commit = self.repo.find_commit(tip)?;
+        let tree_oid =
+            self.rollback_tree(&tip_commit.tree()?, &self.repo.find_commit(target)?.tree()?)?;
+        if tip_commit.tree()?.id() == tree_oid {
+            return Ok(None);
+        }
+        let tree = self.repo.find_tree(tree_oid)?;
+        let signature = match author {
+            Some((name, email)) => Signature::now(name, email)?,
+            None => Signature::now("clouduler", "clouduler@localhost")?,
+        };
+        let message = format!("Roll back configuration to {}", &target.to_string()[..12]);
+        let commit_oid = self.repo.commit(
+            None,
+            &signature,
+            &signature,
+            &message,
+            &tree,
+            &[&tip_commit],
+        )?;
+        self.repo.reference(
+            &format!("refs/heads/{}", self.branch),
+            commit_oid,
+            true,
+            "rollback",
+        )?;
+        self.push(private_key_pem)?;
+        Ok(Some(commit_oid))
+    }
+
+    /// `target`'s tree with the export-only parts replaced by `tip`'s (see [`Self::rollback`]).
+    fn rollback_tree(&self, tip: &git2::Tree, target: &git2::Tree) -> Result<git2::Oid> {
+        let mut root = self.repo.treebuilder(Some(target))?;
+        let from_tip = [
+            "secrets",
+            crate::tree::SECRET_REVISIONS_PATH,
+            crate::tree::TERRAFORM_REVISIONS_PATH,
+            crate::upgrade::VERSION_PATH,
+        ];
+        for name in from_tip {
+            match tip.get_name(name) {
+                Some(entry) => {
+                    root.insert(name, entry.id(), entry.filemode())?;
+                }
+                None => {
+                    let _ = root.remove(name);
+                }
+            }
+        }
+
+        // terraform/<stack>/: the target's modules, the tip's states.
+        type Entries = BTreeMap<String, BTreeMap<String, (git2::Oid, i32)>>;
+        let collect = |tree: &git2::Tree, states: bool, out: &mut Entries| -> Result<()> {
+            let Some(tf) = tree.get_name("terraform") else {
+                return Ok(());
+            };
+            let Ok(tf) = tf.to_object(&self.repo)?.into_tree() else {
+                return Ok(());
+            };
+            for stack in tf.iter() {
+                let Some(stack_name) = stack.name().ok() else {
+                    continue;
+                };
+                let Ok(stack_tree) = stack.to_object(&self.repo)?.into_tree() else {
+                    continue;
+                };
+                for entry in stack_tree.iter() {
+                    let Some(name) = entry.name().ok() else {
+                        continue;
+                    };
+                    if name.ends_with(".tfstate.age") == states {
+                        out.entry(stack_name.to_string())
+                            .or_default()
+                            .insert(name.to_string(), (entry.id(), entry.filemode()));
+                    }
+                }
+            }
+            Ok(())
+        };
+        let mut stacks = Entries::new();
+        collect(target, false, &mut stacks)?;
+        collect(tip, true, &mut stacks)?;
+        if stacks.is_empty() {
+            let _ = root.remove("terraform");
+        } else {
+            let mut tf = self.repo.treebuilder(None)?;
+            for (stack, entries) in stacks {
+                let mut sub = self.repo.treebuilder(None)?;
+                for (name, (oid, mode)) in entries {
+                    sub.insert(&name, oid, mode)?;
+                }
+                tf.insert(&stack, sub.write()?, 0o040000)?;
+            }
+            root.insert("terraform", tf.write()?, 0o040000)?;
+        }
+        Ok(root.write()?)
+    }
+
     /// Where trust-on-first-use host key pins for this repo's remote are
     /// kept - inside the bare repo's own `.git`-style directory.
     fn known_hosts_path(&self) -> PathBuf {
@@ -833,6 +1005,18 @@ pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree:
         terraform,
         terraform_states,
     })
+}
+
+/// One line of the commit list (`GitBackup::list_commits`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short: String,
+    /// First line of the message.
+    pub message: String,
+    pub author: String,
+    /// Unix seconds.
+    pub time: u64,
 }
 
 /// What `reject_and_restore` did with a rejected commit.
@@ -1096,6 +1280,181 @@ mod tests {
             cache.0.get("/tfstate/s/w"),
             Some(&(7, b"state-ct".to_vec()))
         );
+    }
+
+    fn rollback_files(
+        stack: &str,
+        secret: &str,
+        state: &str,
+        version: Option<&str>,
+    ) -> Vec<TreeFile> {
+        let mut files = vec![
+            TreeFile {
+                path: "cluster.yaml".to_string(),
+                contents: b"nodes: []\n".to_vec(),
+            },
+            TreeFile {
+                path: "stacks/a.yaml".to_string(),
+                contents: stack.as_bytes().to_vec(),
+            },
+            TreeFile {
+                path: "secrets/db.age".to_string(),
+                contents: secret.as_bytes().to_vec(),
+            },
+            TreeFile {
+                path: "terraform/a/web.tf".to_string(),
+                contents: format!("module-of-{stack}").into_bytes(),
+            },
+            TreeFile {
+                path: "terraform/a/web.tfstate.age".to_string(),
+                contents: state.as_bytes().to_vec(),
+            },
+            TreeFile {
+                path: crate::tree::SECRET_REVISIONS_PATH.to_string(),
+                contents: format!(r#"{{"db": {}}}"#, secret.len()).into_bytes(),
+            },
+        ];
+        if let Some(v) = version {
+            files.push(TreeFile {
+                path: crate::upgrade::VERSION_PATH.to_string(),
+                contents: v.as_bytes().to_vec(),
+            });
+        }
+        files
+    }
+
+    fn blob_at(repo: &Repository, commit: git2::Oid, path: &str) -> Option<String> {
+        let tree = repo.find_commit(commit).ok()?.tree().ok()?;
+        let entry = tree.get_path(Path::new(path)).ok()?;
+        let blob = entry.to_object(repo).ok()?.into_blob().ok()?;
+        Some(String::from_utf8_lossy(blob.content()).into_owned())
+    }
+
+    #[test]
+    fn rollback_reverts_the_config_but_keeps_secrets_state_and_bookkeeping_from_the_tip() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let (backup, first, _local) =
+            seeded_backup(&bare_dir, &rollback_files("v1", "ct-1", "state-1", None));
+        let key = "not-a-real-key";
+        let second = backup
+            .sync(
+                &rollback_files("v2", "ct-22", "state-22", Some("ver-2")),
+                "second",
+                key,
+                None,
+            )
+            .expect("sync")
+            .expect("commit");
+
+        let listed = backup.list_commits(key, 50).expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].sha, second.to_string());
+        assert_eq!(listed[0].short, second.to_string()[..12]);
+        assert_eq!(listed[0].message, "second");
+        assert_eq!(listed[0].author, "clouduler");
+        assert_eq!(backup.list_commits(key, 1).expect("list").len(), 1);
+
+        let new = backup
+            .rollback(
+                &first.to_string()[..10],
+                key,
+                Some(("alice", "alice@localhost")),
+            )
+            .expect("rollback")
+            .expect("a commit");
+
+        let remote = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let head = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(head, new);
+        let commit = remote.find_commit(new).unwrap();
+        assert_eq!(
+            commit.parent_id(0).unwrap(),
+            second,
+            "a new commit on top, no rewrite"
+        );
+        assert_eq!(
+            commit.message().unwrap(),
+            format!("Roll back configuration to {}", &first.to_string()[..12])
+        );
+        assert_eq!(commit.author().name().ok(), Some("alice"));
+
+        assert_eq!(
+            blob_at(&remote, new, "stacks/a.yaml").as_deref(),
+            Some("v1")
+        );
+        assert_eq!(
+            blob_at(&remote, new, "terraform/a/web.tf").as_deref(),
+            Some("module-of-v1")
+        );
+        assert_eq!(
+            blob_at(&remote, new, "secrets/db.age").as_deref(),
+            Some("ct-22")
+        );
+        assert_eq!(
+            blob_at(&remote, new, "terraform/a/web.tfstate.age").as_deref(),
+            Some("state-22")
+        );
+        assert_eq!(
+            blob_at(&remote, new, crate::tree::SECRET_REVISIONS_PATH).as_deref(),
+            Some(r#"{"db": 5}"#)
+        );
+        assert_eq!(
+            blob_at(&remote, new, crate::upgrade::VERSION_PATH).as_deref(),
+            Some("ver-2")
+        );
+
+        // The pull path's own checks see no secret or state change against the tip.
+        assert!(!backup
+            .secrets_changed_against_baseline(Some(second), new)
+            .unwrap());
+        assert!(!backup
+            .tfstate_changed_against_baseline(Some(second), new)
+            .unwrap());
+
+        // Rolling back to where the tree already is changes nothing.
+        assert_eq!(
+            backup.rollback(&new.to_string(), key, None).expect("noop"),
+            None
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_unknown_ambiguous_and_malformed_commits() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let (backup, first, _local) =
+            seeded_backup(&bare_dir, &rollback_files("v1", "ct-1", "state-1", None));
+        let key = "not-a-real-key";
+        let err = |spec: &str| {
+            backup
+                .rollback(spec, key, None)
+                .expect_err("must fail")
+                .to_string()
+        };
+        assert!(err("zzzz").contains("not a commit sha"));
+        assert!(err("ab").contains("not a commit sha"));
+        let other = if first.to_string().starts_with('0') {
+            "ffff"
+        } else {
+            "0000"
+        };
+        assert!(err(other).contains("no commit"));
+
+        // A remote with no branch at all has nothing to roll back to.
+        let empty = tempfile::tempdir().expect("bare");
+        Repository::init_bare(empty.path()).expect("init");
+        let local = tempfile::tempdir().expect("local");
+        let b = GitBackup::open_or_init(
+            local.path(),
+            &format!("file://{}", empty.path().display()),
+            "main",
+        )
+        .expect("open");
+        assert!(b.list_commits(key, 50).expect("list").is_empty());
+        assert!(b.rollback("abcd", key, None).is_err());
     }
 
     #[test]

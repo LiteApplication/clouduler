@@ -983,6 +983,22 @@ pub enum GitBackupCommand {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// List the newest commits (up to 50) of the tracked branch.
+    Commits {
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Roll the configuration back to a commit by pushing a new commit on top of the branch and
+    /// applying it like a pull. Secrets and terraform state are never rolled back.
+    Rollback {
+        /// Commit sha or unique prefix (see `git-backup commits`).
+        commit: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

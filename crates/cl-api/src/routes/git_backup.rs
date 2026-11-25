@@ -20,7 +20,7 @@ use axum::{Json, Router};
 use cl_backup::deploy_key::{
     public_from_state, DEPLOY_KEY_PRIVATE_SECRET, DEPLOY_KEY_PUBLIC_CONFIG,
 };
-use cl_backup::git::parse_tree;
+use cl_backup::git::{parse_tree, CommitInfo};
 use cl_backup::status::{
     last_known_good_commit, load as load_last_export, load_pull, LastExport, LastPull,
     RejectedPull, LAST_EXPORT_CONFIG, LAST_PULL_CONFIG,
@@ -67,6 +67,10 @@ pub fn router() -> Router<AppState> {
             "/api/git-backup/webhook/internal-reconcile",
             post(internal_reconcile),
         )
+        .route("/api/git-backup/commits", get(list_commits))
+        .route("/api/git-backup/rollback", post(rollback_admin))
+        .route("/api/git-backup/internal-rollback", post(internal_rollback))
+        .route("/api/git-backup/internal-commits", get(internal_commits))
         .route("/api/git-backup/pull", post(pull_now))
         .route("/api/git-backup/reconcile", post(reconcile_now))
         // Admin-authenticated counterparts for the web ui (the three above are cli-only).
@@ -449,6 +453,17 @@ enum PullDecision {
 /// Public so `cl-daemon`'s `watch_git_backup` can pull before an export rebuilds the tracked tree
 /// from raft (see its doc comment for the race).
 pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
+    run_pull_outcome(state).await.map(|_| ())
+}
+
+/// What one pull did.
+enum PullOutcome {
+    NoChange,
+    Rejected(String),
+    Applied,
+}
+
+async fn run_pull_outcome(state: &AppState) -> Result<PullOutcome, ApiError> {
     let backup_cfg = state
         .cluster_config
         .read()
@@ -492,11 +507,12 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
     .map_err(ApiError::internal)?;
 
     match decision {
-        PullDecision::NoChange => Ok(()),
+        PullDecision::NoChange => Ok(PullOutcome::NoChange),
         PullDecision::Rejected {
             reason,
             preserved_branch,
         } => {
+            let rejected_reason = reason.clone();
             warn!(
                 %reason,
                 %preserved_branch,
@@ -513,7 +529,8 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
                     }),
                 },
             )
-            .await
+            .await?;
+            Ok(PullOutcome::Rejected(rejected_reason))
         }
         PullDecision::Accepted {
             candidate,
@@ -530,7 +547,8 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
                     rejected: None,
                 },
             )
-            .await
+            .await?;
+            Ok(PullOutcome::Applied)
         }
     }
 }
@@ -843,6 +861,170 @@ async fn apply_pulled_terraform(state: &AppState, parsed: &ParsedTree) -> Result
     Ok(())
 }
 
+/// Held for a whole rollback and around each export pass of the daemon's export loop, so the
+/// loop cannot rebuild the tree from stale raft state on top of the rollback commit before the
+/// pull has applied it.
+pub fn export_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &GUARD
+}
+
+const COMMIT_LIST_LIMIT: usize = 50;
+
+async fn git_credentials(
+    state: &AppState,
+) -> Result<(cl_config::GitBackupConfig, String), ApiError> {
+    let backup_cfg = state
+        .cluster_config
+        .read()
+        .await
+        .backup
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
+    let cluster_state = state.cluster.snapshot().await;
+    let key_guard = state.key.read().await;
+    let key = key_guard
+        .as_ref()
+        .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
+    let pem = cl_backup::deploy_key::load_private(&cluster_state, key).ok_or_else(|| {
+        ApiError::Conflict("no git deploy key yet - it is generated after the first export".into())
+    })?;
+    Ok((backup_cfg, pem))
+}
+
+fn backup_error(e: cl_backup::BackupError) -> ApiError {
+    match e {
+        cl_backup::BackupError::BadCommit(m) => ApiError::BadRequest(m),
+        cl_backup::BackupError::PushRejected(m) => ApiError::Conflict(format!(
+            "the remote moved or refused the push, try again: {m}"
+        )),
+        other => ApiError::internal(other),
+    }
+}
+
+/// `GET /api/git-backup/commits`: the newest commits of the tracked branch, fetched first.
+async fn list_commits(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CommitInfo>>, ApiError> {
+    commits_of(&state).await.map(Json)
+}
+
+/// The cli's copy of `list_commits` (internal auth).
+async fn internal_commits(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CommitInfo>>, ApiError> {
+    commits_of(&state).await.map(Json)
+}
+
+async fn commits_of(state: &AppState) -> Result<Vec<CommitInfo>, ApiError> {
+    let (cfg, pem) = git_credentials(state).await?;
+    let dir = state.data_dir.join("git-backup");
+    tokio::task::spawn_blocking(move || {
+        let _guard = cl_backup::git::lock_repo();
+        cl_backup::git::GitBackup::open_or_init(&dir, &cfg.repo_url, &cfg.branch)?
+            .list_commits(&pem, COMMIT_LIST_LIMIT)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(backup_error)
+}
+
+#[derive(Deserialize, Serialize)]
+struct RollbackRequest {
+    commit: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RollbackResponse {
+    commit: String,
+}
+
+/// `POST /api/git-backup/rollback`: leader-only, so a non-leader forwards.
+async fn rollback_admin(
+    admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<RollbackRequest>,
+) -> Result<Json<RollbackResponse>, ApiError> {
+    let author = (
+        admin.0.username.clone(),
+        format!("{}@localhost", admin.0.username),
+    );
+    if state.cluster.is_leader() {
+        return run_rollback(&state, &body.commit, author).await.map(Json);
+    }
+    let leader = leader_node_name(&state)
+        .await
+        .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+    let query = serde_urlencoded::to_string([
+        ("commit", body.commit.as_str()),
+        ("author", admin.0.username.as_str()),
+    ])
+    .unwrap_or_default();
+    let path = format!("/api/git-backup/internal-rollback?{query}");
+    internal_peer::post_json_relay(&state, &leader, &path)
+        .await
+        .map(Json)
+}
+
+async fn internal_rollback(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<RollbackResponse>, ApiError> {
+    let commit = params
+        .get("commit")
+        .ok_or_else(|| ApiError::BadRequest("missing commit".into()))?;
+    let username = params
+        .get("author")
+        .cloned()
+        .unwrap_or_else(|| "clouduler".into());
+    let author = (username.clone(), format!("{username}@localhost"));
+    run_rollback(&state, commit, author).await.map(Json)
+}
+
+/// Folds in any remote-only commit, pushes the revert commit on the tip, then applies it through
+/// the normal pull path. A rejection by that path is a 409 with its reason; the tracked branch has
+/// been restored by then and the revert commit lives on a `rejected/` branch.
+async fn run_rollback(
+    state: &AppState,
+    commit: &str,
+    author: (String, String),
+) -> Result<RollbackResponse, ApiError> {
+    let (cfg, pem) = git_credentials(state).await?;
+    let _guard = export_guard().lock().await;
+
+    if let PullOutcome::Rejected(reason) = run_pull_outcome(state).await? {
+        warn!(%reason, "git backup: a pending remote commit was rejected before the rollback");
+    }
+
+    let dir = state.data_dir.join("git-backup");
+    let spec = commit.to_string();
+    let new_head = tokio::task::spawn_blocking(move || {
+        let _repo_guard = cl_backup::git::lock_repo();
+        let backup = cl_backup::git::GitBackup::open_or_init(&dir, &cfg.repo_url, &cfg.branch)?;
+        backup.rollback(&spec, &pem, Some((author.0.as_str(), author.1.as_str())))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(backup_error)?;
+    let Some(new_head) = new_head else {
+        return Err(ApiError::Conflict(
+            "the configuration already matches that commit (secrets and terraform state are never rolled back)".into(),
+        ));
+    };
+
+    match run_pull_outcome(state).await? {
+        PullOutcome::Rejected(reason) => Err(ApiError::Conflict(format!(
+            "the cluster rejected the rolled back configuration: {reason}"
+        ))),
+        _ => Ok(RollbackResponse {
+            commit: new_head.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +1077,17 @@ mod tests {
     }
 
     const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
+
+    #[tokio::test]
+    async fn commits_and_rollback_need_git_backup_configured() {
+        let h = harness().await;
+        let err = commits_of(&h.state).await.expect_err("not configured");
+        assert!(matches!(err, ApiError::Conflict(m) if m == "git backup is not configured"));
+        let err = run_rollback(&h.state, "abcd1234", ("a".into(), "a@localhost".into()))
+            .await
+            .expect_err("not configured");
+        assert!(matches!(err, ApiError::Conflict(m) if m == "git backup is not configured"));
+    }
 
     #[test]
     fn a_tree_with_no_stacks_is_rejected_when_the_cluster_has_some() {

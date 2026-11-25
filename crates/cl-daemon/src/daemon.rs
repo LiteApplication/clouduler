@@ -1087,6 +1087,9 @@ async fn watch_git_backup(
             continue;
         };
 
+        // Held for the whole pass: a rollback commit must be applied by its own pull before an
+        // export rebuilds the tree from raft on top of it.
+        let _export_guard = cl_api::routes::git_backup::export_guard().lock().await;
         let state = cluster.state().await;
         let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
         if last_snapshot.as_ref() == Some(&snapshot) {

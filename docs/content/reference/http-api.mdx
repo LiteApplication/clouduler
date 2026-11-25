@@ -269,6 +269,8 @@ curl -N -H "Authorization: Bearer $KEY" \
 | POST | `/api/git-backup/export-now` | admin | none | 202 or 204 | |
 | POST | `/api/git-backup/pull-now` | admin | none | 202 or 204 | |
 | POST | `/api/git-backup/reconcile-now` | admin | none | 202 or 204 | |
+| GET | `/api/git-backup/commits` | admin | none | `[{sha, short, message, author, time}]` | Newest first, at most 50, from the configured branch (fetched first). `short` is 12 characters, `message` the first line, `time` unix seconds. 409 `git backup is not configured`. |
+| POST | `/api/git-backup/rollback` | admin | `{"commit": "<sha or unique prefix>"}` | `{"commit": "<new head sha>"}` | Pushes a new commit `Roll back configuration to <sha12>` and applies it through the pull. Secrets, terraform state and bookkeeping files are kept from the current tip. 400 for an unknown, ambiguous or malformed commit; 409 if git backup is off, nothing would change, the remote moved, or the pull rejected it (the reason is the message). Forwarded to the leader. |
 
 ### Restic backups and restore
 
@@ -298,7 +300,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/self-update/latest` | user | none | `{tag, architectures, source, running_version, fetched_at}` | Cached 5 minutes. |
 | GET | `/api/self-update/releases` | any identity | none | `{tags}` | Stable (non-draft, non-prerelease) release tags of the configured repo, newest first. Cached 5 minutes. 409 if no release source is configured. |
 | GET | `/api/self-update/run` | user | none | run state or null | `target_tag` is the tag the run was asked for, or null. |
-| POST | `/api/self-update/run` | admin | none, or `{"tag": "v0.17.3"}` | 202 run state | With a tag, installs exactly that release of the configured repo (a tag pinned in `release_url` is overridden). 400 if the tag is empty or contains `/` or whitespace. |
+| POST | `/api/self-update/run` | admin | none, or `{"tag": "v0.17.3", "downgrade"?: bool}` | 202 run state | With a tag, installs exactly that release of the configured repo (a tag pinned in `release_url` is overridden). 400 if the tag is empty or contains `/` or whitespace. 400 `tag X is older than the running version Y; downgrading is unsupported and must be requested explicitly` for a tag older than the running version unless `downgrade` is true. The same tag as the running version stays allowed. |
 | POST | `/api/self-update/cancel` | admin | none | 204 | |
 
 ### Alerts {#alerts}

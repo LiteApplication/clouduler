@@ -186,6 +186,13 @@ pub fn build(
 
     export_terraform(state, key, recipient, cache, &mut files);
 
+    if let Some(record) = crate::upgrade::successful_upgrade(state) {
+        files.push(TreeFile {
+            path: crate::upgrade::VERSION_PATH.to_string(),
+            contents: record.to_json(),
+        });
+    }
+
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
 }
@@ -594,6 +601,39 @@ mod tests {
                 "secrets/db-password.age",
                 "stacks/web.yaml"
             ]
+        );
+    }
+
+    #[test]
+    fn a_successful_upgrade_is_exported_as_the_version_file() {
+        let key = ClusterKey::generate();
+        let recipient = age::x25519::Identity::generate().to_public();
+        let mut state = state_with_everything(&key);
+        let run = serde_json::json!({
+            "id": "r", "release_tag": "v9.9.9", "assets": {}, "arch_hashes": {},
+            "per_node": {"a": "done"}, "started_at": 1, "finished_at": 42,
+            "failure_reason": null, "restart_started_at": null
+        });
+        state.configs.insert(
+            "_clouduler_self_update_run".to_string(),
+            ConfigEntry {
+                name: "_clouduler_self_update_run".to_string(),
+                content: encode_config_content(&serde_json::to_vec(&run).unwrap()),
+                revision: 1,
+                owner: None,
+            },
+        );
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
+        let file = files
+            .iter()
+            .find(|f| f.path == crate::upgrade::VERSION_PATH)
+            .expect("version file");
+        let json: serde_json::Value = serde_json::from_slice(&file.contents).unwrap();
+        assert_eq!(json["version"], "v9.9.9");
+        assert_eq!(json["upgraded_at"], 42);
+        assert!(
+            !files.iter().any(|f| f.path.contains("self_update_run")),
+            "the run itself stays out of git"
         );
     }
 
