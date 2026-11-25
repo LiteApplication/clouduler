@@ -75,7 +75,7 @@ tests/qemu/run.sh formation      # one scenario
 tests/qemu/run.sh --all          # everything, one summary at the end
 ```
 
-Needs `qemu-system-x86_64`, `qemu-img`, `mke2fs`, `unshare`, `jq`, `python3` with PyYAML, and either a musl toolchain or docker. It needs no root: the rootfs is built inside a user namespace and the networking is qemu's own. Without `/dev/kvm` it falls back to TCG emulation, which works but is roughly ten times slower, and the runner warns instead of failing.
+Needs `qemu-system-x86_64`, `qemu-img`, `mke2fs`, `unshare`, `jq`, `python3` with PyYAML, and either a musl toolchain or docker. It needs no root: the rootfs is built inside a user namespace and the networking is qemu's own. Without `/dev/kvm` it falls back to TCG emulation, which works but is roughly ten times slower (guests get `-cpu host` under KVM and `-cpu max` under TCG, because the default qemu64 model lacks the AVX2/BMI instructions the binary uses), and the runner warns instead of failing.
 
 ### How a run is put together
 

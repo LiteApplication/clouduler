@@ -22,6 +22,18 @@ qemu_accel() {
   fi
 }
 
+# The guest runs a musl binary built for a modern x86-64 baseline (AVX2, BMI),
+# but qemu's default CPU model (qemu64) has none of those, so PID 1 dies with
+# "invalid opcode" at startup. kvm passes the host CPU through; tcg uses the
+# "max" model, which emulates every feature TCG supports.
+qemu_cpu() {
+  if [[ "$1" == "kvm" ]]; then
+    echo "host"
+  else
+    echo "max"
+  fi
+}
+
 # ---- boot ------------------------------------------------------------------
 
 # Alpine's initramfs, not the kernel, is what mounts our root and hands off, so
@@ -99,7 +111,7 @@ vm_start() {
   qemu-system-x86_64 \
     -name "$node" \
     -m 512 -smp 1 \
-    -accel "$accel" \
+    -accel "$accel" -cpu "$(qemu_cpu "$accel")" \
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
     -append "$(kernel_cmdline "$node" "$ip" "$vpn_ip" "$vpn_canary" "$aliases")" \
     -drive file="$disk",if=virtio,format=raw \
@@ -164,7 +176,7 @@ vm_restart() {
   qemu-system-x86_64 \
     -name "$node" \
     -m 512 -smp 1 \
-    -accel "$accel" \
+    -accel "$accel" -cpu "$(qemu_cpu "$accel")" \
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
     -append "$(kernel_cmdline "$node" "$ip" "" "" "$aliases")" \
     -drive file="$disk",if=virtio,format=raw \
