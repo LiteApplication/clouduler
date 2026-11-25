@@ -112,11 +112,13 @@ async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiErro
         (Some((nonce, signature)), _) => {
             if !internal_auth::verify_v3(
                 key,
-                method,
-                path_and_query,
-                ts,
-                nonce,
-                body_sha256,
+                &internal_auth::V3Request {
+                    method,
+                    path_and_query,
+                    ts,
+                    nonce,
+                    body_sha256,
+                },
                 signature,
                 now,
             ) {

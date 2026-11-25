@@ -381,12 +381,14 @@ async fn main() -> Result<()> {
                 cl_cli::backup_cli::restore_service(
                     &cfg,
                     &hostname()?,
-                    &stack,
-                    &service,
-                    destination.as_deref(),
-                    snapshot.as_deref(),
-                    yes,
-                    via.as_deref(),
+                    &cl_cli::backup_cli::ServiceRestore {
+                        stack: &stack,
+                        service: &service,
+                        destination: destination.as_deref(),
+                        snapshot: snapshot.as_deref(),
+                        yes,
+                        via: via.as_deref(),
+                    },
                 )
                 .await
             }

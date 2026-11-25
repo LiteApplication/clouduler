@@ -126,11 +126,13 @@ mod tests {
         ));
         assert!(cl_secret::internal_auth::verify_v3(
             &key,
-            "GET",
-            "/a?b=1",
-            ts,
-            nonce,
-            body,
+            &cl_secret::internal_auth::V3Request {
+                method: "GET",
+                path_and_query: "/a?b=1",
+                ts,
+                nonce,
+                body_sha256: body,
+            },
             get(&h, SIGNATURE_V3_HEADER),
             now
         ));

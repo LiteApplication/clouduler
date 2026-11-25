@@ -541,17 +541,30 @@ pub async fn restore_volume(
     backup_restore::restore_volume(cfg, node, volume, destination, snapshot, via).await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Which service to restore, from where, and how.
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceRestore<'a> {
+    pub stack: &'a str,
+    pub service: &'a str,
+    pub destination: Option<&'a str>,
+    pub snapshot: Option<&'a str>,
+    pub yes: bool,
+    pub via: Option<&'a str>,
+}
+
 pub async fn restore_service(
     cfg: &ClusterConfig,
     node: &str,
-    stack: &str,
-    service: &str,
-    destination: Option<&str>,
-    snapshot: Option<&str>,
-    yes: bool,
-    via: Option<&str>,
+    req: &ServiceRestore<'_>,
 ) -> Result<()> {
+    let ServiceRestore {
+        stack,
+        service,
+        destination,
+        snapshot,
+        yes,
+        via,
+    } = *req;
     if !confirm_restore(
         yes,
         &format!("restore every volume used by {stack}/{service}?"),

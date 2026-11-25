@@ -134,30 +134,46 @@ pub fn sign_v3(
 
 /// Verify a v3 signature, that `nonce` is well formed, and that `ts` is
 /// within [`SKEW_SECS`] of `now`.
-#[allow(clippy::too_many_arguments)]
-pub fn verify_v3(
-    key: &ClusterKey,
-    method: &str,
-    path_and_query: &str,
-    ts: u64,
-    nonce: &str,
-    body_sha256: &str,
-    presented: &str,
-    now: u64,
-) -> bool {
-    if ts.abs_diff(now) > SKEW_SECS || !valid_nonce(nonce) {
+pub fn verify_v3(key: &ClusterKey, req: &V3Request<'_>, presented: &str, now: u64) -> bool {
+    if req.ts.abs_diff(now) > SKEW_SECS || !valid_nonce(req.nonce) {
         return false;
     }
     verify(
         key,
-        &v3_label(method, path_and_query, ts, nonce, body_sha256),
+        &v3_label(
+            req.method,
+            req.path_and_query,
+            req.ts,
+            req.nonce,
+            req.body_sha256,
+        ),
         presented,
     )
+}
+
+/// The signed parts of a v3 request, as the verifier sees them.
+#[derive(Debug, Clone, Copy)]
+pub struct V3Request<'a> {
+    pub method: &'a str,
+    pub path_and_query: &'a str,
+    pub ts: u64,
+    pub nonce: &'a str,
+    pub body_sha256: &'a str,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn req<'a>(nonce: &'a str, body_sha256: &'a str) -> V3Request<'a> {
+        V3Request {
+            method: "GET",
+            path_and_query: "/a",
+            ts: 1000,
+            nonce,
+            body_sha256,
+        }
+    }
 
     #[test]
     fn a_signature_verifies_against_the_same_key_and_label() {
@@ -233,9 +249,9 @@ mod tests {
         assert!(valid_nonce(&n1));
         assert_ne!(n1, n2);
         let sig = sign_v3(&key, "GET", "/a", 1000, &n1, &h);
-        assert!(verify_v3(&key, "GET", "/a", 1000, &n1, &h, &sig, 1000));
-        assert!(!verify_v3(&key, "GET", "/a", 1000, &n2, &h, &sig, 1000));
-        assert!(!verify_v3(&key, "GET", "/a", 1000, &n1, &h, &sig, 1061));
+        assert!(verify_v3(&key, &req(&n1, &h), &sig, 1000));
+        assert!(!verify_v3(&key, &req(&n2, &h), &sig, 1000));
+        assert!(!verify_v3(&key, &req(&n1, &h), &sig, 1061));
     }
 
     #[test]
@@ -244,7 +260,7 @@ mod tests {
         let h = body_sha256_hex(b"");
         for bad in ["", "abc", &"g".repeat(32), &"a".repeat(33)] {
             let sig = sign_v3(&key, "GET", "/a", 1000, bad, &h);
-            assert!(!verify_v3(&key, "GET", "/a", 1000, bad, &h, &sig, 1000));
+            assert!(!verify_v3(&key, &req(bad, &h), &sig, 1000));
         }
     }
 
@@ -254,6 +270,6 @@ mod tests {
         let h = body_sha256_hex(b"");
         let n = new_nonce();
         let v2 = sign_v2(&key, "GET", "/a", 1000, &h);
-        assert!(!verify_v3(&key, "GET", "/a", 1000, &n, &h, &v2, 1000));
+        assert!(!verify_v3(&key, &req(&n, &h), &v2, 1000));
     }
 }

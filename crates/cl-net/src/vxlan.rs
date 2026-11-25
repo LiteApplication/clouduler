@@ -26,6 +26,17 @@ use tracing::warn;
 
 use crate::error::{NetError, Result};
 
+/// Everything `ensure_vxlan` needs to create or verify a VXLAN device.
+#[derive(Debug, Clone, Copy)]
+pub struct VxlanSpec<'a> {
+    pub name: &'a str,
+    pub vni: u32,
+    pub underlay_index: u32,
+    pub underlay_ip: Ipv4Addr,
+    pub bridge_index: u32,
+    pub mtu: u16,
+}
+
 /// UDP port VXLAN traffic is sent on. The IANA-assigned port; Linux defaults
 /// to the old 8472 unless told otherwise, so we set it explicitly everywhere.
 pub const VXLAN_PORT: u16 = 4789;
@@ -399,17 +410,16 @@ impl Overlay {
         Ok(found)
     }
 
-    /// Ensure the VXLAN device exists, enslaved to `bridge_index`. Returns its index.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn ensure_vxlan(
-        &self,
-        name: &str,
-        vni: u32,
-        underlay_index: u32,
-        underlay_ip: Ipv4Addr,
-        bridge_index: u32,
-        mtu: u16,
-    ) -> Result<u32> {
+    /// Ensure the VXLAN device exists, enslaved to `spec.bridge_index`. Returns its index.
+    pub async fn ensure_vxlan(&self, spec: &VxlanSpec<'_>) -> Result<u32> {
+        let VxlanSpec {
+            name,
+            vni,
+            underlay_index,
+            underlay_ip,
+            bridge_index,
+            mtu,
+        } = *spec;
         let mut existing = self.find_link(name).await?;
         if let Some(index) = existing {
             // `learning` and the rest are fixed at creation, but the VNI and

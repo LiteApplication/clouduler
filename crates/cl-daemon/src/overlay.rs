@@ -24,7 +24,7 @@ use cl_docker::NetworkSpec;
 use cl_net::container_net::container_docker_name;
 use cl_net::ipam::{is_managed_key, managed_key, DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX};
 use cl_net::managed::{node_port_mac, port_peer_name, port_veth_name, reconcile_peer_routes};
-use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
+use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay, VxlanSpec};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
@@ -763,7 +763,14 @@ impl Context_ {
             .reconcile_bridge_addresses(&bridge, gateway, &BTreeSet::new(), subnet.prefix_len())
             .await?;
         let vxlan_index = netlink
-            .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
+            .ensure_vxlan(&VxlanSpec {
+                name: &vxlan,
+                vni,
+                underlay_index: underlay.index,
+                underlay_ip: internal_ip,
+                bridge_index,
+                mtu,
+            })
             .await?;
         netlink
             .reconcile_fdb(&vxlan, vxlan_index, &local.peers)
@@ -883,7 +890,14 @@ impl Context_ {
                 .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
                 .await?;
             let vxlan_index = netlink
-                .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
+                .ensure_vxlan(&VxlanSpec {
+                    name: &vxlan,
+                    vni,
+                    underlay_index: underlay.index,
+                    underlay_ip: internal_ip,
+                    bridge_index,
+                    mtu,
+                })
                 .await?;
             netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
             // Not fatal: containers work without it, it only stops this
