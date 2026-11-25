@@ -126,6 +126,17 @@ PATCH_RELEASE=0
 if [ "$LAST_MAJOR" = "$NEW_MAJOR" ] && [ "$LAST_MINOR" = "$NEW_MINOR" ]; then PATCH_RELEASE=1; fi
 SCHEMA_FILES=(ui/src/api/__fixtures__/api-shapes.json ui/src/api/generated)
 
+# Bump first: the api-shapes fixture embeds the reported version, so it must be
+# regenerated against the new version or CI sees it as stale.
+echo "Bumping version to ${VERSION}..."
+
+sed -i -E "/^\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+for c in "${BUMP[@]}"; do
+    sed -i -E "/^\[package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" "crates/$c/Cargo.toml"
+done
+# ui/package.json always follows the release version.
+sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
+
 echo "Regenerating api-shapes fixture..."
 UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
 # The regenerating run returns before comparing, so run it again without the
@@ -136,22 +147,18 @@ cargo test -p cl-api api_shapes
 echo "Regenerating typescript bindings..."
 scripts/gen-ts-bindings.sh
 
-if [ "$PATCH_RELEASE" = 1 ] && [ -n "$(git status --porcelain -- "${SCHEMA_FILES[@]}")" ]; then
+# The fixture embeds the version, so those lines always change and are ignored.
+schema_diff() {
+    git diff --stat -I'"version":' -- "${SCHEMA_FILES[@]}"
+    git ls-files --others --exclude-standard -- "${SCHEMA_FILES[@]}"
+}
+if [ "$PATCH_RELEASE" = 1 ] && [ -n "$(schema_diff)" ]; then
     echo "error: the api schema changed, which is only allowed in a minor or major release (v${VERSION} is a patch release over $LAST_TAG):" >&2
-    git status --short -- "${SCHEMA_FILES[@]}" >&2
-    echo "Restoring the schema files; pick a new minor/major version or revert the schema change." >&2
-    git checkout -- "${SCHEMA_FILES[@]}"
+    schema_diff >&2
+    echo "Restoring the modified files; pick a new minor/major version or revert the schema change." >&2
+    git checkout -- "${SCHEMA_FILES[@]}" Cargo.toml crates/*/Cargo.toml ui/package.json Cargo.lock
     exit 1
 fi
-
-echo "Bumping version to ${VERSION}..."
-
-sed -i -E "/^\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-for c in "${BUMP[@]}"; do
-    sed -i -E "/^\[package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" "crates/$c/Cargo.toml"
-done
-# ui/package.json always follows the release version.
-sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
 
 if [ -f Cargo.lock ]; then
     cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
