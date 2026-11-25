@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/self-update/repo", put(set_repo).get(get_repo))
         .route("/api/self-update/check", put(set_check))
         .route("/api/self-update/latest", get(latest))
+        .route("/api/self-update/releases", get(releases))
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
         .route("/api/self-update/internal/restart", post(internal_restart))
@@ -169,10 +170,35 @@ async fn get_repo(
     Json(state.cluster_config.read().await.self_update.clone())
 }
 
+#[derive(Deserialize)]
+struct StartRunRequest {
+    #[serde(default)]
+    tag: Option<String>,
+}
+
 async fn start_run(
     _admin: RequireAdmin,
     State(state): State<AppState>,
+    body: axum::body::Bytes,
 ) -> Result<Json<UpdateRunState>, ApiError> {
+    let target_tag = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        let req: StartRunRequest = serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?;
+        match req.tag {
+            None => None,
+            Some(tag) => {
+                let tag = tag.trim().to_string();
+                if tag.is_empty() || tag.contains('/') || tag.contains(char::is_whitespace) {
+                    return Err(ApiError::BadRequest(
+                        "tag must be non-empty with no '/' or whitespace".into(),
+                    ));
+                }
+                Some(tag)
+            }
+        }
+    };
     let config = state.cluster_config.read().await;
     if config.self_update.is_none() {
         return Err(ApiError::Conflict(
@@ -198,7 +224,8 @@ async fn start_run(
         .iter()
         .filter(|(_, n)| n.availability == cl_raft::state::Availability::Active)
         .map(|(name, _)| name.clone());
-    let run = UpdateRunState::new(id, nodes_to_update, now());
+    let mut run = UpdateRunState::new(id, nodes_to_update, now());
+    run.target_tag = target_tag;
     submit_run(&state, &run, revision).await?;
     Ok(Json(run))
 }
@@ -326,6 +353,44 @@ async fn latest(
         fetched_at: now(),
     };
     *latest_cache().lock() = Some((std::time::Instant::now(), answer.clone()));
+    Ok(Json(answer))
+}
+
+#[derive(Clone, Serialize)]
+struct SelfUpdateReleases {
+    tags: Vec<String>,
+}
+
+type ReleasesCache = parking_lot::Mutex<Option<(std::time::Instant, String, SelfUpdateReleases)>>;
+
+fn releases_cache() -> &'static ReleasesCache {
+    static CACHE: std::sync::OnceLock<ReleasesCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+async fn releases(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Result<Json<SelfUpdateReleases>, ApiError> {
+    let source = state
+        .cluster_config
+        .read()
+        .await
+        .self_update
+        .as_ref()
+        .map(|c| c.release_url.clone())
+        .ok_or_else(|| ApiError::Conflict("no self-update release is configured".into()))?;
+    if let Some((at, cached_source, cached)) = releases_cache().lock().clone() {
+        if at.elapsed() < LATEST_TTL && cached_source == source {
+            return Ok(Json(cached));
+        }
+    }
+    let token = unseal_github_token(&state).await;
+    let tags = cl_update::release::list_tags(&source, token.as_deref())
+        .await
+        .map_err(ApiError::Unavailable)?;
+    let answer = SelfUpdateReleases { tags };
+    *releases_cache().lock() = Some((std::time::Instant::now(), source, answer.clone()));
     Ok(Json(answer))
 }
 

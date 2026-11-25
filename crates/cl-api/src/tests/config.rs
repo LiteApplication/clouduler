@@ -346,6 +346,27 @@ async fn setting_the_self_update_repo_twice_is_a_conflict() {
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
+/// A run start with a malformed tag is rejected before anything is stored.
+#[tokio::test]
+async fn starting_a_self_update_run_rejects_a_bad_tag() {
+    let h = harness().await;
+    let response = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/self-update/run")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"tag":"a/b"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 /// The alert settings API never returns a destination's URL, and a client that
 /// echoes the masked form back cannot overwrite the stored one.
 #[tokio::test]

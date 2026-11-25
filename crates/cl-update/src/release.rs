@@ -113,6 +113,51 @@ pub fn download_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("building the download client: {e}"))
 }
 
+/// Stable (non-draft, non-prerelease) release tags of `source`'s repo, newest first.
+pub async fn list_tags(source: &str, token: Option<&str>) -> Result<Vec<String>, String> {
+    tokio::time::timeout(RESOLVE_TIMEOUT, async {
+        let repo_ref = parse_source(source)?;
+        let octocrab = client(token)?;
+        let page = octocrab
+            .repos(&repo_ref.owner, &repo_ref.repo)
+            .releases()
+            .list()
+            .per_page(100)
+            .send()
+            .await
+            .map_err(|e| {
+                format!(
+                    "listing releases of {}/{}: {}",
+                    repo_ref.owner,
+                    repo_ref.repo,
+                    describe(&e)
+                )
+            })?;
+        Ok(page
+            .items
+            .into_iter()
+            .filter(|r| !r.draft && !r.prerelease)
+            .map(|r| r.tag_name)
+            .collect())
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "github did not answer within {}s",
+            RESOLVE_TIMEOUT.as_secs()
+        )
+    })?
+}
+
+/// `source`'s repo pinned to `tag`, as a release tag url.
+pub fn pinned_source(source: &str, tag: &str) -> Result<String, String> {
+    let repo_ref = parse_source(source)?;
+    Ok(format!(
+        "https://github.com/{}/{}/releases/tag/{tag}",
+        repo_ref.owner, repo_ref.repo
+    ))
+}
+
 /// Resolve `source` to its release and the assets published per architecture.
 pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
     tokio::time::timeout(RESOLVE_TIMEOUT, resolve_inner(source, token))
@@ -215,6 +260,21 @@ pub async fn download_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_source_replaces_any_tag() {
+        for src in [
+            "https://github.com/A/b",
+            "https://github.com/A/b/",
+            "https://github.com/A/b/releases/tag/v0.1.0",
+        ] {
+            assert_eq!(
+                pinned_source(src, "v0.17.3").unwrap(),
+                "https://github.com/A/b/releases/tag/v0.17.3"
+            );
+        }
+        assert!(pinned_source("https://example.com/A/b", "v1").is_err());
+    }
 
     #[test]
     fn a_bare_repo_url_resolves_to_the_latest_release() {

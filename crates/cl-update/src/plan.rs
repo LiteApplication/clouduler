@@ -107,6 +107,10 @@ pub struct UpdateRunState {
     /// orchestrator can tell a slow node from one that is never coming back.
     /// One field is enough because only one node restarts at a time.
     pub restart_started_at: Option<i64>,
+    /// Operator-chosen tag to install instead of the configured source's
+    /// latest (the ui steps through releases one series at a time).
+    #[serde(default)]
+    pub target_tag: Option<String>,
 }
 
 impl UpdateRunState {
@@ -123,6 +127,7 @@ impl UpdateRunState {
             finished_at: None,
             failure_reason: None,
             restart_started_at: None,
+            target_tag: None,
         }
     }
 

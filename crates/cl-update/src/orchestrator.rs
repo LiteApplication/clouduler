@@ -212,7 +212,17 @@ impl Orchestrator {
         };
         let token = self.unseal_github_token().await;
 
-        match release::resolve(&self_update.release_url, token.as_deref()).await {
+        let source = match run.target_tag.as_deref() {
+            Some(tag) => match release::pinned_source(&self_update.release_url, tag) {
+                Ok(source) => source,
+                Err(e) => {
+                    run.fail(e, now());
+                    return self.save(run, revision).await;
+                }
+            },
+            None => self_update.release_url.clone(),
+        };
+        match release::resolve(&source, token.as_deref()).await {
             Ok(resolved) => {
                 run.release_tag = Some(resolved.tag.clone());
                 run.owner = Some(resolved.owner);
