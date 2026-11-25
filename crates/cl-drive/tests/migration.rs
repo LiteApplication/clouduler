@@ -284,6 +284,7 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
         control: &control,
         sync_progress: None,
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        parallelism: None,
     };
 
     run(&harness.node, &job).await.expect("migration succeeds");
@@ -335,6 +336,7 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         control: &control,
         sync_progress: None,
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        parallelism: None,
     };
 
     let err = run(&harness.node, &job)
@@ -399,6 +401,7 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
         control: &control,
         sync_progress: None,
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        parallelism: None,
     };
 
     run(&harness.node, &job)
@@ -451,6 +454,7 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
         control: &control,
         sync_progress: None,
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        parallelism: None,
     };
 
     run(&harness.node, &job)
@@ -579,6 +583,7 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
         control: &control1,
         sync_progress: None,
         transfer_gate: transfer_gate.clone(),
+        parallelism: None,
     };
     let job2 = MigrationJob {
         keys: test_keys(),
@@ -592,6 +597,7 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
         control: &control2,
         sync_progress: None,
         transfer_gate,
+        parallelism: None,
     };
 
     let (result1, result2) = tokio::join!(run(&harness.node, &job1), run(&harness.node, &job2));

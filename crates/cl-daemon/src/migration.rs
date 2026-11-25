@@ -120,6 +120,17 @@ pub fn start(
                 let running = running.clone();
                 let engine = engine.clone();
                 let transfer_gate = transfer_gate.clone();
+                // Read live, like the sync scheduler, so a drive's limit change applies.
+                let parallelism: cl_drive::migration::ParallelismFn = {
+                    let config_rx = config_rx.clone();
+                    Arc::new(move |drive: &str| {
+                        config_rx
+                            .borrow()
+                            .drives
+                            .get(drive)
+                            .map_or(1, |d| d.max_parallel_syncs)
+                    })
+                };
                 let sync_progress = sync_progress.clone();
                 let keys = keys.clone();
                 let node_name = node_name.clone();
@@ -143,6 +154,7 @@ pub fn start(
                         control: &control,
                         sync_progress: Some(sync_progress),
                         transfer_gate,
+                        parallelism: Some(parallelism),
                     };
 
                     match cl_drive::migration::run(&cluster, &migration).await {

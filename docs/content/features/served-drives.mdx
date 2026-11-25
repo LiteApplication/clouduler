@@ -24,7 +24,7 @@ flowchart LR
 4. Every 10 seconds each node checks who the active server is. If it changes, the node unmounts and remounts against the new one. Each mount is health-checked every 30 seconds with a 3 second timeout.
 5. If the active server becomes unreachable, the first reachable candidate in `served_by` takes over automatically and records itself as the holder. The standby copy it holds is only as fresh as the last sync.
 
-Moving a served volume between nodes on purpose (a manual move or a rebalance) goes through a migration with these phases: stopping, syncing, verifying (both ends are hashed), switching, starting.
+Moving a served volume between nodes on purpose (a manual move or a rebalance) goes through a migration with these phases: stopping, syncing, verifying (both ends are compared by size, mtime, mode and owner, and the files the sync wrote are also hashed on both ends; after a restart mid-migration every file is hashed; a drive's volumes verify in parallel up to its `max_parallel_syncs`), switching, starting.
 
 ## When the original server comes back
 

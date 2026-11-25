@@ -50,6 +50,13 @@ pub trait InstanceControl: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 }
 
+/// Per volume, the files a sync wrote to the target: all verification hashes.
+/// A volume missing here is verified by hashing everything.
+/// A drive's name to how many of its volumes may be handled at once.
+pub type ParallelismFn = Arc<dyn Fn(&str) -> usize + Send + Sync>;
+
+type Touched = std::collections::BTreeMap<VolumeId, Vec<String>>;
+
 pub struct MigrationJob<'a> {
     pub instance: InstanceId,
     pub source_node: String,
@@ -72,6 +79,9 @@ pub struct MigrationJob<'a> {
     /// jobs from one node share one so at most one instance is down at a time;
     /// a single-job caller can pass a fresh `Semaphore::new(1)`.
     pub transfer_gate: Arc<Semaphore>,
+    /// How many of a drive's volumes may be verified at once (the drive's
+    /// parallel sync limit). `None` verifies one volume at a time.
+    pub parallelism: Option<ParallelismFn>,
 }
 
 impl MigrationJob<'_> {
@@ -96,6 +106,9 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     // noisy for a stop, wrong for `Switching` (bumps every volume's generation).
     // The loop trusts the phase it just recorded; the read is for resuming only.
     let mut phase = recorded_phase(node, &job.instance).await?;
+    // What this run's sync wrote. Lost on a resume straight into `Verifying`,
+    // which then hashes everything.
+    let mut touched = Touched::new();
 
     // Gate held for `Stopping` and a resumed `Syncing` (stopped, data still
     // moving); later phases run with it released. Acquired up front so a
@@ -127,8 +140,9 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             }
 
             MigrationPhase::Syncing => {
-                if let Err(e) = sync_all(node, job).await {
-                    return Err(fail(node, &job.instance, e).await);
+                match sync_all(node, job).await {
+                    Ok(written) => touched = written,
+                    Err(e) => return Err(fail(node, &job.instance, e).await),
                 }
                 // Data landed: free the slot so the next queued migration can start.
                 drop(transfer_permit.take());
@@ -136,7 +150,7 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             }
 
             MigrationPhase::Verifying => {
-                if let Err(e) = verify_all(job).await {
+                if let Err(e) = verify_all(job, &touched).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
                 phase = advance(node, &job.instance, MigrationPhase::Switching).await?;
@@ -229,12 +243,13 @@ fn migration_progress_writer(
     })
 }
 
-async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
+async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<Touched> {
     let result = sync_all_inner(node, job).await;
     finish_sync(job, result)
 }
 
-async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
+async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<Touched> {
+    let mut touched = Touched::new();
     let volume_count = job.volumes.len() as u64;
     for (idx, volume) in job.volumes.iter().enumerate() {
         // Scoped so the shared snapshot is not held across the long sync below.
@@ -259,6 +274,11 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
             ),
             None => crate::progress::ProgressSink::none(),
         };
+        // Cheap (no hashing) reading of the target before and after, so verify
+        // can hash just what changed. Best effort: without it, hash everything.
+        let before = transport::request_manifest(job.target_addr, volume, false, &job.keys)
+            .await
+            .ok();
         job.engine
             .sync(
                 &src_path,
@@ -269,6 +289,16 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
                 progress,
             )
             .await?;
+        if let Some(before) = before {
+            if let Ok(after) =
+                transport::request_manifest(job.target_addr, volume, false, &job.keys).await
+            {
+                let diff = after.diff(&before);
+                let mut written = diff.added;
+                written.extend(diff.changed);
+                touched.insert(volume.clone(), written);
+            }
+        }
 
         node.submit(Request::SetVolumeReplica {
             id: volume.clone(),
@@ -280,35 +310,64 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
             message: e.to_string(),
         })?;
     }
-    Ok(())
+    Ok(touched)
 }
 
 /// Clear `job.instance`'s progress entry whether `sync_all_inner` finished or
 /// bailed. Called from one exit point so no `?` can leave a stale "still
 /// syncing" entry for a failed migration.
-fn finish_sync(job: &MigrationJob<'_>, result: Result<()>) -> Result<()> {
+fn finish_sync(job: &MigrationJob<'_>, result: Result<Touched>) -> Result<Touched> {
     if let Some(tracker) = &job.sync_progress {
         tracker.write().remove(&job.instance);
     }
     result
 }
 
-async fn verify_all(job: &MigrationJob<'_>) -> Result<()> {
-    for volume in &job.volumes {
-        let src_path = job.require_registry()?.volume_path(volume)?;
-        // Hashing every byte is this crate's most expensive operation: never on a runtime thread.
-        let source = scan::scan_off_runtime(src_path, true).await?;
-        let target = transport::request_manifest(job.target_addr, volume, true, &job.keys).await?;
+/// Verify every volume, up to the drive's parallel limit at a time. Stops at
+/// the first mismatch.
+async fn verify_all(job: &MigrationJob<'_>, touched: &Touched) -> Result<()> {
+    let mut pending: Vec<(i32, VolumeId)> = job.volumes.iter().cloned().map(|v| (0, v)).collect();
+    while !pending.is_empty() {
+        let width = job
+            .parallelism
+            .as_ref()
+            .map_or(1, |limit| limit(&pending[0].1.drive))
+            .max(1);
+        let batch = crate::sync::take_batch(&mut pending, width);
+        let results =
+            futures::future::join_all(batch.iter().map(|volume| verify_one(job, volume, touched)))
+                .await;
+        results.into_iter().collect::<Result<Vec<()>>>()?;
+    }
+    Ok(())
+}
 
-        let diff = source.diff(&target);
-        if !diff.added.is_empty() || !diff.changed.is_empty() || !diff.removed.is_empty() {
-            return Err(DriveError::Verify {
-                message: format!(
-                    "{volume}: target differs after sync (added={:?} changed={:?} removed={:?})",
-                    diff.added, diff.changed, diff.removed
-                ),
-            });
-        }
+/// Compare one volume with the target. Both sides are read at once. Only the
+/// files the sync wrote are content-hashed when known (the sync already judged
+/// the rest identical by size, mtime, mode and owner, which this still
+/// compares); otherwise everything is.
+async fn verify_one(job: &MigrationJob<'_>, volume: &VolumeId, touched: &Touched) -> Result<()> {
+    let src_path = job.require_registry()?.volume_path(volume)?;
+    // Hashing is this crate's most expensive operation: never on a runtime thread.
+    let (source, target) = match touched.get(volume) {
+        Some(paths) => tokio::try_join!(
+            scan::scan_hashing_off_runtime(src_path, paths.clone()),
+            transport::request_partial_manifest(job.target_addr, volume, paths.clone(), &job.keys),
+        )?,
+        None => tokio::try_join!(
+            scan::scan_off_runtime(src_path, true),
+            transport::request_manifest(job.target_addr, volume, true, &job.keys),
+        )?,
+    };
+
+    let diff = source.diff(&target);
+    if !diff.added.is_empty() || !diff.changed.is_empty() || !diff.removed.is_empty() {
+        return Err(DriveError::Verify {
+            message: format!(
+                "{volume}: target differs after sync (added={:?} changed={:?} removed={:?})",
+                diff.added, diff.changed, diff.removed
+            ),
+        });
     }
     Ok(())
 }
@@ -449,6 +508,7 @@ mod tests {
             control: Box::leak(Box::new(AlwaysOk)),
             sync_progress: Some(tracker),
             transfer_gate: Arc::new(Semaphore::new(1)),
+            parallelism: None,
         }
     }
 
@@ -469,7 +529,7 @@ mod tests {
             },
         );
         let job = job_with_tracker(tracker.clone(), instance.clone());
-        let result = finish_sync(&job, Ok(()));
+        let result = finish_sync(&job, Ok(Touched::new()));
         assert!(result.is_ok());
         assert!(
             tracker.read().get(&instance).is_none(),

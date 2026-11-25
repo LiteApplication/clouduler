@@ -194,6 +194,12 @@ pub enum Message {
         volume: VolumeId,
     },
     SyncStateReport(CopyState),
+    /// Like `ManifestRequest`, but content-hashes only `hash_paths` (migration
+    /// verification of the files a sync wrote). Answered with `Ready`, then close.
+    PartialManifestRequest {
+        volume: VolumeId,
+        hash_paths: Vec<String>,
+    },
 }
 
 /// A node's digest of its served-volume copy now, and of the tree it held when
@@ -502,6 +508,14 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }) => {
                 let root = registry.ensure_volume(&volume)?;
                 let manifest = scan::scan_off_runtime(root, hash_content).await?;
+                send(&mut conn, &Message::Ready(manifest))
+                    .await
+                    .map_err(io_err)?;
+                return Ok(());
+            }
+            Some(Message::PartialManifestRequest { volume, hash_paths }) => {
+                let root = registry.ensure_volume(&volume)?;
+                let manifest = scan::scan_hashing_off_runtime(root, hash_paths).await?;
                 send(&mut conn, &Message::Ready(manifest))
                     .await
                     .map_err(io_err)?;
@@ -908,6 +922,34 @@ pub async fn request_manifest(
     }
 }
 
+/// Like `request_manifest`, but the peer hashes only `hash_paths`.
+pub async fn request_partial_manifest(
+    peer: SocketAddr,
+    volume: &VolumeId,
+    hash_paths: Vec<String>,
+    keys: &KeyWatch,
+) -> Result<Manifest> {
+    let mut conn = connect_authenticated(peer, keys).await?;
+    send(
+        &mut conn,
+        &Message::PartialManifestRequest {
+            volume: volume.clone(),
+            hash_paths,
+        },
+    )
+    .await
+    .map_err(io_err)?;
+    match recv(&mut conn).await.map_err(io_err)? {
+        Some(Message::Ready(manifest)) => Ok(manifest),
+        Some(other) => Err(DriveError::Transfer {
+            message: format!("expected ready, got {other:?}"),
+        }),
+        None => Err(DriveError::Transfer {
+            message: "peer closed before ready".into(),
+        }),
+    }
+}
+
 /// Best-effort unlink of a temp file: a missing file is the normal case, anything
 /// else is logged rather than swallowed. Blocking; call from the blocking pool.
 fn remove_file_logged(path: &Path, what: &str) {
@@ -1186,6 +1228,10 @@ mod tests {
         msg_round_trip(Message::ManifestRequest {
             volume: VolumeId::new("fast", "data"),
             hash_content: true,
+        });
+        msg_round_trip(Message::PartialManifestRequest {
+            volume: VolumeId::new("fast", "data"),
+            hash_paths: vec!["a.txt".into()],
         });
         msg_round_trip(Message::SignatureRequest("a.txt".into()));
         msg_round_trip(Message::Signature {

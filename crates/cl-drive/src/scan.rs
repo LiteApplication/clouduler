@@ -238,6 +238,24 @@ pub fn vanished(err: Option<&std::io::Error>) -> bool {
 }
 
 pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
+    scan_where(root, |_| hash_content)
+}
+
+/// Like `scan_off_runtime`, hashing only the files named in `hash_paths`.
+pub async fn scan_hashing_off_runtime(root: PathBuf, hash_paths: Vec<String>) -> Result<Manifest> {
+    let name = root.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        let wanted: std::collections::BTreeSet<String> = hash_paths.into_iter().collect();
+        scan_where(&root, |rel| wanted.contains(rel))
+    })
+    .await
+    .map_err(|e| DriveError::Transfer {
+        message: format!("scan of {name} did not run: {e}"),
+    })?
+}
+
+/// `scan`, hashing the files (by path relative to `root`) `want_hash` accepts.
+pub fn scan_where(root: &Path, want_hash: impl Fn(&str) -> bool) -> Result<Manifest> {
     let mut files = BTreeMap::new();
     let mut dirs = BTreeMap::new();
 
@@ -325,7 +343,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
             continue;
         }
 
-        let hash = if hash_content {
+        let hash = if want_hash(&rel) {
             match hash_file(path) {
                 Ok(hash) => Some(hash),
                 Err(e) if vanished(Some(&e)) => continue,
@@ -374,6 +392,16 @@ mod tests {
             mode: 0o644,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn scan_where_hashes_only_the_accepted_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
+        fs::write(tmp.path().join("b.txt"), b"world").unwrap();
+        let manifest = scan_where(tmp.path(), |rel| rel == "a.txt").unwrap();
+        assert!(manifest.files["a.txt"].hash.is_some());
+        assert!(manifest.files["b.txt"].hash.is_none());
     }
 
     #[test]

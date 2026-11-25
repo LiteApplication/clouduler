@@ -686,7 +686,7 @@ pub struct DrainReport {
 
 /// Takes the next batch off the sorted `due` list: its first volume and up to
 /// `width - 1` more of the same drive, preserving the order of the rest.
-fn take_batch(due: &mut Vec<(i32, VolumeId)>, width: usize) -> Vec<VolumeId> {
+pub(crate) fn take_batch(due: &mut Vec<(i32, VolumeId)>, width: usize) -> Vec<VolumeId> {
     let Some(drive) = due.first().map(|(_, id)| id.drive.clone()) else {
         return Vec::new();
     };
