@@ -1,8 +1,8 @@
 use anyhow::Result;
 use cl_cli::cli::{
     BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, GitBackupCommand,
-    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand, TerraformCommand,
-    VolumeCommand,
+    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand,
+    StackMigrationCommand, TerraformCommand, VolumeCommand,
 };
 use cl_config::ClusterConfig;
 use cl_init::detect;
@@ -116,6 +116,11 @@ async fn main() -> Result<()> {
             StackCommand::Start { name, via } => {
                 cl_cli::stack::start(&cfg, &name, via.as_deref()).await
             }
+            StackCommand::Migration { command } => match command {
+                StackMigrationCommand::SkipVerify { instance, via } => {
+                    cl_cli::stack::skip_migration_verify(&cfg, &instance, via.as_deref()).await
+                }
+            },
             StackCommand::Restart { name, via } => {
                 cl_cli::stack::restart(&cfg, &name, via.as_deref()).await
             }

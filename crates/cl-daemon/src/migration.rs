@@ -355,6 +355,7 @@ mod tests {
                     from: from.to_string(),
                     to: "n2".to_string(),
                     phase,
+                    skip_verify: false,
                 }),
             },
         );

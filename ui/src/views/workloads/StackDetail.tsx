@@ -34,6 +34,7 @@ import { logStreamOptions, toLogViewLine, type StreamLine } from './logLines';
 import { copyText, useKnownNames } from './specTools';
 import { TerraformTab } from './TerraformTab';
 import { MigrationProblem } from './MigrationProblem';
+import { SkipVerifyButton } from './SkipVerifyButton';
 import './workloads.css';
 
 export function StackDetail() {
@@ -274,6 +275,7 @@ function InstanceRow({ a, i, isAdmin }: { a: Assignment; i: InstanceState | unde
               <span className="sub wl-inline">
                 <StepBar step={STEPS.indexOf(phase) + 1} total={STEPS.length} label={`Move ${phase}`} />
                 {`Moving to ${migration!.to}: ${phase}`}
+                <SkipVerifyButton instanceId={a.instance} phase={phase} isAdmin={isAdmin} />
               </span>
             )}
             {failedPhase && (

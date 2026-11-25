@@ -24,7 +24,9 @@ flowchart LR
 4. Every 10 seconds each node checks who the active server is. If it changes, the node unmounts and remounts against the new one. Each mount is health-checked every 30 seconds with a 3 second timeout.
 5. If the active server becomes unreachable, the first reachable candidate in `served_by` takes over automatically and records itself as the holder. The standby copy it holds is only as fresh as the last sync.
 
-Moving a served volume between nodes on purpose (a manual move or a rebalance) goes through a migration with these phases: stopping, syncing, verifying (both ends are compared by size, mtime, mode and owner, and the files the sync wrote are also hashed on both ends; after a restart mid-migration every file is hashed; a drive's volumes verify in parallel up to its `max_parallel_syncs`), switching, starting.
+Moving a served volume between nodes on purpose (a manual move or a rebalance) goes through a migration with these phases: stopping, syncing, verifying (both ends are compared by size, mtime, mode and owner, and the files the sync wrote are also hashed on both ends; after a restart mid-migration only size, mtime, mode and owner are compared, since the recorded phase already says the sync finished; a drive's volumes verify in parallel up to its `max_parallel_syncs`), switching, starting.
+
+A move stuck in verifying can be pushed on by an admin with **Skip verification** on the instance (shown only while it is verifying, after a confirmation), `clouduler stack migration skip-verify INSTANCE` or `POST /api/instances/{id}/migration/skip-verify`. The request is stored in the cluster, so it survives a restart and works from any node. It is refused while the move is still stopping or syncing. The target copy is then not compared with the source, and the skip is logged as a warning on the node driving the move.
 
 ## When the original server comes back
 

@@ -24,6 +24,7 @@ impl ClusterState {
                     from: assignment.node.clone(),
                     to: to.clone(),
                     phase: MigrationPhase::Stopping,
+                    skip_verify: false,
                 });
                 Ok(())
             }
@@ -59,6 +60,29 @@ impl ClusterState {
                     _ => {}
                 }
                 Ok(())
+            }
+
+            Request::SkipMigrationVerify { instance } => {
+                let assignment = self.assignment_mut(instance)?;
+                let migration = assignment
+                    .migration
+                    .as_mut()
+                    .ok_or_else(|| format!("{instance} is not migrating"))?;
+                match migration.phase {
+                    MigrationPhase::Verifying => {
+                        migration.skip_verify = true;
+                        Ok(())
+                    }
+                    MigrationPhase::Stopping | MigrationPhase::Syncing => Err(format!(
+                        "{instance} is still {}: its data has not landed on {} yet, so there is nothing to skip",
+                        if migration.phase == MigrationPhase::Stopping { "stopping" } else { "syncing" },
+                        migration.to
+                    )),
+                    _ => Err(format!(
+                        "{instance} is not verifying (phase {:?})",
+                        migration.phase
+                    )),
+                }
             }
 
             Request::ClearMigration { instance } => {

@@ -747,6 +747,12 @@ export function buildHttpRoutes(): HttpRoute[] {
       delete db.live[params.id]?.migration_problem;
       commit(db);
     }),
+    route('POST', '/api/instances/:id/migration/skip-verify', ({ db, params }) => {
+      const a = need(db.state.assignments[params.id], `instance ${params.id}`);
+      if (!a.migration || a.migration.phase !== 'verifying') throw new Error(`${params.id} is not verifying`);
+      a.migration = { ...a.migration, skip_verify: true };
+      commit(db);
+    }),
     route('POST', '/api/instances/:id/migration/dismiss', ({ db, params }) => {
       const a = need(db.state.assignments[params.id], `instance ${params.id}`);
       a.migration = null;

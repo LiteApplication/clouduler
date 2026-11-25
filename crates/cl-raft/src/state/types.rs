@@ -339,6 +339,11 @@ pub struct Migration {
     pub from: String,
     pub to: String,
     pub phase: MigrationPhase,
+    /// An operator asked to skip the `Verifying` content check (`SkipMigrationVerify`).
+    /// Only ever set while verifying, so the driver advances to `Switching` without
+    /// comparing the target copy.
+    #[serde(default)]
+    pub skip_verify: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -91,7 +91,8 @@ impl ClusterState {
 
             Request::BeginMigration { .. }
             | Request::AdvanceMigration { .. }
-            | Request::ClearMigration { .. } => self.apply_migration(req),
+            | Request::ClearMigration { .. }
+            | Request::SkipMigrationVerify { .. } => self.apply_migration(req),
 
             Request::UpsertVolume { .. }
             | Request::SetVolumeReplica { .. }

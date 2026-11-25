@@ -521,6 +521,21 @@ pub enum AvailabilityArg {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum StackMigrationCommand {
+    /// Skip the verify step of a move that is in the verifying phase and go
+    /// straight to switching. The target copy is then unchecked: use it only
+    /// when verification cannot finish (a very large volume that keeps
+    /// restarting its hash pass). Refused in any other phase.
+    SkipVerify {
+        /// Instance id, as stack.service.index.
+        instance: String,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum TerraformCommand {
     /// Show what applying would change (no state is written).
     Plan {
@@ -673,6 +688,11 @@ pub enum StackCommand {
         /// manager in the config.
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
+    },
+    /// Operator overrides for a move (migration) that is stuck.
+    Migration {
+        #[command(subcommand)]
+        command: StackMigrationCommand,
     },
     /// Get or set a stack's raw source (the same yaml a `stack deploy` file
     /// takes), so it can be piped out, edited and piped back in without

@@ -171,6 +171,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | POST | `/api/instances/{id}/move` | admin | `{"node": "<name>"}` | 200 | Starts a migration. |
 | POST | `/api/instances/{id}/update` | admin | none | 200 | Pull and recreate. 409 if already in progress. |
 | POST | `/api/instances/{id}/migration/retry` | admin | none | 200 | 409 `... has no failed move`, `... is still moving`. |
+| POST | `/api/instances/{id}/migration/skip-verify` | admin | none | 200 | Skips the verify step of a move in the verifying phase; the move goes on to switching with the target copy unchecked. 409 `... is not migrating`, `... is still stopping`, `... is still syncing`, `... is not verifying`. |
 | POST | `/api/instances/{id}/migration/dismiss` | admin | none | 200 | Clears a failed move. |
 | GET | `/api/instances/{id}/actions` | user | none | `[{name, confirm}]` | Actions with `show_in_ui` only. |
 | POST | `/api/instances/{id}/actions/{name}` | admin | none | `{stdout, stderr, exit_code, timed_out, stdout_truncated, stderr_truncated, duration_ms}` | Runs the action's argv in the container, or in a one-off replacement container for a `standalone` action. 409 if a standalone action is already running on the instance. |

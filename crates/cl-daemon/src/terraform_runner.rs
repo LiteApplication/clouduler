@@ -1913,6 +1913,7 @@ mod tests {
             from: "n1".into(),
             to: "n3".into(),
             phase: MigrationPhase::Syncing,
+            skip_verify: false,
         });
         assert!(rollout_in_progress(&s, "app"));
         assert!(!rollout_in_progress(&s, "other"));

@@ -32,6 +32,7 @@ import { useClusterState } from '../../state/store';
 import { logStreamOptions, toLogViewLine, type StreamLine } from './logLines';
 import { usePlacementContext } from './specTools';
 import { MigrationProblem } from './MigrationProblem';
+import { SkipVerifyButton } from './SkipVerifyButton';
 import './workloads.css';
 
 /** `stack.service.index`; split from the right like the server does, since a
@@ -214,7 +215,10 @@ export function ContainerDetail() {
           </p>
         )}
         {phase && phase !== 'done' && (
-          <p className="sub">{`Moving to ${migration!.to}: ${phase}`}</p>
+          <p className="sub wl-inline">
+            {`Moving to ${migration!.to}: ${phase}`}
+            <SkipVerifyButton instanceId={id} phase={phase} isAdmin={isAdmin} />
+          </p>
         )}
         <KV
           items={[

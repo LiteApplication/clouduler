@@ -220,3 +220,63 @@ fn one_migration_at_a_time() {
     });
     assert!(rejected.error.unwrap().contains("already migrating"));
 }
+
+#[test]
+fn skip_verify_is_only_accepted_while_verifying() {
+    let mut state = cluster();
+    let instance = InstanceId::new("gitlab", "web", 0);
+    assign(&mut state, "n1", &["fast"]);
+    let skip = Request::SkipMigrationVerify {
+        instance: instance.clone(),
+    };
+
+    assert!(state.apply(&skip).error.unwrap().contains("not migrating"));
+
+    state.apply(&Request::BeginMigration {
+        instance: instance.clone(),
+        to: "n2".into(),
+        drives: drives(&["fast"]),
+    });
+    // Stopping and Syncing: the data has not landed.
+    assert!(state.apply(&skip).error.unwrap().contains("stopping"));
+    state.apply(&Request::AdvanceMigration {
+        instance: instance.clone(),
+        phase: MigrationPhase::Syncing,
+    });
+    assert!(state.apply(&skip).error.unwrap().contains("syncing"));
+    assert!(
+        !state.assignments[&instance]
+            .migration
+            .as_ref()
+            .unwrap()
+            .skip_verify
+    );
+
+    state.apply(&Request::AdvanceMigration {
+        instance: instance.clone(),
+        phase: MigrationPhase::Verifying,
+    });
+    assert!(state.apply(&skip).is_ok());
+    assert!(
+        state.assignments[&instance]
+            .migration
+            .as_ref()
+            .unwrap()
+            .skip_verify
+    );
+    // Idempotent.
+    assert!(state.apply(&skip).is_ok());
+
+    state.apply(&Request::AdvanceMigration {
+        instance: instance.clone(),
+        phase: MigrationPhase::Switching,
+    });
+    assert!(state.apply(&skip).error.unwrap().contains("not verifying"));
+}
+
+#[test]
+fn a_migration_record_without_skip_verify_still_parses() {
+    let old = r#"{"from":"n1","to":"n2","phase":"verifying"}"#;
+    let m: Migration = serde_json::from_str(old).unwrap();
+    assert!(!m.skip_verify);
+}

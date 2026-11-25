@@ -626,6 +626,7 @@ mod tests {
                     from: "atlas-01".into(),
                     to: "atlas-02".into(),
                     phase,
+                    skip_verify: false,
                 }),
             },
         );

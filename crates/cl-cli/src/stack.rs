@@ -315,6 +315,27 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
     Ok(())
 }
 
+/// Ask raft to skip the verify step of `instance`'s move. The driving node picks it up.
+pub async fn skip_migration_verify(
+    cfg: &ClusterConfig,
+    instance: &str,
+    via: Option<&str>,
+) -> Result<()> {
+    let instance: cl_raft::InstanceId = instance.parse().map_err(|e: String| anyhow!(e))?;
+    debug!(%instance, "submitting SkipMigrationVerify");
+    let response = client_for(cfg, via)?
+        .submit(Request::SkipMigrationVerify {
+            instance: instance.clone(),
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    if let Some(error) = response.error {
+        bail!("cluster rejected the skip: {error}");
+    }
+    println!("verification of {instance}'s move will be skipped; the target copy is unchecked");
+    Ok(())
+}
+
 pub async fn stop(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
     set_all_desired(cfg, name, via, DesiredState::Stopped).await
 }

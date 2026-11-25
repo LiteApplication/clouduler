@@ -134,6 +134,7 @@ Completion is dynamic. Node and drive names come from the config. Stack, instanc
 | `stack stop NAME [--via NODE]` | Sets every instance to stopped. Assignments are kept. |
 | `stack start NAME [--via NODE]` | Sets every instance back to running. |
 | `stack restart NAME [--via NODE]` | Rebuilds each running instance's container on the node it already runs on. Placement is kept; a stopped stack stays stopped. |
+| `stack migration skip-verify INSTANCE [--via NODE]` | Skips the verify step of a move that is in the verifying phase (INSTANCE is `stack.service.index`). The move continues to switching with the target copy unchecked. Refused while the move is stopping or syncing, or in any later phase. |
 | `stack logs NAME [-f] [-n N] [--via NODE]` | Merged, timestamp-ordered logs of every instance. `-n` defaults to 200. |
 | `stack unhealthy [--node] [--uptime] [--placement] [--logs N] [--all] [--via NODE]` | Lists instances whose real state differs from the desired one, plus cluster warnings. |
 

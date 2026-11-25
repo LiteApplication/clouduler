@@ -180,6 +180,28 @@ pub(super) async fn dismiss_migration(
     Ok(StatusCode::OK)
 }
 
+/// Operator override for a move stuck in `Verifying`: records the skip in raft, and the
+/// node driving the move advances to `Switching` without comparing the target copy.
+pub(super) async fn skip_migration_verify(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance = parse_id(&id)?;
+    let response = state
+        .cluster
+        .submit(ClusterRequest::SkipMigrationVerify {
+            instance: instance.clone(),
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+    tracing::warn!(%instance, "operator skipped migration verification via the api");
+    Ok(StatusCode::OK)
+}
+
 pub(super) fn failed_move_target(
     state: &cl_raft::ClusterState,
     instance: &InstanceId,

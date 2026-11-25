@@ -1190,6 +1190,7 @@
               "reason": "verification failed: fast/v0: target differs after sync (added=[] changed=[\"apps/activity/l10n/fr.json\", \"custom_apps/calendar/js/calendar-main.js\"] removed=[])"
             }
           },
+          "skip_verify": false,
           "to": "n1"
         },
         "node": "n0"

@@ -80,6 +80,11 @@ pub enum Request {
     ClearMigration {
         instance: InstanceId,
     },
+    /// Operator override: skip the content check of a move in `Verifying`. Refused in
+    /// any other phase (the data has not landed before it).
+    SkipMigrationVerify {
+        instance: InstanceId,
+    },
     UpsertVolume {
         id: VolumeId,
         primary: String,
@@ -394,6 +399,7 @@ pub(super) const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "BeginMigration",
     "AdvanceMigration",
     "ClearMigration",
+    "SkipMigrationVerify",
     "UpsertVolume",
     "SetVolumeReplica",
     "TouchVolume",
@@ -536,6 +542,9 @@ mod request_mirror {
             phase: MigrationPhase,
         },
         ClearMigration {
+            instance: InstanceId,
+        },
+        SkipMigrationVerify {
             instance: InstanceId,
         },
         UpsertVolume {

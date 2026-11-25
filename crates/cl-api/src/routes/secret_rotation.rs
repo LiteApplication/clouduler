@@ -701,6 +701,7 @@ mod tests {
             from: "n1".into(),
             to: "n2".into(),
             phase: MigrationPhase::Syncing,
+            skip_verify: false,
         });
         s.instance_updates.insert(
             InstanceId::new("app", "worker", 0),

@@ -7,4 +7,10 @@ export type Migration = {
  * `Switching` repoints the assignment at the target, after which a node that
  * crashed mid-move could not otherwise recognise its own job.
  */
-from: string, to: string, phase: MigrationPhase, };
+from: string, to: string, phase: MigrationPhase, 
+/**
+ * An operator asked to skip the `Verifying` content check (`SkipMigrationVerify`).
+ * Only ever set while verifying, so the driver advances to `Switching` without
+ * comparing the target copy.
+ */
+skip_verify: boolean, };

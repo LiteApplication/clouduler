@@ -113,6 +113,9 @@ fn every_current_request_variant_round_trips_and_is_not_unknown() {
         Request::ClearMigration {
             instance: InstanceId::new("s", "web", 0),
         },
+        Request::SkipMigrationVerify {
+            instance: InstanceId::new("s", "web", 0),
+        },
         Request::UpsertVolume {
             id: VolumeId::new("fast", "v1"),
             primary: "n1".into(),

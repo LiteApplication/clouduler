@@ -106,6 +106,7 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     // noisy for a stop, wrong for `Switching` (bumps every volume's generation).
     // The loop trusts the phase it just recorded; the read is for resuming only.
     let mut phase = recorded_phase(node, &job.instance).await?;
+    let resumed_into_verifying = phase == MigrationPhase::Verifying;
     // What this run's sync wrote. Lost on a resume straight into `Verifying`,
     // which then hashes everything.
     let mut touched = Touched::new();
@@ -150,8 +151,30 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             }
 
             MigrationPhase::Verifying => {
-                if let Err(e) = verify_all(job, &touched).await {
-                    return Err(fail(node, &job.instance, e).await);
+                // A resume straight into `Verifying` lost `touched`, but the phase
+                // itself records that `Syncing` completed: the sync already judged
+                // every file by size/mtime/mode, so compare just that rather than
+                // hashing the whole volume.
+                let mode = if resumed_into_verifying {
+                    VerifyMode::Cheap
+                } else {
+                    VerifyMode::Normal
+                };
+                let skipped = tokio::select! {
+                    result = verify_all(job, &touched, mode) => {
+                        if let Err(e) = result {
+                            return Err(fail(node, &job.instance, e).await);
+                        }
+                        false
+                    }
+                    () = skip_requested(node, &job.instance) => true,
+                };
+                if skipped {
+                    warn!(
+                        instance = %job.instance,
+                        to = %job.target_node,
+                        "migration verification skipped by an operator: the target copy is unchecked",
+                    );
                 }
                 phase = advance(node, &job.instance, MigrationPhase::Switching).await?;
             }
@@ -323,9 +346,40 @@ fn finish_sync(job: &MigrationJob<'_>, result: Result<Touched>) -> Result<Touche
     result
 }
 
+/// How thoroughly `verify_one` compares a volume whose written files are unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerifyMode {
+    /// Hash everything when `touched` has no entry for the volume.
+    Normal,
+    /// Compare size, mtime, mode and owner only. For a resume into `Verifying`,
+    /// where `Syncing` is already recorded as complete.
+    Cheap,
+}
+
+/// How often a running verify checks raft for an operator's skip request.
+const SKIP_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resolves once raft records a skip request for `instance`'s migration,
+/// immediately if one is already there (a resume after the operator asked).
+async fn skip_requested(node: &ClusterNode, instance: &InstanceId) {
+    loop {
+        let requested = node
+            .snapshot()
+            .await
+            .assignments
+            .get(instance)
+            .and_then(|a| a.migration.as_ref())
+            .is_some_and(|m| m.skip_verify);
+        if requested {
+            return;
+        }
+        tokio::time::sleep(SKIP_POLL).await;
+    }
+}
+
 /// Verify every volume, up to the drive's parallel limit at a time. Stops at
 /// the first mismatch.
-async fn verify_all(job: &MigrationJob<'_>, touched: &Touched) -> Result<()> {
+async fn verify_all(job: &MigrationJob<'_>, touched: &Touched, mode: VerifyMode) -> Result<()> {
     let mut pending: Vec<(i32, VolumeId)> = job.volumes.iter().cloned().map(|v| (0, v)).collect();
     while !pending.is_empty() {
         let width = job
@@ -334,9 +388,12 @@ async fn verify_all(job: &MigrationJob<'_>, touched: &Touched) -> Result<()> {
             .map_or(1, |limit| limit(&pending[0].1.drive))
             .max(1);
         let batch = crate::sync::take_batch(&mut pending, width);
-        let results =
-            futures::future::join_all(batch.iter().map(|volume| verify_one(job, volume, touched)))
-                .await;
+        let results = futures::future::join_all(
+            batch
+                .iter()
+                .map(|volume| verify_one(job, volume, touched, mode)),
+        )
+        .await;
         results.into_iter().collect::<Result<Vec<()>>>()?;
     }
     Ok(())
@@ -345,8 +402,13 @@ async fn verify_all(job: &MigrationJob<'_>, touched: &Touched) -> Result<()> {
 /// Compare one volume with the target. Both sides are read at once. Only the
 /// files the sync wrote are content-hashed when known (the sync already judged
 /// the rest identical by size, mtime, mode and owner, which this still
-/// compares); otherwise everything is.
-async fn verify_one(job: &MigrationJob<'_>, volume: &VolumeId, touched: &Touched) -> Result<()> {
+/// compares); otherwise everything is, unless `mode` is `Cheap`.
+async fn verify_one(
+    job: &MigrationJob<'_>,
+    volume: &VolumeId,
+    touched: &Touched,
+    mode: VerifyMode,
+) -> Result<()> {
     let src_path = job.require_registry()?.volume_path(volume)?;
     // Hashing is this crate's most expensive operation: never on a runtime thread.
     let (source, target) = match touched.get(volume) {
@@ -354,10 +416,13 @@ async fn verify_one(job: &MigrationJob<'_>, volume: &VolumeId, touched: &Touched
             scan::scan_hashing_off_runtime(src_path, paths.clone()),
             transport::request_partial_manifest(job.target_addr, volume, paths.clone(), &job.keys),
         )?,
-        None => tokio::try_join!(
-            scan::scan_off_runtime(src_path, true),
-            transport::request_manifest(job.target_addr, volume, true, &job.keys),
-        )?,
+        None => {
+            let hash = mode == VerifyMode::Normal;
+            tokio::try_join!(
+                scan::scan_off_runtime(src_path, hash),
+                transport::request_manifest(job.target_addr, volume, hash, &job.keys),
+            )?
+        }
     };
 
     let diff = source.diff(&target);

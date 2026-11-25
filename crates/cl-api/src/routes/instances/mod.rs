@@ -56,6 +56,10 @@ pub fn router() -> Router<AppState> {
             "/api/instances/{id}/migration/dismiss",
             post(dismiss_migration),
         )
+        .route(
+            "/api/instances/{id}/migration/skip-verify",
+            post(skip_migration_verify),
+        )
         .route("/api/rebalance", post(rebalance))
         .route("/api/rebalance/last", get(last_rebalance))
         .route("/api/instances/{id}/update", post(update))
