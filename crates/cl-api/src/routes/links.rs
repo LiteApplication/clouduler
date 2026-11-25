@@ -153,6 +153,8 @@ async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> V
             let drive_addr =
                 raft_addr.map(|a| SocketAddr::new(a.ip(), cl_drive::drive_port(a.port())));
             let peer = name.clone();
+            // A node with no drives has nothing to sync, so its drive port is not probed.
+            let has_drives = !node.drives.is_empty();
             async move {
                 let (raft_ms, api_ms, drive_ms) = futures::future::join3(
                     async {
@@ -179,7 +181,7 @@ async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> V
                     peer,
                     raft: raft_ms.is_some(),
                     api: api_ms.is_some(),
-                    drive: drive_ms.is_some(),
+                    drive: !has_drives || drive_ms.is_some(),
                     raft_ms,
                     state: LinkState::Ok,
                     failures: 0,
