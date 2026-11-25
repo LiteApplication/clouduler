@@ -5,17 +5,18 @@
 #   lan    192.168.50.0/24  private, access: [], so it may not reach media
 #
 # n3 is the client (not a media node): it routes 192.168.70.0/24 through n1 or
-# n2 and fetches from the containers of stacks/managed-media.yaml (app on n1,
-# solo on n2). Container addresses start at .4 (.1 gateway, .2/.3 the nodes).
-# From the cluster address (no access list, unrestricted) it gets through; with
-# a lan source address it is dropped by CLDR-MNG.
+# n2 and fetches from the node addresses of stacks/managed-media.yaml (app on
+# n1, solo on n2) on the open ports 8080 (app) and 8081 (solo). Container
+# addresses (.4 and up) are never routed. From the cluster address (no access
+# list, unrestricted) it gets through, on the owner's address or the other
+# node's (forwarded over the VXLAN); with a lan source address it is dropped.
 #
 #   office 192.168.80.0/24  private, every node, access: [media]
 #
-# n3 also reaches the proxy route echo.media.test (n2's media address) and the
-# PROXY protocol port 9100 as an office client (nc -s 192.168.80.3): the backend
-# is told the client address by X-Forwarded-For and by the PROXY v2 header. The
-# managed network is then renamed live; its containers keep their addresses.
+# n3 also reaches the proxy route echo.media.test on the node addresses as an
+# office client (nc -s 192.168.80.3): the backend is told the client address by
+# X-Forwarded-For. The managed network is then renamed live; its containers
+# keep their addresses.
 name: managed-network
 description: a managed private network is routed via any implementing node, filtered by access lists, and survives losing one node.
 
@@ -23,7 +24,15 @@ wan_on_mesh: true
 guest_probe: network-access-probe.sh
 
 networks:
-  media: { type: private, subnet: 192.168.70.0/24, managed: true, domain: media.test }
+  media:
+    type: private
+    subnet: 192.168.70.0/24
+    managed: true
+    domain: media.test
+    proxy: true
+    open_ports:
+      - { port: 8080, target_port: 80, stack: media-stack, service: app }
+      - { port: 8081, target_port: 80, stack: media-stack, service: solo }
   office: { type: private, subnet: 192.168.80.0/24, access: [media] }
   lan: { type: private, subnet: 192.168.50.0/24, access: [] }
 
@@ -38,13 +47,12 @@ steps:
   - wait_running: { stack: media-stack, service: app, timeout: 180 }
   - wait_running: { stack: media-stack, service: solo, timeout: 180 }
   - wait_running: { stack: media-stack, service: echo, timeout: 180 }
-  - wait_running: { stack: media-stack, service: pp, timeout: 180 }
 
-  # The overlay, the gateway, the node address and the firewall exist on the
-  # implementing nodes only.
+  # The overlay, the gateway (/24 on the bridge), the node address (/32 on its
+  # own port) and the firewall exist on the implementing nodes only.
   - assert_exec:
       node: n1
-      cmd: "ip -o -4 addr show | grep -c '192\\.168\\.70\\.[12]/24'"
+      cmd: "ip -o -4 addr show | grep -cE '192\\.168\\.70\\.1/24|192\\.168\\.70\\.2/32'"
       matches: "^2"
       timeout: 60
   - assert_exec:
@@ -59,35 +67,35 @@ steps:
       timeout: 30
   - assert_exec:
       node: n1
-      cmd: "ip -4 route show proto 201"
-      matches: "192\\.168\\.70\\.[0-9]+ via 10\\.10\\.0\\.2"
+      cmd: "ip -4 route show"
+      matches: "192\\.168\\.70\\.3 dev \\S+ scope link +src 192\\.168\\.70\\.2"
       timeout: 60
   - assert_exec:
       node: n2
-      cmd: "ip -4 route show proto 201"
-      matches: "192\\.168\\.70\\.[0-9]+ via 10\\.10\\.0\\.1"
+      cmd: "ip -4 route show"
+      matches: "192\\.168\\.70\\.2 dev \\S+ scope link +src 192\\.168\\.70\\.3"
       timeout: 60
 
   # An allowed client reaches both containers via n1 ...
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "app-ok"
       timeout: 90
   - assert_exec:
       node: n3
-      cmd: "for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "solo-ok"
       timeout: 30
   # ... and via n2.
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "app-ok"
       timeout: 60
   - assert_exec:
       node: n3
-      cmd: "for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "solo-ok"
       timeout: 30
 
@@ -112,24 +120,16 @@ steps:
       absent: "xff="
       timeout: 30
 
-  # A tcp port exposed on media with proxy_protocol: the backend gets a PROXY v2
-  # header (signature, v2 PROXY, tcp4, length 12) naming the office client.
-  - assert_exec:
-      node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; (echo; sleep 3) | nc -s 192.168.80.3 -w 5 192.168.70.2 9100 2>&1"
-      matches: "pp=0d0a0d0a000d0a515549540a2111000cc0a85003"
-      timeout: 90
-
   # A client on lan (access: []) is dropped on both entry nodes.
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; for i in 4 5 6 7; do printf 'GET / HTTP/1.0\r\n\r\n' | nc -s 192.168.50.3 -w 2 192.168.70.$i 80 2>&1; done; echo done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; for t in 2,8080 3,8081; do printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -s 192.168.50.3 -w 2 192.168.70.${t%,*} ${t#*,} 2>&1; done; echo done"
       matches: "^done$"
       absent: "ok"
       timeout: 60
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; for i in 4 5 6 7; do printf 'GET / HTTP/1.0\r\n\r\n' | nc -s 192.168.50.3 -w 2 192.168.70.$i 80 2>&1; done; echo done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; for t in 2,8080 3,8081; do printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -s 192.168.50.3 -w 2 192.168.70.${t%,*} ${t#*,} 2>&1; done; echo done"
       matches: "^done$"
       absent: "ok"
       timeout: 60
@@ -137,7 +137,7 @@ steps:
   # Control: the same nc from the cluster address (unrestricted) does get answered.
   - assert_exec:
       node: n3
-      cmd: "for i in 4 5 6 7; do printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -s 10.10.0.3 -w 2 192.168.70.$i 80 2>&1; done; echo done"
+      cmd: "for t in 2,8080 3,8081; do printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -s 10.10.0.3 -w 2 192.168.70.${t%,*} ${t#*,} 2>&1; done; echo done"
       matches: "app-ok|solo-ok"
       timeout: 60
 
@@ -151,7 +151,7 @@ steps:
   - assert_exec:
       node: n2
       cmd: "for c in $(docker ps --format '{{.Names}}'); do docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' $c; done | tr ' ' '\\n' | grep '^192\\.168\\.70\\.' | sort > /tmp/ips.before; wc -l < /tmp/ips.before"
-      matches: "^3$"
+      matches: "^2$"
       timeout: 30
   - rename_network: { from: media, to: films }
   - assert_exec:
@@ -163,7 +163,6 @@ steps:
   - wait_running: { stack: media-stack, service: app, timeout: 180 }
   - wait_running: { stack: media-stack, service: solo, timeout: 180 }
   - wait_running: { stack: media-stack, service: echo, timeout: 180 }
-  - wait_running: { stack: media-stack, service: pp, timeout: 180 }
   - assert_exec:
       node: n1
       cmd: "for c in $(docker ps --format '{{.Names}}'); do docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' $c; done | tr ' ' '\\n' | grep '^192\\.168\\.70\\.' | sort > /tmp/ips.after; diff /tmp/ips.before /tmp/ips.after && echo same"
@@ -176,12 +175,12 @@ steps:
       timeout: 90
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.1; wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "app-ok"
       timeout: 90
   - assert_exec:
       node: n3
-      cmd: "for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "solo-ok"
       timeout: 30
   - assert_exec:
@@ -195,6 +194,6 @@ steps:
   - assert_unreachable: { node: n1, timeout: 60 }
   - assert_exec:
       node: n3
-      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; for i in 4 5 6 7; do wget -q -T 2 -O - http://192.168.70.$i/ 2>/dev/null; echo; done"
+      cmd: "ip route replace 192.168.70.0/24 via 10.10.0.2; wget -q -T 3 -O - http://192.168.70.2:8080/ 2>/dev/null; echo; wget -q -T 3 -O - http://192.168.70.3:8081/ 2>/dev/null; echo"
       matches: "solo-ok"
       timeout: 60

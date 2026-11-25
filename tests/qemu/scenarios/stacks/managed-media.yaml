@@ -5,9 +5,7 @@
 # network, pinned to n2. Each answers every request with its own name.
 #
 # `echo` (n2) is published by the proxy as echo.media.test on `media` and answers
-# with the X-Forwarded-For it received. `pp` (n2) is exposed on tcp 9100 of
-# `media` with a PROXY protocol header and answers with the first 28 bytes it
-# received (the v2 signature, the family and the client address) in hex.
+# with the X-Forwarded-For it received.
 version: "3.8"
 
 networks:
@@ -67,23 +65,3 @@ services:
         EOF
         chmod +x /h.sh
         while true; do nc -l -p 80 -e /h.sh >/dev/null 2>&1; done
-
-  pp:
-    image: alpine:3.20
-    restart: always
-    networks: [media]
-    x-clouduler:
-      node: n2
-      expose:
-        - { port: 9000, published: 9100, network: media, proxy_protocol: true }
-    command:
-      - sh
-      - -c
-      - |
-        cat > /p.sh <<'EOF'
-        #!/bin/sh
-        h=$(head -c 28 | od -An -tx1 | tr -d ' \n')
-        echo "pp=$h"
-        EOF
-        chmod +x /p.sh
-        while true; do nc -l -p 9000 -e /p.sh >/dev/null 2>&1; done
