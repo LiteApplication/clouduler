@@ -34,7 +34,7 @@ That last fallback is why the CI Rust jobs and the aarch64 recipe below can skip
 
 ### Local build speed (optional)
 
-`.cargo/config.toml` is a local speed tweak: it selects `clang` with `mold` as the linker for x86_64, an `aarch64-linux-gnu-gcc` linker for aarch64, and `sccache` as the rustc wrapper. It is untracked on purpose. Without it Cargo falls back to the default linker, which is slower but correct. If you keep a copy, install `mold` and `sccache`, or remove those lines.
+`.cargo/config.toml` is a local speed tweak. A ready-to-copy version is committed as `.cargo/config.toml.example`: `cp .cargo/config.toml.example .cargo/config.toml`. It selects `clang` with `mold` as the linker for x86_64, `aarch64-linux-gnu-gcc` with `mold` for aarch64, and `sccache` as the rustc wrapper. The real `.cargo/config.toml` is untracked on purpose, because the CI aarch64 cross-build has no `mold`. Without it Cargo falls back to the default linker, which is slower but correct. If you copy it, install `clang`, `mold` and `sccache`, or remove the lines you do not want.
 
 ## Cross-compiling for aarch64
 
