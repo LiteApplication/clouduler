@@ -160,16 +160,16 @@ pub async fn serve(
     use std::os::unix::fs::PermissionsExt;
 
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750)).await?;
     }
-    match std::fs::remove_file(path) {
+    match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
     let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660)).await?;
 
     tokio::pin!(shutdown);
     loop {
@@ -196,7 +196,7 @@ pub async fn serve(
             }
         }
     }
-    if let Err(e) = std::fs::remove_file(path) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
         if e.kind() == std::io::ErrorKind::NotFound {
             debug!(path = %path.display(), "socket already gone");
         } else {

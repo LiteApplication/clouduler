@@ -87,7 +87,11 @@ impl Worker {
         // staged file already is the recorded asset, report it instead of
         // downloading and rewriting a binary the restart route may be running.
         if let Some(recorded) = run.arch_hashes.get(&arch) {
-            if staged_matches(&self.artifact_path, recorded) {
+            let (path, recorded) = (self.artifact_path.clone(), recorded.clone());
+            let matches = tokio::task::spawn_blocking(move || staged_matches(&path, &recorded))
+                .await
+                .unwrap_or(false);
+            if matches {
                 run.per_node
                     .insert(self.node_name.clone(), NodePhase::Ready);
                 return self.save(run.clone(), revision).await;
@@ -98,7 +102,11 @@ impl Worker {
         let http = release::download_client()?;
         match release::download_asset(&http, &owner, &repo, &asset, token.as_deref()).await {
             Ok(binary) => {
-                let hash = blake3::hash(&binary).to_hex().to_string();
+                let (hash, binary) = tokio::task::spawn_blocking(move || {
+                    (blake3::hash(&binary).to_hex().to_string(), binary)
+                })
+                .await
+                .map_err(|e| format!("hashing downloaded binary: {e}"))?;
                 // Releases publish no checksum to verify against, so the
                 // next best thing: every node of an architecture must have
                 // downloaded the same bytes as the first one to report.
@@ -107,7 +115,10 @@ impl Worker {
                         .insert(self.node_name.clone(), NodePhase::FetchFailed { reason });
                     return self.save(run.clone(), revision).await;
                 }
-                stage_atomically(&self.artifact_path, &binary)
+                let artifact_path = self.artifact_path.clone();
+                tokio::task::spawn_blocking(move || stage_atomically(&artifact_path, &binary))
+                    .await
+                    .map_err(|e| format!("staging downloaded binary: {e}"))?
                     .map_err(|e| format!("staging downloaded binary: {e}"))?;
                 run.arch_hashes.entry(arch).or_insert(hash);
                 run.per_node
