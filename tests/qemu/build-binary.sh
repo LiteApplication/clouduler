@@ -16,6 +16,12 @@
 #   3. Docker, building inside rust:alpine. Slower, but the harness already
 #      requires docker and this needs nothing installed on the host.
 #
+# The binary does not embed the web UI any more. This script also makes sure
+# a built UI exists (ui/dist, or $CL_UI_DIR if set), which mkdisk.sh stages
+# into every VM and the daemon serves through CL_UI_DIR. A UI that cannot be
+# built is only a warning: scenarios that never open the dashboard run fine
+# without it.
+#
 # Usage: build-binary.sh   (prints the binary path on stdout, logs to stderr)
 set -euo pipefail
 
@@ -30,6 +36,20 @@ case "$PROFILE" in dev) PROFILE_DIR=debug; PROFILE_FLAG="" ;; release) PROFILE_D
 OUT="$REPO_ROOT/target/$TARGET/$PROFILE_DIR/clouduler"
 
 log() { printf 'build-binary: %s\n' "$*" >&2; }
+
+UI_DIST="${CL_UI_DIR:-$REPO_ROOT/ui/dist}"
+if [[ ! -f "$UI_DIST/index.html" ]]; then
+  if [[ -n "${CL_UI_DIR:-}" ]]; then
+    log "CL_UI_DIR=$CL_UI_DIR has no index.html"
+    exit 1
+  elif command -v npm >/dev/null 2>&1; then
+    log "building the ui (ui/dist)"
+    (cd "$REPO_ROOT/ui" && npm ci --silent && npm run build --silent) >&2 \
+      || log "WARNING: the ui build failed, the VMs will serve no dashboard"
+  else
+    log "WARNING: no ui/dist and no npm, the VMs will serve no dashboard"
+  fi
+fi
 
 if [[ -n "${CLOUDULER_BIN:-}" ]]; then
   [[ -x "$CLOUDULER_BIN" ]] || { log "CLOUDULER_BIN=$CLOUDULER_BIN is not executable"; exit 1; }

@@ -8,6 +8,14 @@ name: release
 # not warm the release build, but dependencies compiled by sccache still hit.
 # Pre-release assets keep the release asset names, so a pinned pre-release url
 # still resolves; they are just unoptimized binaries.
+#
+# The backend binaries and the ui (clouduler-ui.zip) are separate artifacts,
+# described by a manifest.json asset (see scripts/release-manifest.sh). A
+# component whose source hash equals the previous release's is not rebuilt:
+# that release's asset is re-uploaded after its blake3 is checked against the
+# previous manifest. A tag run only reuses full releases (their binaries are
+# release builds); a master run may reuse any release. With no previous
+# release that has a manifest.json, everything is built.
 on:
   push:
     branches: [master]
@@ -22,7 +30,62 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  # Decides which components need a build.
+  plan:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      build_backend: ${{ steps.plan.outputs.build_backend }}
+      build_ui: ${{ steps.plan.outputs.build_ui }}
+      backend_hash: ${{ steps.plan.outputs.backend_hash }}
+      ui_hash: ${{ steps.plan.outputs.ui_hash }}
+      backend_version: ${{ steps.plan.outputs.backend_version }}
+      ui_version: ${{ steps.plan.outputs.ui_version }}
+      prev_tag: ${{ steps.prev.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The newest release that publishes a manifest.json. The release being
+      # built is skipped (a re-run). The transition release (nothing has a
+      # manifest yet) finds none and builds everything.
+      - name: find the previous release
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev
+          args=(--exclude-drafts)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then args+=(--exclude-pre-releases); fi
+          prev_tag=""
+          for t in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 "${args[@]}" \
+              --json tagName --jq '.[].tagName'); do
+            [ "$t" = "$GITHUB_REF_NAME" ] && continue
+            case "$t" in *"-next-${GITHUB_SHA::7}") continue ;; esac
+            gh release view "$t" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > prev/assets
+            if grep -qx manifest.json prev/assets; then
+              gh release download "$t" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir prev --clobber
+              prev_tag="$t"
+              break
+            fi
+          done
+          echo "previous release with a manifest: ${prev_tag:-none}"
+          echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
+
+      - name: decide what to build
+        id: plan
+        run: |
+          if [ -s prev/manifest.json ]; then
+            scripts/release-manifest.sh plan prev/manifest.json prev/assets > plan.txt
+          else
+            scripts/release-manifest.sh plan > plan.txt
+          fi
+          cat plan.txt
+          cat plan.txt >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
+    if: needs.plan.outputs.build_backend == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -34,18 +97,6 @@ jobs:
             runner: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - name: build the ui (embedded into the binary by rust-embed)
-        working-directory: ui
-        run: |
-          npm ci
-          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,19 +132,129 @@ jobs:
           name: clouduler-${{ matrix.target }}
           path: dist/clouduler-${{ matrix.target }}
 
-  release:
-    needs: build
+  # The web ui, built once and shipped as a zip next to the binaries; the
+  # binary no longer embeds it.
+  ui:
+    needs: plan
+    if: needs.plan.outputs.build_ui == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: build the ui
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: zip the ui
+        run: |
+          mkdir -p dist
+          scripts/release-manifest.sh zip-ui ui/dist dist/clouduler-ui.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clouduler-ui
+          path: dist/clouduler-ui.zip
+
+  # Re-uploads the previous release's copy of every component that did not
+  # change, after checking it against that release's manifest.
+  reuse:
+    needs: plan
+    if: needs.plan.outputs.build_backend != 'true' || needs.plan.outputs.build_ui != 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PREV_TAG: ${{ needs.plan.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install blake3
+        run: |
+          python3 -m venv "$RUNNER_TEMP/b3"
+          "$RUNNER_TEMP/b3/bin/pip" install --quiet blake3
+          echo "B3_PYTHON=$RUNNER_TEMP/b3/bin/python" >> "$GITHUB_ENV"
+
+      - name: download the unchanged assets
+        run: |
+          mkdir -p dist prev
+          gh release download "$PREV_TAG" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir prev
+          if [ "${{ needs.plan.outputs.build_backend }}" != true ]; then
+            for asset in $(jq -r '.backend.arch[].asset' prev/manifest.json); do
+              gh release download "$PREV_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir dist
+            done
+            scripts/release-manifest.sh verify-reused prev/manifest.json dist backend
+          fi
+          if [ "${{ needs.plan.outputs.build_ui }}" != true ]; then
+            gh release download "$PREV_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$(jq -r .ui.asset prev/manifest.json)" --dir dist
+            scripts/release-manifest.sh verify-reused prev/manifest.json dist ui
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reused
+          path: dist/*
+
+  publish:
+    needs: [plan, build, ui, reuse]
+    # build, ui and reuse are skipped when not needed; anything else but
+    # success stops the release.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        if: github.ref_type == 'branch'
+
+      - name: install blake3
+        run: |
+          python3 -m venv "$RUNNER_TEMP/b3"
+          "$RUNNER_TEMP/b3/bin/pip" install --quiet blake3
+          echo "B3_PYTHON=$RUNNER_TEMP/b3/bin/python" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # Every master push is published as a pre-release. The updater's
+      # "latest" lookup skips pre-releases, so these are only picked up when
+      # pinned by their tag url (v<version>-next-<sha>). That tag matches v*,
+      # so the tag filter at the top excludes it from starting this workflow.
+      - name: name the release
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+            echo "PRE_TAG=v${version}-next-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            echo "RELEASE_TAG=v${version}-next-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      # The manifest hashes the final artifacts, built or reused, and records
+      # the versions and source hashes the next release is compared against.
+      - name: write the manifest
+        run: |
+          cat > plan.txt <<'PLAN'
+          backend_hash=${{ needs.plan.outputs.backend_hash }}
+          ui_hash=${{ needs.plan.outputs.ui_hash }}
+          backend_version=${{ needs.plan.outputs.backend_version }}
+          ui_version=${{ needs.plan.outputs.ui_version }}
+          PLAN
+          scripts/release-manifest.sh assemble "$RELEASE_TAG" dist plan.txt
+          cat dist/manifest.json
+          ls -l dist
+          test "$(ls dist | wc -l)" = 4
 
       - name: create the release
         if: github.ref_type == 'tag'
@@ -101,16 +262,6 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
-
-      # Every master push is published as a pre-release. The updater's
-      # "latest" lookup skips pre-releases, so these are only picked up when
-      # pinned by their tag url (v<version>-next-<sha>). That tag matches v*,
-      # so the tag filter at the top excludes it from starting this workflow.
-      - name: name the pre-release
-        if: github.ref_type == 'branch'
-        run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "PRE_TAG=v${version}-next-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
       - name: create the pre-release
         if: github.ref_type == 'branch'
@@ -135,7 +286,8 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
 
       # Keep the 5 newest pre-releases, plus every pre-release newer than the
-      # last full release; drop the rest and their tags.
+      # last full release; drop the rest and their tags. A later release that
+      # reused an asset holds its own copy, so deleting the source is safe.
       - name: delete the old pre-releases
         if: github.ref_type == 'branch'
         env:

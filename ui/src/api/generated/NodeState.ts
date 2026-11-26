@@ -42,6 +42,11 @@ arch: string,
  */
 binary_hash: string, 
 /**
+ * Blake3 hex of the ui bundle this node serves (the name of its `self-update/ui/<hash>`
+ * directory); `None` on a worker or a node with no ui staged for its running version.
+ */
+ui_hash: string | null, 
+/**
  * X25519 public key (base64), self-reported once the local keypair exists, so a
  * key holder can wrap the cluster secret key for this node (`wrapped_keys`).
  */

@@ -34,4 +34,6 @@ cl-raft.workspace = true
 openraft.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
+blake3.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1093,7 +1093,9 @@ async fn internal_reset(
         &state,
         commit,
         params.get("release_tag").map(String::as_str),
-        params.get("keep_current_release").is_some_and(|v| v == "true"),
+        params
+            .get("keep_current_release")
+            .is_some_and(|v| v == "true"),
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(done)))
@@ -1628,6 +1630,7 @@ mod tests {
                 open_ports: Default::default(),
                 arch: String::new(),
                 binary_hash: String::new(),
+                ui_hash: Default::default(),
                 node_pubkey: None,
                 memory_total_bytes: 0,
                 gpus: Default::default(),

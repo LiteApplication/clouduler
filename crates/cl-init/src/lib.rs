@@ -18,6 +18,7 @@ pub mod permissions;
 pub mod plan;
 pub mod prompt;
 pub mod systemd;
+mod ui_download;
 
 #[cfg(test)]
 mod tests;
@@ -209,6 +210,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     check_ethtool_availability(&mut prompt)?;
     check_restic_availability(&mut prompt)?;
     setup_secret_key(&mut prompt, &args, &config, &node_name, peer.as_ref()).await?;
+    setup_ui(&mut prompt, &config, &node_name).await?;
     setup_systemd(&mut prompt, &args, &config, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
     Ok(())
@@ -745,6 +747,23 @@ async fn setup_secret_key<R: BufRead, W: Write>(
         "installed the cluster key ({})",
         key.fingerprint()
     ))?;
+    Ok(())
+}
+
+/// Fetches the web ui matching this binary so a new manager has a dashboard before its
+/// first self-update. Best effort: any failure is only reported.
+async fn setup_ui<R: BufRead, W: Write>(
+    prompt: &mut Prompt<R, W>,
+    config: &ClusterConfig,
+    node_name: &str,
+) -> Result<()> {
+    let ui_dir_override = std::env::var_os("CL_UI_DIR").is_some_and(|d| !d.is_empty());
+    if let Some(line) =
+        ui_download::download_ui(&ui_download::GithubFetcher, config, node_name, ui_dir_override)
+            .await
+    {
+        prompt.say(&line)?;
+    }
     Ok(())
 }
 

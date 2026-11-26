@@ -462,6 +462,7 @@ pub async fn run(
             node_pubkey,
             gpus_rx,
             docker.clone(),
+            data_dir.clone(),
         ),
     );
     {
@@ -855,6 +856,7 @@ async fn start_self_update(
         http,
         cluster_config: cfg.clone(),
         artifact_path,
+        data_dir: data_dir.to_path_buf(),
     };
 
     Some((tokio::spawn(orchestrator.run()), tokio::spawn(worker.run())))
@@ -1866,6 +1868,7 @@ fn to_state(
         // non-leader — runs about itself.
         arch: current.map(|c| c.arch.clone()).unwrap_or_default(),
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
+        ui_hash: current.and_then(|c| c.ui_hash.clone()),
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
         version: current.map(|c| c.version.clone()).unwrap_or_default(),
@@ -1888,6 +1891,7 @@ async fn report_self(
     node_pubkey: Option<String>,
     gpus_rx: tokio::sync::watch::Receiver<Option<cl_raft::state::NodeGpus>>,
     docker: cl_docker::DockerHandle,
+    data_dir: PathBuf,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -1902,6 +1906,13 @@ async fn report_self(
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
         let version = cl_config::version().to_string();
+        // Only a manager serves a ui; the directory name is the hash of the zip it came from.
+        let ui_hash = if current.role == Role::Manager {
+            cl_update::ui::serving_dir(&data_dir, &version)
+                .and_then(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+        } else {
+            None
+        };
         // Until the first detection finishes, keep what is already stored
         // rather than report a restarting node as having no GPUs.
         let gpus = gpus_rx
@@ -1926,6 +1937,7 @@ async fn report_self(
             && current.gpus == gpus
             && current.arch == arch
             && current.binary_hash == binary_hash
+            && current.ui_hash == ui_hash
             && current.node_pubkey == node_pubkey
             && current.memory_total_bytes == memory_total_bytes
         {
@@ -1934,6 +1946,7 @@ async fn report_self(
         let desired = NodeState {
             arch,
             binary_hash,
+            ui_hash,
             node_pubkey: node_pubkey.clone(),
             memory_total_bytes,
             version,

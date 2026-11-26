@@ -13,7 +13,7 @@ tests/qemu/
   run.sh               entry point: run one scenario or the whole suite
   lib/                 shared bash: vm lifecycle, network wiring, http/cli assertions
   scenarios/           one file per scenario (bash, sourcing lib/harness.sh)
-  build-binary.sh      builds the musl clouduler binary the VMs run
+  build-binary.sh      builds the musl clouduler binary the VMs run (and ui/dist if missing)
   cache/               cached base image (git-ignored)
   work/                per-run scratch: disks, sockets, logs, pids (git-ignored)
 ```

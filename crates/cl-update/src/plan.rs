@@ -115,6 +115,16 @@ pub struct UpdateRunState {
     /// then the leader hands over to the reset instead of restarting nodes one by one.
     #[serde(default)]
     pub hold: bool,
+    /// `backend.version` of the release's manifest: what every manager's staged ui is paired with.
+    /// `None` for a release without a manifest (it embeds its ui, nothing is staged).
+    #[serde(default)]
+    pub backend_version: Option<String>,
+    /// Blake3 of the ui zip (the staged directory's name); managers fetch and serve it.
+    #[serde(default)]
+    pub ui_hash: Option<String>,
+    /// The ui zip asset to download when a manager does not hold `ui_hash` yet.
+    #[serde(default)]
+    pub ui_asset: Option<ReleaseAsset>,
 }
 
 impl UpdateRunState {
@@ -133,6 +143,9 @@ impl UpdateRunState {
             restart_started_at: None,
             target_tag: None,
             hold: false,
+            backend_version: None,
+            ui_hash: None,
+            ui_asset: None,
         }
     }
 
@@ -207,6 +220,17 @@ mod tests {
         assert!(!run.is_complete());
         run.per_node.insert("b".into(), NodePhase::Done);
         assert!(run.is_complete());
+    }
+
+    #[test]
+    fn a_run_stored_before_the_ui_fields_still_loads() {
+        let mut value =
+            serde_json::to_value(UpdateRunState::new("r".into(), ["a".to_string()], 0)).unwrap();
+        for key in ["backend_version", "ui_hash", "ui_asset"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let run: UpdateRunState = serde_json::from_value(value).unwrap();
+        assert_eq!(run.ui_hash, None);
     }
 
     #[test]

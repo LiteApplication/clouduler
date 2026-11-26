@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
-// The Rust side always serves ui/dist from the domain root (see
-// cl-api/src/ui.rs's SPA fallback), never off a sub-path, so assets must be
+// The Rust side always serves the built ui (the release's clouduler-ui.zip,
+// or ui/dist via CL_UI_DIR) from the domain root (see cl-api/src/ui.rs's SPA
+// fallback), never off a sub-path, so assets must be
 // referenced absolutely: a relative reference resolves against whatever
 // client-side route the browser is on, which breaks a hard reload of any
 // path but `/` (e.g. `/devices` would look for `/devices/assets/...`).

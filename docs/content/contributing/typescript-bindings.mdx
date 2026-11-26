@@ -19,7 +19,7 @@ The script runs the ts-rs export tests of every crate that has the `ts` feature 
 
 Never edit `ui/src/api/generated/` by hand. Run the script after changing any serialised Rust type that has the derive, and commit the result together with the Rust change.
 
-The script sets `CL_API_SKIP_UI_BUILD=1`, which makes `cl-api`'s build script skip its `npm run build`. Without it the UI typecheck would fail on a generated file the script has not written yet, for example right after you re-export a new type from `types.ts`.
+The Rust build never runs the UI build (the UI is not embedded in the binary), so the script cannot fail on a UI typecheck of a generated file that has not been written yet.
 
 CI (the `rust` job) runs the script and fails when `git status --porcelain -- ui/src/api/generated` shows any change, modified, deleted or new file.
 

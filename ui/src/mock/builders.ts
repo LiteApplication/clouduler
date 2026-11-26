@@ -434,7 +434,7 @@ export class ScenarioBuilder {
       restoreRequests: [],
       selfUpdate: {
         repo: null,
-        latest: { tag: 'v0.9.10', architectures: ['x86_64', 'aarch64'], source: 'github.com/example/clouduler', running_version: '0.9.10', fetched_at: now },
+        latest: { tag: 'v0.9.10', architectures: ['x86_64', 'aarch64'], source: 'github.com/example/clouduler', running_version: '0.9.10', ui_version: '0.9.10', ui_changed: false, fetched_at: now },
         releases: ['v0.9.10', 'v0.9.9'],
         run: null,
         githubTokenSet: false,

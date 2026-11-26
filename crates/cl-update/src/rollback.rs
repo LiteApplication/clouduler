@@ -49,6 +49,10 @@ pub struct Pending {
     /// Starts of the daemon since then.
     #[serde(default)]
     pub boots: u32,
+    /// Version of the binary that was replaced (the one running when this was armed). A rollback
+    /// keeps the ui staged for it and drops the one staged for the new binary.
+    #[serde(default)]
+    pub previous_version: String,
 }
 
 /// What `on_boot` decided.
@@ -95,6 +99,7 @@ pub fn arm(dir: &Path, binary: &Path, now: i64) -> std::io::Result<()> {
             binary: binary.to_path_buf(),
             armed_at: now,
             boots: 0,
+            previous_version: cl_config::version().to_string(),
         },
     )
 }
@@ -145,6 +150,10 @@ fn roll_back(dir: &Path, pending: &Pending, reason: &str, now: i64) -> std::io::
     // A rename over the (possibly running) executable swaps the directory
     // entry, like the install did.
     std::fs::rename(previous_path(&pending.binary), &pending.binary)?;
+    // The old binary is back and so must be its ui: the unconfirmed new one goes.
+    if !pending.previous_version.is_empty() {
+        crate::ui::prune_root(&dir.join(crate::ui::UI_DIR), &pending.previous_version);
+    }
     if let Err(e) = std::fs::write(
         dir.join(NOTE),
         serde_json::to_vec(&serde_json::json!({ "at": now, "reason": reason }))?,
@@ -226,7 +235,11 @@ pub async fn watch(
             good_checks += 1;
             if good_checks >= 2 {
                 match confirm(&dir) {
-                    Ok(()) => info!("the updated binary rejoined the cluster, keeping it"),
+                    Ok(()) => {
+                        info!("the updated binary rejoined the cluster, keeping it");
+                        // The new binary is committed: its ui is the only one left to keep.
+                        crate::ui::prune_root(&dir.join(crate::ui::UI_DIR), cl_config::version());
+                    }
                     Err(e) => warn!(error = %e, "cannot clear the update marker"),
                 }
                 return;

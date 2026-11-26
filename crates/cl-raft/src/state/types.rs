@@ -51,6 +51,10 @@ pub struct NodeState {
     /// Blake3 hex of the running binary; confirms a restarted node runs the new build.
     #[serde(default)]
     pub binary_hash: String,
+    /// Blake3 hex of the ui bundle this node serves (the name of its `self-update/ui/<hash>`
+    /// directory); `None` on a worker or a node with no ui staged for its running version.
+    #[serde(default)]
+    pub ui_hash: Option<String>,
     /// X25519 public key (base64), self-reported once the local keypair exists, so a
     /// key holder can wrap the cluster secret key for this node (`wrapped_keys`).
     #[serde(default)]

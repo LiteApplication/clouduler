@@ -12,7 +12,7 @@ use cl_secret::{ClusterKey, Sealed};
 use tracing::{info, warn};
 
 use crate::plan::{NodePhase, UpdateRunState, GITHUB_TOKEN_SECRET};
-use crate::{orchestrator, release};
+use crate::{orchestrator, release, ui};
 
 /// Same cadence as the orchestrator's poll.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -28,6 +28,8 @@ pub struct Worker {
     /// Where this node stages the binary it downloaded, until it installs it
     /// on its next triggered restart.
     pub artifact_path: PathBuf,
+    /// The node's data dir; the staged ui lives under `<data_dir>/self-update/ui`.
+    pub data_dir: PathBuf,
 }
 
 impl Worker {
@@ -65,72 +67,169 @@ impl Worker {
         revision: u64,
         state: &cl_raft::ClusterState,
     ) -> Result<(), String> {
-        let arch = state
-            .nodes
-            .get(&self.node_name)
-            .map(|n| n.arch.clone())
-            .ok_or("this node is not in the roster")?;
+        let Some(node) = state.nodes.get(&self.node_name) else {
+            return Err("this node is not in the roster".into());
+        };
+        let arch = node.arch.clone();
         let (owner, repo, asset) = match (&run.owner, &run.repo, run.assets.get(&arch)) {
             (Some(owner), Some(repo), Some(asset)) => (owner.clone(), repo.clone(), asset.clone()),
             _ => {
-                run.per_node.insert(
-                    self.node_name.clone(),
-                    NodePhase::FetchFailed {
-                        reason: format!("no asset published for arch {arch}"),
-                    },
-                );
-                return self.save(run.clone(), revision).await;
+                return self
+                    .fail_fetch(run, revision, format!("no asset published for arch {arch}"))
+                    .await;
             }
         };
+        let running_hash = node.binary_hash.clone();
+        // Only managers serve the ui; a worker never downloads it.
+        let wants_ui = node.role == cl_raft::state::Role::Manager;
+        let token = self.unseal_github_token().await;
 
-        // A lost save race re-enters this step with the same run id: when the
-        // staged file already is the recorded asset, report it instead of
-        // downloading and rewriting a binary the restart route may be running.
-        if let Some(recorded) = run.arch_hashes.get(&arch) {
-            let (path, recorded) = (self.artifact_path.clone(), recorded.clone());
-            let matches = tokio::task::spawn_blocking(move || staged_matches(&path, &recorded))
+        // Staging only: nothing live changes here. Binary first, then the ui, and the node is
+        // ready only when both are in place and verified.
+        if let Err(reason) = self
+            .fetch_binary(
+                run,
+                &arch,
+                &owner,
+                &repo,
+                &asset,
+                token.as_deref(),
+                &running_hash,
+            )
+            .await
+        {
+            return self.fail_fetch(run, revision, reason).await;
+        }
+        if wants_ui {
+            if let Err(reason) = self
+                .fetch_ui(run, &owner, &repo, token.as_deref(), &arch, &running_hash)
+                .await
+            {
+                return self.fail_fetch(run, revision, reason).await;
+            }
+        }
+
+        run.per_node
+            .insert(self.node_name.clone(), NodePhase::Ready);
+        info!(node = %self.node_name, run = %run.id, "self-update download finished");
+        self.save(run.clone(), revision).await
+    }
+
+    async fn fail_fetch(
+        &self,
+        run: &mut UpdateRunState,
+        revision: u64,
+        reason: String,
+    ) -> Result<(), String> {
+        warn!(node = %self.node_name, %reason, "self-update fetch failed");
+        run.per_node
+            .insert(self.node_name.clone(), NodePhase::FetchFailed { reason });
+        self.save(run.clone(), revision).await
+    }
+
+    /// Stages this arch's binary unless the node already holds exactly it.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_binary(
+        &self,
+        run: &mut UpdateRunState,
+        arch: &str,
+        owner: &str,
+        repo: &str,
+        asset: &release::ReleaseAsset,
+        token: Option<&str>,
+        running_hash: &str,
+    ) -> Result<(), String> {
+        let recorded = run.arch_hashes.get(arch).cloned();
+        if let Some(recorded) = &recorded {
+            // A lost save race re-enters this step with the same run id, and an unchanged
+            // backend needs no download at all: report what is already there.
+            let (path, wanted) = (self.artifact_path.clone(), recorded.clone());
+            let staged = tokio::task::spawn_blocking(move || staged_matches(&path, &wanted))
                 .await
                 .unwrap_or(false);
-            if matches {
-                run.per_node
-                    .insert(self.node_name.clone(), NodePhase::Ready);
-                return self.save(run.clone(), revision).await;
+            if !binary_fetch_needed(staged, running_hash, Some(recorded), run.hold) {
+                return Ok(());
             }
         }
 
-        let token = self.unseal_github_token().await;
         let http = release::download_client()?;
-        match release::download_asset(&http, &owner, &repo, &asset, token.as_deref()).await {
-            Ok(binary) => {
-                let (hash, binary) = tokio::task::spawn_blocking(move || {
-                    (blake3::hash(&binary).to_hex().to_string(), binary)
-                })
+        let binary = release::download_asset(&http, owner, repo, asset, token).await?;
+        let (hash, binary) = tokio::task::spawn_blocking(move || {
+            (blake3::hash(&binary).to_hex().to_string(), binary)
+        })
+        .await
+        .map_err(|e| format!("hashing downloaded binary: {e}"))?;
+        // With a manifest the recorded hash is the published one; without, every node of an
+        // architecture must at least have downloaded the same bytes as the first to report.
+        check_agrees(recorded.as_ref(), &hash)?;
+        let artifact_path = self.artifact_path.clone();
+        tokio::task::spawn_blocking(move || stage_atomically(&artifact_path, &binary))
+            .await
+            .map_err(|e| format!("staging downloaded binary: {e}"))?
+            .map_err(|e| format!("staging downloaded binary: {e}"))?;
+        run.arch_hashes.entry(arch.to_string()).or_insert(hash);
+        Ok(())
+    }
+
+    /// Stages the ui of the release, downloading only a zip this node does not hold yet. When
+    /// the backend binary is unchanged there is no restart to wait for, so the new ui is
+    /// switched to at once.
+    async fn fetch_ui(
+        &self,
+        run: &UpdateRunState,
+        owner: &str,
+        repo: &str,
+        token: Option<&str>,
+        arch: &str,
+        running_hash: &str,
+    ) -> Result<(), String> {
+        let (Some(hash), Some(asset)) = (run.ui_hash.clone(), run.ui_asset.clone()) else {
+            // A release from before the ui was shipped separately: the binary embeds it.
+            return Ok(());
+        };
+        let backend_version = run
+            .backend_version
+            .clone()
+            .ok_or("the release manifest names a ui but no backend version")?;
+        let ui_only = !run.hold
+            && !running_hash.is_empty()
+            && run.arch_hashes.get(arch).map(String::as_str) == Some(running_hash);
+        // Same binary: the running version is what the ui has to be paired with.
+        let paired_with = if ui_only {
+            cl_config::version().to_string()
+        } else {
+            backend_version
+        };
+
+        let data_dir = self.data_dir.clone();
+        if ui::has(&data_dir, &hash) {
+            let (dir, hash, version) = (data_dir.clone(), hash.clone(), paired_with.clone());
+            tokio::task::spawn_blocking(move || ui::mark_compatible(&dir, &hash, &version))
                 .await
-                .map_err(|e| format!("hashing downloaded binary: {e}"))?;
-                // Releases publish no checksum to verify against, so the
-                // next best thing: every node of an architecture must have
-                // downloaded the same bytes as the first one to report.
-                if let Err(reason) = check_agrees(run.arch_hashes.get(&arch), &hash) {
-                    run.per_node
-                        .insert(self.node_name.clone(), NodePhase::FetchFailed { reason });
-                    return self.save(run.clone(), revision).await;
-                }
-                let artifact_path = self.artifact_path.clone();
-                tokio::task::spawn_blocking(move || stage_atomically(&artifact_path, &binary))
-                    .await
-                    .map_err(|e| format!("staging downloaded binary: {e}"))?
-                    .map_err(|e| format!("staging downloaded binary: {e}"))?;
-                run.arch_hashes.entry(arch).or_insert(hash);
-                run.per_node
-                    .insert(self.node_name.clone(), NodePhase::Ready);
-                info!(node = %self.node_name, run = %run.id, "self-update download finished");
-            }
-            Err(e) => {
-                run.per_node
-                    .insert(self.node_name.clone(), NodePhase::FetchFailed { reason: e });
-            }
+                .map_err(|e| format!("pairing the staged ui: {e}"))?
+                .map_err(|e| format!("pairing the staged ui: {e}"))?;
+        } else {
+            let http = release::download_client()?;
+            let zip = release::download_asset(&http, owner, repo, &asset, token).await?;
+            let (dir, expect, version) = (data_dir.clone(), hash.clone(), paired_with.clone());
+            tokio::task::spawn_blocking(move || ui::stage_zip(&dir, &zip, &expect, &version))
+                .await
+                .map_err(|e| format!("staging the ui: {e}"))?
+                .map_err(|e| e.to_string())?;
         }
-        self.save(run.clone(), revision).await
+
+        if ui_only {
+            let (dir, hash, version) = (data_dir, hash, paired_with);
+            tokio::task::spawn_blocking(move || {
+                ui::activate(&dir, &hash)?;
+                ui::prune_superseded(&dir, &version);
+                Ok::<(), std::io::Error>(())
+            })
+            .await
+            .map_err(|e| format!("switching the ui: {e}"))?
+            .map_err(|e| format!("switching the ui: {e}"))?;
+        }
+        Ok(())
     }
 
     async fn unseal_github_token(&self) -> Option<String> {
@@ -155,6 +254,24 @@ impl Worker {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+/// Whether the release binary has to be downloaded. It does not when the staged file already is
+/// it, or (outside a configuration reset, which installs the staged file) when the running binary
+/// already is: that node is not restarted.
+fn binary_fetch_needed(
+    staged_matches: bool,
+    running_hash: &str,
+    recorded: Option<&str>,
+    hold: bool,
+) -> bool {
+    if staged_matches {
+        return false;
+    }
+    match recorded {
+        Some(recorded) => hold || running_hash != recorded,
+        None => true,
     }
 }
 
@@ -209,6 +326,20 @@ mod tests {
             blake3::hash(b"one").to_hex().as_str()
         ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_downloaded_when_the_hashes_match() {
+        // staged copy is the release
+        assert!(!binary_fetch_needed(true, "old", Some("new"), false));
+        // the running binary is the release: no restart, no download
+        assert!(!binary_fetch_needed(false, "same", Some("same"), false));
+        // ...except for a reset, which installs the staged file
+        assert!(binary_fetch_needed(false, "same", Some("same"), true));
+        // a changed binary, or no recorded hash yet, is downloaded
+        assert!(binary_fetch_needed(false, "old", Some("new"), false));
+        assert!(binary_fetch_needed(false, "old", None, false));
+        assert!(binary_fetch_needed(false, "", Some("new"), false));
     }
 
     #[test]

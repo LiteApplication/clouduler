@@ -362,6 +362,10 @@ struct SelfUpdateLatest {
     architectures: Vec<String>,
     source: String,
     running_version: String,
+    /// The UI version the release ships; `None` for a release published before the UI was split out.
+    ui_version: Option<String>,
+    /// Whether the release's UI differs from the one this node serves now.
+    ui_changed: bool,
     fetched_at: i64,
 }
 
@@ -393,7 +397,12 @@ async fn latest(
     let resolved = cl_update::release::resolve(&source, token.as_deref())
         .await
         .map_err(ApiError::Unavailable)?;
+    let (ui_version, ui_blake3) = ui_of(&resolved);
+    let serving = cl_update::ui::serving_dir(&state.data_dir, cl_config::version())
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()));
     let answer = SelfUpdateLatest {
+        ui_changed: ui_blake3.is_some_and(|hash| serving.as_deref() != Some(hash.as_str())),
+        ui_version,
         tag: resolved.tag,
         architectures: resolved.assets.into_keys().collect(),
         source,
@@ -402,6 +411,14 @@ async fn latest(
     };
     *latest_cache().lock() = Some((std::time::Instant::now(), answer.clone()));
     Ok(Json(answer))
+}
+
+/// The release's UI version and blake3, from its manifest.
+fn ui_of(resolved: &cl_update::release::ResolvedRelease) -> (Option<String>, Option<String>) {
+    match &resolved.manifest {
+        Some(m) => (Some(m.ui.version.clone()), Some(m.ui.blake3.clone())),
+        None => (None, None),
+    }
 }
 
 #[derive(Clone, Serialize)]

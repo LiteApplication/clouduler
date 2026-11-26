@@ -6,14 +6,12 @@ cd "$(dirname "$0")/.."
 
 out=ui/src/api/generated
 
-# Export into a scratch directory and swap it in at the end. CL_API_SKIP_UI_BUILD
-# keeps cl-api's build script from typechecking the ui, which imports files
-# this script has not written yet.
+# Export into a scratch directory and swap it in at the end.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # 64-bit integers are plain JSON numbers on the wire (and in the ui), not bigint.
-CL_API_SKIP_UI_BUILD=1 TS_RS_EXPORT_DIR="$tmp" TS_RS_LARGE_INT=number \
+TS_RS_EXPORT_DIR="$tmp" TS_RS_LARGE_INT=number \
   cargo test \
     -p cl-alert -p cl-api -p cl-backup -p cl-config -p cl-raft -p cl-restic -p cl-sched \
     --features ts export_bindings_

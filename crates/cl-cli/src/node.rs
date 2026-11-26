@@ -58,6 +58,7 @@ pub async fn add(
             open_ports: Default::default(),
             arch: String::new(),
             binary_hash: String::new(),
+            ui_hash: Default::default(),
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),

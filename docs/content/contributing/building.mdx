@@ -5,47 +5,47 @@ sidebar_position: 1
 
 # Building from source
 
-Clouduler is a Rust workspace that produces one binary, `clouduler`, with the web UI embedded in it. This page covers a local build, the cross-build for aarch64, the repository layout and the release process.
+Clouduler is a Rust workspace that produces one binary, `clouduler`. The web UI is a separate build (`ui/`) that is not embedded in the binary: each release ships it as `clouduler-ui.zip`. This page covers a local build, building for aarch64, the repository layout and the release process.
 
 ## Requirements
 
 - A stable Rust toolchain (the CI uses `dtolnay/rust-toolchain@stable`).
-- Node.js 20 and npm, for the web UI.
+- Node.js 20 and npm, only to build the web UI. The Rust build does not need them.
 - Docker and `restic` are runtime dependencies of a node, not of the build.
 
 ## Build
 
-The UI is built first because `cl-api` embeds it into the binary with `rust-embed`.
+The binary and the UI are built separately.
 
 ```bash
-cd ui && npm ci && npm run build && cd ..
 cargo build --release -p clouduler
+cd ui && npm ci && npm run build && cd ..
 ```
 
-The binary is `target/release/clouduler`. `npm run build` runs `tsc && vite build`, so it also typechecks the UI against the API types.
+The binary is `target/release/clouduler`. `npm run build` runs `tsc && vite build`, so it also typechecks the UI against the API types, and writes `ui/dist`.
 
-How `cl-api` finds the UI is decided by `crates/cl-api/build.rs`:
+The binary does not contain the UI. A node serves the UI that self-update staged under `<data_dir>/self-update/ui` (see [File locations](/docs/reference/file-locations)), and only one that was built for the exact backend version it runs. A binary with no matching UI serves a small "UI not installed" page.
 
-- If `ui/node_modules` exists, the build script runs `npm run build` itself and embeds that output.
-- Otherwise it uses a prebuilt `ui/dist` that contains an `index.html`.
-- Otherwise it embeds a placeholder page, so the crate still compiles with no UI build. A binary built this way serves the placeholder instead of the dashboard.
+For development, point `CL_UI_DIR` at a built UI and the daemon serves that directory instead, whatever its version:
 
-That last fallback is why the CI Rust jobs and the aarch64 recipe below can skip `npm ci`: they build with a separately produced `ui/dist` or a placeholder.
+```bash
+CL_UI_DIR=$PWD/ui/dist cargo run -p clouduler -- --config cluster.yaml daemon --node NODE
+```
 
-### Local build speed (optional)
+The qemu test harness does this for you: `tests/qemu/build-binary.sh` builds `ui/dist` when it is missing, and the VM images get it as `CL_UI_DIR`.
 
 `.cargo/config.toml` is a local speed tweak. A ready-to-copy version is committed as `.cargo/config.toml.example`: `cp .cargo/config.toml.example .cargo/config.toml`. It selects `clang` with `mold` as the linker for x86_64, `aarch64-linux-gnu-gcc` with `mold` for aarch64, and `sccache` as the rustc wrapper. The real `.cargo/config.toml` is untracked on purpose, because the CI aarch64 cross-build has no `mold`. Without it Cargo falls back to the default linker, which is slower but correct. If you copy it, install `clang`, `mold` and `sccache`, or remove the lines you do not want.
 
-## Cross-compiling for aarch64
+## Building for aarch64
 
-Release binaries for `aarch64-unknown-linux-gnu` are built on an x86_64 host with the system cross toolchain (no `cross` or docker). This is what `.github/workflows/release.yml` does:
+The release workflow builds the `aarch64-unknown-linux-gnu` binary natively on a GitHub arm runner (`ubuntu-26.04-arm`), so there is no cross toolchain involved: on an arm64 Linux host the normal `cargo build --release -p clouduler` is the whole recipe. The UI is architecture independent and is not part of the binary.
+
+To cross-compile from an x86_64 host instead, use the system cross toolchain (no `cross` or docker). CI does not exercise this path:
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get install -y gcc-aarch64-linux-gnu
 rustup target add aarch64-unknown-linux-gnu
-
-cd ui && npm ci && npm run build && cd ..
 
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
@@ -56,7 +56,7 @@ cargo build --release --target aarch64-unknown-linux-gnu -p clouduler
 The result is `target/aarch64-unknown-linux-gnu/release/clouduler`. The C compiler matters because `ring`, `aws-lc-rs` and `mimalloc` (the global allocator) contain C.
 
 :::note glibc floor
-Both release binaries are dynamically linked against glibc and are built on the `ubuntu-latest` runner, so the floor is the newest GLIBC symbol version the binary needs, not the runner's glibc itself. For the aarch64 release that is 2.39; check it with `objdump -T clouduler | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`. I measured only the aarch64 build. The single-node quick start notes that the binary runs on Debian 13 but not Debian 12 (glibc 2.36). If you need to run on an older system, build from source on that system.
+Both release binaries are dynamically linked against glibc and are built on the `ubuntu-26.04` runners, so the floor is the newest GLIBC symbol version the binary needs, not the runner's glibc itself. Check it with `objdump -T clouduler | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`. The value 2.39 was measured for an aarch64 release built on an earlier runner image and has not been re-measured since. The single-node quick start notes that the binary runs on Debian 13 but not Debian 12 (glibc 2.36). If you need to run on an older system, build from source on that system.
 :::
 
 The test VMs are different: the qemu harness needs a **musl** binary. See [Testing](/docs/contributing/testing#the-qemu-harness).
@@ -65,7 +65,7 @@ The test VMs are different: the qemu harness needs a **musl** binary. See [Testi
 
 ```text
 crates/       the Rust workspace, one crate per subsystem
-ui/           the React + TypeScript web UI (Vite), embedded into the binary
+ui/           the React + TypeScript web UI (Vite), released as clouduler-ui.zip, not embedded
 docs/         this documentation site (Docusaurus)
 examples/     example cluster.yaml files and stacks, validated in CI
 tests/qemu/   the end-to-end VM harness
@@ -106,11 +106,21 @@ release.sh    version bump, tag and push
 
 It refuses to run unless the version looks like `x.y.z` (an optional `-suffix` is allowed), the working tree is clean and the tag `vX.Y.Z` does not exist. Then it:
 
-1. Sets the version in the root `Cargo.toml` and in `ui/package.json`, and refreshes `Cargo.lock` and `ui/package-lock.json`.
-2. Regenerates the API fixture with `UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes` (see [Testing](/docs/contributing/testing#the-apiui-contract)).
-3. Commits as `release: vX.Y.Z`, tags `vX.Y.Z`, and pushes the branch and the tag.
+1. Compares the source hash of the backend (`crates/`, `Cargo.lock`, `Cargo.toml`) and of the UI (`ui/`) between the last release tag and HEAD, with `scripts/release-manifest.sh source-hash backend|ui [REV]`. Version lines are ignored, so a bump alone is not a change. `--dry-run` prints the verdict for both.
+2. Sets the version in the root `Cargo.toml`. The `clouduler` crate is bumped only when the backend changed (its version is the backend version the cluster reports), and `ui/package.json` only when the UI changed. It also refreshes `Cargo.lock` and `ui/package-lock.json`.
+3. Regenerates the API fixture with `UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes` (see [Testing](/docs/contributing/testing#the-apiui-contract)) and the TypeScript bindings.
+4. Commits as `release: vX.Y.Z`, tags `vX.Y.Z`, and pushes the branch and the tag.
 
-Pushing a `v*` tag triggers the `release` workflow, which builds the UI and then the binary for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, and publishes both as `clouduler-<target>` on a GitHub release with generated notes. The in-product self-update flow downloads those assets; see [Updates](/docs/features/updates).
+Pushing a `v*` tag triggers the `release` workflow. A release publishes four assets: `clouduler-x86_64-unknown-linux-gnu`, `clouduler-aarch64-unknown-linux-gnu`, `clouduler-ui.zip` and `manifest.json`. The manifest lists, for the backend and for the UI, the version, the source hash and the blake3 of each asset. The workflow runs these jobs:
+
+- `plan` finds the newest full release that has a `manifest.json` and compares its source hashes with the ones of the tagged tree. A component is rebuilt only when its hash differs, or when the previous release lacks the manifest or the asset (the first release after this scheme, for example, rebuilds both).
+- `build` compiles the two binaries when the backend changed. `ui` builds and zips the UI (a deterministic zip) when the UI changed.
+- `reuse` downloads the unchanged component's assets from the previous release and checks their blake3 against the previous manifest. A mismatch fails the run.
+- `publish` computes the blake3 of the final four assets, writes `manifest.json`, and creates the release with generated notes.
+
+Every push to master runs the same workflow in debug mode and publishes a pre-release `v<version>-next-<sha>` (the 5 newest, and every one newer than the last full release, are kept). A pre-release may reuse assets of any earlier release, a tagged release only of full releases, since pre-release binaries are unoptimized.
+
+The in-product self-update flow downloads these assets and uses the manifest to download only what changed; see [Updates](/docs/features/updates).
 
 ## Related
 

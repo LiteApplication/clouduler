@@ -12,6 +12,59 @@ fn asset_name(arch: &str) -> String {
     format!("clouduler-{arch}-unknown-linux-gnu")
 }
 
+/// Asset names of the ui bundle and the manifest tying the release's pieces together.
+pub const UI_ASSET: &str = "clouduler-ui.zip";
+pub const MANIFEST_ASSET: &str = "manifest.json";
+
+/// The one manifest schema this code understands.
+const MANIFEST_SCHEMA: u32 = 1;
+
+/// `manifest.json`: the compatibility contract of a release. A ui is only ever served with the
+/// backend of the same manifest, and the published hashes are what nodes verify downloads against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub schema: u32,
+    pub tag: String,
+    pub backend: BackendManifest,
+    pub ui: UiManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendManifest {
+    /// What `cl_config::version()` reports for these binaries.
+    pub version: String,
+    pub source_hash: String,
+    /// arch (`x86_64` / `aarch64`) -> its binary.
+    pub arch: BTreeMap<String, ManifestAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAsset {
+    pub asset: String,
+    pub blake3: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiManifest {
+    pub version: String,
+    pub source_hash: String,
+    pub asset: String,
+    pub blake3: String,
+}
+
+/// Parses and sanity-checks a `manifest.json`.
+pub fn parse_manifest(raw: &[u8]) -> Result<Manifest, String> {
+    let manifest: Manifest =
+        serde_json::from_slice(raw).map_err(|e| format!("{MANIFEST_ASSET} is malformed: {e}"))?;
+    if manifest.schema != MANIFEST_SCHEMA {
+        return Err(format!(
+            "{MANIFEST_ASSET} has schema {}, this version understands {MANIFEST_SCHEMA}",
+            manifest.schema
+        ));
+    }
+    Ok(manifest)
+}
+
 /// What a release source resolves to before any asset is picked.
 struct RepoRef {
     owner: String,
@@ -71,6 +124,55 @@ pub struct ResolvedRelease {
     /// arch -> the asset built for it, for every arch this release published
     /// a binary for.
     pub assets: BTreeMap<String, ReleaseAsset>,
+    /// The release's `manifest.json`; `None` for a release from before the ui was shipped
+    /// separately (its binary embeds the ui).
+    #[serde(default)]
+    pub manifest: Option<Manifest>,
+    /// The ui zip asset; always present when `manifest` is.
+    #[serde(default)]
+    pub ui: Option<ReleaseAsset>,
+}
+
+/// Picks the assets a release is rolled out with from the names and ids it published. With a
+/// manifest every asset it names must exist; without one only the legacy per-arch binaries count.
+fn pick_assets(
+    published: &[(String, u64)],
+    manifest: Option<&Manifest>,
+) -> Result<(BTreeMap<String, ReleaseAsset>, Option<ReleaseAsset>), String> {
+    let find = |name: &str| {
+        published
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(n, id)| ReleaseAsset {
+                id: *id,
+                name: n.clone(),
+            })
+    };
+    let mut assets = BTreeMap::new();
+    let Some(manifest) = manifest else {
+        for arch in ["x86_64", "aarch64"] {
+            if let Some(asset) = find(&asset_name(arch)) {
+                assets.insert(arch.to_string(), asset);
+            }
+        }
+        return Ok((assets, None));
+    };
+    for (arch, entry) in &manifest.backend.arch {
+        let asset = find(&entry.asset).ok_or_else(|| {
+            format!(
+                "release {} lists {} for {arch} but did not publish it",
+                manifest.tag, entry.asset
+            )
+        })?;
+        assets.insert(arch.clone(), asset);
+    }
+    let ui = find(&manifest.ui.asset).ok_or_else(|| {
+        format!(
+            "release {} lists {} but did not publish it",
+            manifest.tag, manifest.ui.asset
+        )
+    })?;
+    Ok((assets, Some(ui)))
 }
 
 /// `octocrab::Error::GitHub` displays as just "GitHub"; this surfaces the
@@ -230,19 +332,25 @@ async fn resolve_inner(source: &str, token: Option<&str>) -> Result<ResolvedRele
         })?,
     };
 
-    let mut assets = BTreeMap::new();
-    for arch in ["x86_64", "aarch64"] {
-        let name = asset_name(arch);
-        if let Some(asset) = release.assets.iter().find(|a| a.name == name) {
-            assets.insert(
-                arch.to_string(),
-                ReleaseAsset {
-                    id: asset.id.0,
-                    name: asset.name.clone(),
-                },
-            );
+    let published: Vec<(String, u64)> = release
+        .assets
+        .iter()
+        .map(|a| (a.name.clone(), a.id.0))
+        .collect();
+    let manifest = match published.iter().find(|(n, _)| n == MANIFEST_ASSET) {
+        Some((name, id)) => {
+            let asset = ReleaseAsset {
+                id: *id,
+                name: name.clone(),
+            };
+            let client = download_client()?;
+            let raw =
+                download_asset(&client, &repo_ref.owner, &repo_ref.repo, &asset, token).await?;
+            Some(parse_manifest(&raw)?)
         }
-    }
+        None => None,
+    };
+    let (assets, ui) = pick_assets(&published, manifest.as_ref())?;
     if assets.is_empty() {
         return Err(format!(
             "release {} has no clouduler-*-unknown-linux-gnu assets",
@@ -255,6 +363,8 @@ async fn resolve_inner(source: &str, token: Option<&str>) -> Result<ResolvedRele
         repo: repo_ref.repo,
         tag: release.tag_name,
         assets,
+        manifest,
+        ui,
     })
 }
 
@@ -312,6 +422,55 @@ mod tests {
             missing_arches(&assets, ["aarch64", "x86_64", "aarch64"]),
             vec!["aarch64".to_string()]
         );
+    }
+
+    fn sample_manifest() -> Manifest {
+        parse_manifest(
+            br#"{"schema":1,"tag":"v0.20.0",
+            "backend":{"version":"0.20.0","source_hash":"s","arch":{
+              "x86_64":{"asset":"clouduler-x86_64-unknown-linux-gnu","blake3":"aa"},
+              "aarch64":{"asset":"clouduler-aarch64-unknown-linux-gnu","blake3":"bb"}}},
+            "ui":{"version":"0.20.0","source_hash":"u","asset":"clouduler-ui.zip","blake3":"cc"}}"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn a_manifest_parses_and_a_foreign_schema_is_refused() {
+        let manifest = sample_manifest();
+        assert_eq!(manifest.backend.arch["aarch64"].blake3, "bb");
+        assert_eq!(manifest.ui.blake3, "cc");
+        assert!(parse_manifest(b"{}").is_err());
+        let v2 = serde_json::to_vec(&Manifest {
+            schema: 2,
+            ..manifest
+        })
+        .unwrap();
+        assert!(parse_manifest(&v2).unwrap_err().contains("schema 2"));
+    }
+
+    #[test]
+    fn assets_follow_the_manifest_and_all_must_exist() {
+        let manifest = sample_manifest();
+        let published = vec![
+            ("clouduler-x86_64-unknown-linux-gnu".to_string(), 1),
+            ("clouduler-aarch64-unknown-linux-gnu".to_string(), 2),
+            ("clouduler-ui.zip".to_string(), 3),
+            ("manifest.json".to_string(), 4),
+        ];
+        let (assets, ui) = pick_assets(&published, Some(&manifest)).unwrap();
+        assert_eq!(assets["aarch64"].id, 2);
+        assert_eq!(ui.unwrap().id, 3);
+        assert!(pick_assets(&published[..2], Some(&manifest)).is_err());
+        assert!(pick_assets(&published[1..], Some(&manifest)).is_err());
+    }
+
+    #[test]
+    fn a_release_without_a_manifest_keeps_the_legacy_assets_and_no_ui() {
+        let published = vec![("clouduler-x86_64-unknown-linux-gnu".to_string(), 9)];
+        let (assets, ui) = pick_assets(&published, None).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(ui.is_none());
     }
 
     #[test]

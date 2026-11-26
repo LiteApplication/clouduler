@@ -231,6 +231,11 @@ if [ -x /etc/clouduler/probe.sh ]; then
   echo "init-clouduler: scenario probe started"
 fi
 
+# The binary does not embed the web UI; mkdisk.sh stages a built one here.
+if [ -f /usr/local/share/clouduler/ui/index.html ]; then
+  export CL_UI_DIR=/usr/local/share/clouduler/ui
+fi
+
 echo "init-clouduler: starting clouduler daemon"
 # inherit stdio (the serial console) so the host captures clouduler's own
 # log output directly via -serial file:..., no guest-side fetch needed.

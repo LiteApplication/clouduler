@@ -1246,6 +1246,10 @@ export interface SelfUpdateLatest {
   architectures: string[];
   source: string;
   running_version: string;
+  /** UI version the release ships; null for a release published before the UI was split out. */
+  ui_version: string | null;
+  /** Whether the release's UI differs from the one this node serves now. */
+  ui_changed: boolean;
   /** Unix seconds; the answer is cached for 5 minutes. */
   fetched_at: number;
 }

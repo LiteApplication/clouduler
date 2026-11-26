@@ -17,9 +17,13 @@ fi
 
 VERSION="${ARGS[0]}"
 
-# Crates ALWAYS bumped, even when unchanged: the binary's version is the
-# reported release version (see crates/cl-config/src/version.rs).
-ALWAYS_BUMPED_CRATES=(clouduler)
+# The clouduler binary's version is the reported backend version (see
+# crates/cl-config/src/version.rs). It is bumped only when the backend source
+# hash changed, so an unchanged backend keeps its version and the release
+# workflow reuses the previous release's binaries. Likewise ui/package.json is
+# bumped only when the ui source hash changed and the ui zip is reused
+# otherwise. See scripts/release-manifest.sh.
+VERSIONED_BY_HASH_CRATES=(clouduler)
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
     echo "error: version must look like x.y.z (e.g. 0.2.0)" >&2
@@ -79,16 +83,23 @@ crate_changed() {
     [ -n "$files" ]
 }
 
+# Source hashes of the last release and of HEAD (version lines ignored).
+BACKEND_CHANGED=0
 UI_CHANGED=0
-if grep -q '^ui/' <<<"$CHANGED_FILES"; then UI_CHANGED=1; fi
+if [ "$(scripts/release-manifest.sh source-hash backend "$LAST_TAG")" != "$(scripts/release-manifest.sh source-hash backend HEAD)" ]; then
+    BACKEND_CHANGED=1
+fi
+if [ "$(scripts/release-manifest.sh source-hash ui "$LAST_TAG")" != "$(scripts/release-manifest.sh source-hash ui HEAD)" ]; then
+    UI_CHANGED=1
+fi
 
 BUMP=()
 KEEP=()
 for dir in crates/*/; do
     c="$(basename "$dir")"
-    if in_array "$c" "${ALWAYS_BUMPED_CRATES[@]}" \
-        || crate_changed "$c" \
-        || { [ "$UI_CHANGED" = 1 ] && [ "$c" = cl-api ]; }; then
+    if in_array "$c" "${VERSIONED_BY_HASH_CRATES[@]}"; then
+        if [ "$BACKEND_CHANGED" = 1 ]; then BUMP+=("$c"); else KEEP+=("$c"); fi
+    elif crate_changed "$c"; then
         BUMP+=("$c")
     else
         KEEP+=("$c")
@@ -101,9 +112,12 @@ echo "Last release tag: $LAST_TAG"
 echo "Release version:  ${VERSION} (workspace)"
 echo "Bumped:"
 for c in "${BUMP[@]}"; do echo "  $c: $(crate_version "$c") -> ${VERSION}"; done
-echo "  ui: ${UI_OLD} -> ${VERSION}"
+if [ "$UI_CHANGED" = 1 ]; then echo "  ui: ${UI_OLD} -> ${VERSION}"; fi
 echo "Kept:"
 for c in "${KEEP[@]}"; do echo "  $c: $(crate_version "$c")"; done
+if [ "$UI_CHANGED" = 0 ]; then echo "  ui: ${UI_OLD}"; fi
+echo "Backend changed: $([ "$BACKEND_CHANGED" = 1 ] && echo "yes, new binaries" || echo "no, the release reuses the previous binaries")"
+echo "Ui changed:      $([ "$UI_CHANGED" = 1 ] && echo "yes, new ui zip" || echo "no, the release reuses the previous ui zip")"
 
 if [ "$DRY_RUN" = 1 ]; then
     echo "Dry run: nothing modified."
@@ -134,8 +148,10 @@ sed -i -E "/^\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"${VERS
 for c in "${BUMP[@]}"; do
     sed -i -E "/^\[package\]/,/^\[/ s/^version = \".*\"/version = \"${VERSION}\"/" "crates/$c/Cargo.toml"
 done
-# ui/package.json always follows the release version.
-sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
+# ui/package.json follows the release version only when the ui changed.
+if [ "$UI_CHANGED" = 1 ]; then
+    sed -i -E "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${VERSION}\"/" ui/package.json
+fi
 
 echo "Regenerating api-shapes fixture..."
 UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes

@@ -401,7 +401,7 @@ pub fn build_router(state: AppState) -> Router {
 /// redirecting to a bare IP, since the hostname may still resolve here during DNS catch-up.
 async fn serve_ui(State(state): State<AppState>, request: Request) -> Response {
     if state.cluster.is_leader() {
-        return ui::serve(request).await;
+        return ui::serve(&state.data_dir, request).await;
     }
     relay_to_leader(&state, request).await
 }

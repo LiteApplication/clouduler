@@ -12,8 +12,8 @@
 //!
 //! The raft half is a real authenticated raft `Ping` (the exchange heartbeats use), not a bare TCP
 //! connect: a peer whose listener accepts sockets while its raft path is wedged must read as down. The
-//! api half is a TCP connect to the web port and the drive half a TCP connect to the drive-sync
-//! port (`cl_drive::drive_port` of the raft port). The vxlan overlay is not probed.
+//! api half is a TCP connect to the web port and the drive half an authenticated connect to the
+//! drive-sync port (`cl_drive::drive_port` of the raft port). The vxlan overlay is not probed.
 //!
 //! A `Ping` reply proves the network and listener, not the disk, yet a follower must fsync every
 //! append, so each node also reports a small durable write time (`disk_ms`); a stalled disk is
@@ -140,6 +140,21 @@ async fn probe(addr: SocketAddr) -> Option<u64> {
 }
 
 /// One probe round of every peer. The history fields are left empty for the caller to fill in.
+/// Authenticated, since the drive listener drops (and warns about) any connection that does not
+/// prove the cluster key; a bare connect would log a failed authentication per probe.
+async fn probe_drive(addr: SocketAddr, keys: &KeyWatch) -> Option<u64> {
+    let start = Instant::now();
+    match tokio::time::timeout(
+        PROBE_TIMEOUT,
+        cl_drive::transport::connect_authenticated(addr, keys),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Some(start.elapsed().as_millis() as u64),
+        _ => None,
+    }
+}
+
 async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> Vec<PeerLink> {
     let probes = cfg
         .nodes
@@ -171,7 +186,7 @@ async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> V
                     },
                     async {
                         match drive_addr {
-                            Some(a) => probe(a).await,
+                            Some(a) => probe_drive(a, keys).await,
                             None => None,
                         }
                     },

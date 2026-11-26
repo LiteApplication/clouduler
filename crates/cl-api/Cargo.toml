@@ -56,7 +56,7 @@ humantime.workspace = true
 jiff = "0.2"
 url = "2"
 humantime-serde.workspace = true
-rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
+mime_guess = "2"
 # For `git2::Oid` only, in `routes::git_backup` - the git2 IO itself all lives
 # in `cl-backup`.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }

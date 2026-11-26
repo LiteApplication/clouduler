@@ -199,11 +199,28 @@ impl Orchestrator {
             return Ok(());
         };
         let order = restart_order(&state.nodes, &leader_name);
+        let mut waiting_for_ui = false;
         for name in order {
             if run.per_node.get(&name) == Some(&NodePhase::Ready) {
+                // Same binary, so no restart: a ui-only update is done once the node reports
+                // serving the new ui. Keep looking at the other nodes meanwhile.
+                if let Some(node) = state.nodes.get(&name) {
+                    let target = run.arch_hashes.get(&node.arch).map(String::as_str);
+                    if !needs_restart(node, target) && !ui_current(node, &run) {
+                        waiting_for_ui = true;
+                        continue;
+                    }
+                }
                 self.restart_one(&mut run, &name, &state).await;
                 return self.save(run, revision).await;
             }
+        }
+        if waiting_for_ui {
+            let started = *run.restart_started_at.get_or_insert_with(now);
+            if now() - started > RESTART_TIMEOUT.as_secs() as i64 {
+                run.fail("a manager did not start serving the new ui in time", now());
+            }
+            return self.save(run, revision).await;
         }
 
         if run.is_complete() {
@@ -287,6 +304,19 @@ impl Orchestrator {
                 run.owner = Some(resolved.owner);
                 run.repo = Some(resolved.repo);
                 run.assets = resolved.assets;
+                if let Some(manifest) = &resolved.manifest {
+                    // The manifest publishes every hash, so nodes verify downloads against it and
+                    // a restart is confirmed by it, instead of trusting the first node to report.
+                    run.arch_hashes = manifest
+                        .backend
+                        .arch
+                        .iter()
+                        .map(|(arch, entry)| (arch.clone(), entry.blake3.clone()))
+                        .collect();
+                    run.backend_version = Some(manifest.backend.version.clone());
+                    run.ui_hash = Some(manifest.ui.blake3.clone());
+                    run.ui_asset = resolved.ui.clone();
+                }
                 for phase in run.per_node.values_mut() {
                     if *phase == NodePhase::Idle {
                         *phase = NodePhase::Fetching;
@@ -324,7 +354,8 @@ impl Orchestrator {
         let expected_hash = run.arch_hashes.get(&node.arch).cloned();
 
         let back = !state.unreachable.contains(name)
-            && expected_hash.as_deref() == Some(node.binary_hash.as_str());
+            && expected_hash.as_deref() == Some(node.binary_hash.as_str())
+            && ui_current(node, run);
         if back {
             run.per_node.insert(name.to_string(), NodePhase::Done);
             run.restart_started_at = None;
@@ -361,6 +392,7 @@ impl Orchestrator {
         if let Some(node) = state.nodes.get(name) {
             if !needs_restart(node, run.arch_hashes.get(&node.arch).map(String::as_str)) {
                 run.per_node.insert(name.to_string(), NodePhase::Done);
+                run.restart_started_at = None;
                 info!(
                     node = name,
                     "already running the target binary, not restarting"
@@ -426,6 +458,15 @@ pub fn needs_restart(node: &NodeState, expected: Option<&str>) -> bool {
     expected != Some(node.binary_hash.as_str())
 }
 
+/// Whether `node` serves the ui `run` rolls out. Workers serve none, and a release without a
+/// manifest ships its ui inside the binary, so for both this is always true.
+pub fn ui_current(node: &NodeState, run: &UpdateRunState) -> bool {
+    match (&run.ui_hash, node.role) {
+        (Some(expected), Role::Manager) => node.ui_hash.as_ref() == Some(expected),
+        _ => true,
+    }
+}
+
 /// The request that stores `run`, conditional on the object still being at
 /// `revision` (0 if there is none yet). Shared by every writer of the run:
 /// orchestrator, workers and the api's start/cancel.
@@ -485,6 +526,7 @@ mod tests {
             open_ports: Default::default(),
             arch: arch.to_string(),
             binary_hash: String::new(),
+            ui_hash: Default::default(),
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),
@@ -500,6 +542,22 @@ mod tests {
         assert!(!needs_restart(&n, Some("abc")));
         assert!(needs_restart(&n, Some("def")));
         assert!(needs_restart(&n, None));
+    }
+
+    #[test]
+    fn a_manager_is_current_only_once_it_serves_the_target_ui() {
+        let mut run = UpdateRunState::new("r".into(), ["m".to_string()], 0);
+        let mut manager = node("m", Role::Manager, "x86_64");
+        let worker = node("w", Role::Worker, "x86_64");
+        // No manifest: nothing to compare.
+        assert!(ui_current(&manager, &run));
+        run.ui_hash = Some("new".into());
+        assert!(!ui_current(&manager, &run));
+        assert!(ui_current(&worker, &run));
+        manager.ui_hash = Some("old".into());
+        assert!(!ui_current(&manager, &run));
+        manager.ui_hash = Some("new".into());
+        assert!(ui_current(&manager, &run));
     }
 
     #[test]

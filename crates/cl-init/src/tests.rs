@@ -25,7 +25,7 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("addr")
 }
 
-fn founding_config() -> ClusterConfig {
+pub(crate) fn founding_config() -> ClusterConfig {
     plan::new_cluster(&ClusterPlan {
         cluster_name: "home".into(),
         subnet: "10.10.0.0/24".parse().unwrap(),
@@ -97,6 +97,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
             open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
+            ui_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
@@ -323,6 +324,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
             open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
+            ui_hash: Default::default(),
             node_pubkey: Some(n2_keypair.public_key_encoded()),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
