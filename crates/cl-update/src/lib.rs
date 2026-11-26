@@ -12,4 +12,5 @@ pub mod release;
 pub mod reset;
 pub mod rollback;
 pub mod ui;
+pub mod ui_bootstrap;
 pub mod worker;

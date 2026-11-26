@@ -17,6 +17,9 @@ use crate::{orchestrator, release, ui};
 /// Same cadence as the orchestrator's poll.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often a manager without a ui retries fetching it.
+const BOOTSTRAP_RETRY: Duration = Duration::from_secs(300);
+
 pub struct Worker {
     pub node_name: String,
     pub cluster: Arc<ClusterNode>,
@@ -35,11 +38,52 @@ pub struct Worker {
 impl Worker {
     pub async fn run(self) {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
+        let mut last_bootstrap: Option<tokio::time::Instant> = None;
         loop {
             ticker.tick().await;
+            if last_bootstrap.is_none_or(|t| t.elapsed() >= BOOTSTRAP_RETRY) {
+                last_bootstrap = Some(tokio::time::Instant::now());
+                self.bootstrap_ui().await;
+            }
             if let Err(e) = self.tick().await {
                 warn!(error = %e, "self-update worker pass failed");
             }
+        }
+    }
+
+    /// A manager with no ui paired to the running backend (updated by a binary that predates the
+    /// split, or the staged ui was lost) fetches the one of its own release instead of waiting
+    /// for the next update run.
+    async fn bootstrap_ui(&self) {
+        if std::env::var_os("CL_UI_DIR").is_some_and(|d| !d.is_empty()) {
+            return;
+        }
+        let version = cl_config::version();
+        if ui::serving_dir(&self.data_dir, version).is_some() {
+            return;
+        }
+        let state = self.cluster.snapshot().await;
+        let is_manager = state
+            .nodes
+            .get(&self.node_name)
+            .is_some_and(|n| n.role == cl_raft::state::Role::Manager);
+        let Some(self_update) = self.cluster_config.self_update.as_ref() else {
+            return;
+        };
+        if !is_manager {
+            return;
+        }
+        let token = self.unseal_github_token().await;
+        match crate::ui_bootstrap::fetch_running_ui(
+            &self_update.release_url,
+            token.as_deref(),
+            &self.data_dir,
+            version,
+        )
+        .await
+        {
+            Ok(()) => info!(%version, "downloaded the web ui for the running version"),
+            Err(e) => warn!(error = %e, "cannot download the web ui for the running version"),
         }
     }
 
