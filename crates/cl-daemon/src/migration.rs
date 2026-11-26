@@ -249,18 +249,27 @@ impl InstanceControl for DockerControl {
                     self.node
                 )));
             }
-            match self
-                .docker
-                .stop(&instance.container_name(), self.stop_grace)
-                .await
-            {
+            let name = instance.container_name();
+            match self.docker.stop(&name, self.stop_grace).await {
                 // No container at all (never created here, or removed since
                 // the node was last reconciled): nothing holds the volumes,
                 // which is the state this step exists to reach.
                 Ok(()) | Err(cl_docker::DockerError::NotFound(_)) => Ok(()),
-                Err(e) => Err(cl_drive::DriveError::Transfer {
-                    message: format!("stopping {instance}: {e}"),
-                }),
+                // dockerd can answer 500 "did not receive an exit event" for a
+                // container that has in fact exited: believe the container.
+                Err(e) => match self.docker.inspect(&name).await {
+                    Ok(state) if Docker::is_down(state.as_ref()) => {
+                        tracing::warn!(
+                            %instance,
+                            error = %e,
+                            "stop reported an error but the container is down; continuing",
+                        );
+                        Ok(())
+                    }
+                    _ => Err(cl_drive::DriveError::Transfer {
+                        message: format!("stopping {instance}: {e}"),
+                    }),
+                },
             }
         })
     }

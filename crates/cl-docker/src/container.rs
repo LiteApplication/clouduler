@@ -783,6 +783,22 @@ impl Docker {
             .map_err(classify)
     }
 
+    /// Whether `state` (from [`Self::inspect`]) means nothing is running: the
+    /// container is gone, or has exited/died/never started. Used to accept a
+    /// `stop` that errored although the container did go down.
+    pub fn is_down(state: Option<&ContainerState>) -> bool {
+        match state {
+            None => true,
+            Some(c) => {
+                !c.running
+                    && matches!(
+                        c.status,
+                        RunState::Exited | RunState::Dead | RunState::Created
+                    )
+            }
+        }
+    }
+
     pub async fn remove(&self, name: &str, force: bool) -> Result<()> {
         let options = RemoveContainerOptionsBuilder::new().force(force).build();
         self.inner
@@ -872,6 +888,21 @@ impl Docker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn is_down_accepts_exited_dead_and_absent_only() {
+        let mk = |running, status| ContainerState {
+            running,
+            status,
+            ..Default::default()
+        };
+        assert!(Docker::is_down(None));
+        assert!(Docker::is_down(Some(&mk(false, RunState::Exited))));
+        assert!(Docker::is_down(Some(&mk(false, RunState::Dead))));
+        assert!(!Docker::is_down(Some(&mk(true, RunState::Running))));
+        assert!(!Docker::is_down(Some(&mk(false, RunState::Stopping))));
+        assert!(!Docker::is_down(Some(&mk(false, RunState::Restarting))));
+    }
+
     use super::*;
 
     fn base_spec() -> ContainerSpec {

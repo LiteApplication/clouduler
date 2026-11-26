@@ -459,17 +459,39 @@ async fn advance(
 }
 
 /// Record the failure through raft (best effort) and return the original error.
+///
+/// Retried a few times, and a state-machine rejection counts as a failure to
+/// record: a lost write leaves the phase non-terminal, so the migration would
+/// sit in its old phase (`Stopping`) with nothing saying why. If it still cannot
+/// be recorded the phase stays non-terminal and the daemon re-claims the job on
+/// its next poll, which is a retry rather than a silent hang.
 async fn fail(node: &ClusterNode, instance: &InstanceId, err: DriveError) -> DriveError {
-    if let Err(e) = node
-        .submit(Request::AdvanceMigration {
-            instance: instance.clone(),
-            phase: MigrationPhase::Failed {
-                reason: err.to_string(),
+    const ATTEMPTS: u32 = 4;
+    for attempt in 1..=ATTEMPTS {
+        let problem = match node
+            .submit(Request::AdvanceMigration {
+                instance: instance.clone(),
+                phase: MigrationPhase::Failed {
+                    reason: err.to_string(),
+                },
+            })
+            .await
+        {
+            Ok(response) => match response.error {
+                None => return err,
+                Some(e) => e,
             },
-        })
-        .await
-    {
-        tracing::warn!(error = %e, "could not record the migration failure");
+            Err(e) => e.to_string(),
+        };
+        tracing::warn!(
+            %instance,
+            attempt,
+            error = %problem,
+            "could not record the migration failure",
+        );
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt))).await;
+        }
     }
     err
 }

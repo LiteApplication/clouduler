@@ -315,13 +315,10 @@ impl Docker {
         image_id: &str,
         repository: &str,
     ) -> Result<Option<String>> {
-        match self.inner.inspect_image(image_id).await {
-            Ok(info) => Ok(digest_for_repository(&info, repository)),
-            Err(e) => match classify(e) {
-                DockerError::NotFound(_) => Ok(None),
-                other => Err(other),
-            },
-        }
+        Ok(self
+            .inspect_image_cached(image_id)
+            .await?
+            .and_then(|info| digest_for_repository(&info, repository)))
     }
 
     /// [`Self::digest_of_image`], preferring `prefer` when the image carries it among several digests.
@@ -331,8 +328,27 @@ impl Docker {
         repository: &str,
         prefer: Option<&str>,
     ) -> Result<Option<String>> {
+        Ok(self
+            .inspect_image_cached(image_id)
+            .await?
+            .and_then(|info| digest_preferring(&info, repository, prefer)))
+    }
+
+    /// Inspect an image by id, at most once per id: only successes are cached,
+    /// so a missing image or a daemon error is retried on the next call.
+    async fn inspect_image_cached(
+        &self,
+        image_id: &str,
+    ) -> Result<Option<std::sync::Arc<bollard::models::ImageInspect>>> {
+        if let Some(hit) = self.image_cache.get(image_id) {
+            return Ok(Some(hit));
+        }
         match self.inner.inspect_image(image_id).await {
-            Ok(info) => Ok(digest_preferring(&info, repository, prefer)),
+            Ok(info) => {
+                let info = std::sync::Arc::new(info);
+                self.image_cache.insert(image_id, info.clone());
+                Ok(Some(info))
+            }
             Err(e) => match classify(e) {
                 DockerError::NotFound(_) => Ok(None),
                 other => Err(other),
