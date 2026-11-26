@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "cl-api"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "aho-corasick",
  "async-stream",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "cl-cli"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "age",
  "anyhow",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "cl-config"
-version = "0.19.0"
+version = "0.20.2"
 dependencies = [
  "hcl-rs",
  "humantime-serde",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "cl-daemon"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "cl-dns"
-version = "0.12.5"
+version = "0.20.2"
 dependencies = [
  "cl-config",
  "hickory-resolver",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "cl-drive"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "bincode",
  "blake3",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "cl-init"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "cl-raft"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "cl-sched"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "cl-config",
  "cl-docker",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "cl-update"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "blake3",
  "cl-config",
@@ -1276,7 +1276,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clouduler"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "anyhow",
  "cl-api",
