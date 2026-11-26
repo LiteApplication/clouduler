@@ -399,7 +399,10 @@ fn answers_for(
                 && client_net != entry.network
                 && !entry.nodes.is_empty()
                 && cfg.managed_proxy(&entry.network)
-                && cfg.networks.get(client_net).is_some_and(|n| n.kind.is_subnetted())
+                && cfg
+                    .networks
+                    .get(client_net)
+                    .is_some_and(|n| n.kind.is_subnetted())
                 && !cfg.is_managed_network(client_net)
             {
                 let on_client_net = |nodes: Vec<&Node>| -> Vec<DesiredRecord> {
@@ -418,7 +421,11 @@ fn answers_for(
                 };
                 // The owners' own addresses first; any node's otherwise.
                 let mut found = on_client_net(
-                    entry.nodes.iter().filter_map(|n| cfg.nodes.get(n)).collect(),
+                    entry
+                        .nodes
+                        .iter()
+                        .filter_map(|n| cfg.nodes.get(n))
+                        .collect(),
                 );
                 if found.is_empty() {
                     found = on_client_net(cfg.nodes.values().collect());
@@ -477,7 +484,10 @@ fn answers_for(
             // relays to the real owner, so any node that has one will do.
             if shortcut
                 && client_net != entry.network
-                && cfg.networks.get(client_net).is_some_and(|n| n.kind.is_subnetted())
+                && cfg
+                    .networks
+                    .get(client_net)
+                    .is_some_and(|n| n.kind.is_subnetted())
                 && !cfg.is_managed_network(client_net)
                 && node.ip_on(client_net).is_none()
             {
@@ -498,11 +508,7 @@ fn answers_for(
                     continue;
                 }
             }
-            let own_net = if shortcut {
-                client_net
-            } else {
-                &entry.network
-            };
+            let own_net = if shortcut { client_net } else { &entry.network };
             let node_records = |net: &str| {
                 if cfg.is_managed_network(net) {
                     Err(cl_dns::DnsError::Invalid(format!(
