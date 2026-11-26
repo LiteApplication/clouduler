@@ -617,6 +617,7 @@ export function buildHttpRoutes(): HttpRoute[] {
         open_ports: {},
         arch: 'x86_64',
         binary_hash: '',
+        ui_hash: null,
         node_pubkey: null,
         memory_total_bytes: 0,
         last_resort: false,

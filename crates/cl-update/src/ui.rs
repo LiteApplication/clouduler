@@ -235,11 +235,14 @@ fn extract(zip_bytes: &[u8], dest: &Path) -> Result<(), UiStageError> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| UiStageError::Zip(e.to_string()))?;
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|e| UiStageError::Zip(e.to_string()))?
+            .to_string();
         let relative = entry
             .enclosed_name()
             .ok_or_else(|| UiStageError::UnsafeEntry(raw_name.clone()))?;
-        if raw_name.split('/').any(|part| part == "..") {
+        if raw_name.starts_with(['/', '\\']) || raw_name.split('/').any(|part| part == "..") {
             return Err(UiStageError::UnsafeEntry(raw_name));
         }
         // S_IFMT: a symlink (or any special file) could point out of the directory.
