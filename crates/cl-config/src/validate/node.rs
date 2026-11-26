@@ -105,6 +105,15 @@ fn check_node_address(
         (NetworkKind::Internal | NetworkKind::Private, NodeAddress::Ip(ip)) => {
             check_ip_address(ctx, ip, taken)
         }
+        (NetworkKind::Private, NodeAddress::Private(private)) => {
+            if net.is_managed() {
+                return Err(ConfigError::invalid(
+                    at,
+                    "a managed network takes a bare IP address; its open ports are declared on the network",
+                ));
+            }
+            check_ip_address(ctx, &private.ip, taken)
+        }
         (NetworkKind::Private, NodeAddress::None) => check_unaddressed_private(ctx),
         (NetworkKind::Internal, NodeAddress::None) => Err(ConfigError::invalid(
             at,

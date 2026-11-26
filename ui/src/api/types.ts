@@ -411,8 +411,9 @@ export interface StackRequirements {
   placement_constraints: string[];
   /** `x-clouduler.expose` entries. A node needs the port marked open in its
    *  `open_ports` to be a candidate, but only when the network is public or
-   *  wireguard kind (a nat/egress/internal network's expose entry, if any,
-   *  needs no such check). Per-service only, same reasoning as `pinned_node`. */
+   *  wireguard kind, or an unmanaged private network where some node lists
+   *  open ports (a nat/egress/internal network's expose entry, if any, needs
+   *  no such check). Per-service only, same reasoning as `pinned_node`. */
   bound_ports: { network: string; protocol: PortProtocol; published: number }[];
   /** Drives mounted whole (`drive/.`) rather than as a named subvolume — a
    *  subset of `drives`. These need the stricter "pinned to the drive's one
@@ -792,6 +793,13 @@ export interface PublicAddress {
   open_ports: OpenPort[];
 }
 
+/** A node's address on an unmanaged private network that also declares open
+ *  ports. A bare IP string when no ports are listed. */
+export interface PrivateAddress {
+  ip: string;
+  open_ports: OpenPort[];
+}
+
 /** An egress or wireguard network's host interface address. Serializes as a
  *  bare string when `open_ports` is empty and `fallback` is unset. */
 export interface InterfaceAddress {
@@ -805,7 +813,7 @@ export interface InterfaceAddress {
 /** A bare IP, a public block, an interface, or null: a private network the node
  *  implements for access only (routes into it, holds no address); on a
  *  managed network null means an automatic node address. */
-export type NodeAddress = string | null | PublicAddress | InterfaceAddress;
+export type NodeAddress = string | null | PrivateAddress | PublicAddress | InterfaceAddress;
 
 export interface NetworkConfig {
   type: NetworkKind;

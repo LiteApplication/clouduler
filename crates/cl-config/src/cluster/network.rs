@@ -511,13 +511,25 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Names of every public or wireguard network, whose outside reachability
-    /// depends on a specific node, so a raw `x-clouduler.expose` port only
-    /// schedules onto a node that has it open.
+    /// Names of every public or wireguard network, and of every unmanaged
+    /// private network on which some node declares `open_ports`: their
+    /// reachability depends on a specific node, so a raw `x-clouduler.expose`
+    /// port only schedules onto a node that has it open. A private network
+    /// where no node lists a port stays ungated, as it always was.
     pub fn port_gated_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
-            .filter(|(_, net)| matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard))
+            .filter(|(name, net)| {
+                matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard)
+                    || (net.kind == NetworkKind::Private
+                        && !net.is_managed()
+                        && self.nodes.values().any(|node| {
+                            node.network.get(name.as_str()).is_some_and(|addr| {
+                                addr.opens_all_ports()
+                                    || addr.open_ports().is_some_and(|ports| !ports.is_empty())
+                            })
+                        }))
+            })
             .map(|(name, _)| name.clone())
             .collect()
     }

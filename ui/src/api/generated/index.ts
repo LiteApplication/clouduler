@@ -91,6 +91,7 @@ export type { OutputObject } from './OutputObject';
 export type { PeerLink } from './PeerLink';
 export type { PortProtocol } from './PortProtocol';
 export type { PortalPalette } from './PortalPalette';
+export type { PrivateAddress } from './PrivateAddress';
 export type { ProblemAction } from './ProblemAction';
 export type { ProblemKind } from './ProblemKind';
 export type { Protocol } from './Protocol';

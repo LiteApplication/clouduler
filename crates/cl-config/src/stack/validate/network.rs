@@ -1,4 +1,4 @@
-use crate::cluster::{ClusterConfig, NetworkKind, NodeAddress, OpenPort};
+use crate::cluster::{ClusterConfig, NetworkKind, OpenPort};
 use crate::error::{ConfigError, Result};
 use crate::stack::{ExposePort, Headers, Middleware, ProxyRoute, StackFile};
 
@@ -399,21 +399,21 @@ fn check_expose(cluster: &ClusterConfig, at: &str, expose: &ExposePort) -> Resul
             ),
         ));
     }
-    // Only a public network's router or a wireguard tunnel's far end can make a
-    // raw port reachable from outside; at least one node must have it open.
-    if matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard) {
+    // A public network's router, a wireguard tunnel's far end and a private
+    // network where some node lists open ports gate a raw port: at least one
+    // node must have it open.
+    if cluster.port_gated_networks().contains(&expose.network) {
         let wanted = OpenPort {
             port: expose.published,
             protocol: expose.protocol,
         };
         let reachable = cluster.nodes.values().any(|n| {
-            n.network
-                .get(&expose.network)
-                .is_some_and(|addr| match addr {
-                    NodeAddress::Public(p) => p.open_ports.contains(&wanted),
-                    NodeAddress::Interface(i) => i.open_ports.contains(&wanted),
-                    NodeAddress::None | NodeAddress::Ip(_) => false,
-                })
+            n.network.get(&expose.network).is_some_and(|addr| {
+                addr.opens_all_ports()
+                    || addr
+                        .open_ports()
+                        .is_some_and(|ports| ports.contains(&wanted))
+            })
         });
         if !reachable {
             return Err(ConfigError::invalid(

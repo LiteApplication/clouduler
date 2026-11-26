@@ -87,6 +87,10 @@ pub enum NodeAddress {
     /// is never offered to the other variants.
     None,
     Ip(IpAddr),
+    /// An IP on a private network plus the ports the node answers there; see
+    /// [`PrivateAddress`]. Tried after `Ip` and before the other maps: its
+    /// `ip` key is unique to it.
+    Private(PrivateAddress),
     // Tried after `Ip`, so a bare IP string still parses as one; only a
     // non-IP bare string falls through to here.
     Interface(InterfaceAddress),
@@ -97,30 +101,69 @@ impl NodeAddress {
     pub fn as_ip(&self) -> Option<IpAddr> {
         match self {
             NodeAddress::Ip(ip) => Some(*ip),
+            NodeAddress::Private(p) => Some(p.ip),
             NodeAddress::None | NodeAddress::Interface(_) | NodeAddress::Public(_) => None,
+        }
+    }
+
+    /// The ports this address declares open: the router's on a public
+    /// network, the tunnel's on an egress or wireguard one, the node's own on
+    /// a private one. Empty for an address that declares none.
+    pub fn open_ports(&self) -> Option<&BTreeSet<OpenPort>> {
+        match self {
+            NodeAddress::Public(p) => Some(&p.open_ports),
+            NodeAddress::Interface(i) => Some(&i.open_ports),
+            NodeAddress::Private(p) => Some(&p.open_ports),
+            NodeAddress::None | NodeAddress::Ip(_) => None,
         }
     }
 
     pub fn as_interface(&self) -> Option<&str> {
         match self {
             NodeAddress::Interface(addr) => Some(&addr.interface),
-            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
+            NodeAddress::None
+            | NodeAddress::Ip(_)
+            | NodeAddress::Private(_)
+            | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_interface_address(&self) -> Option<&InterfaceAddress> {
         match self {
             NodeAddress::Interface(addr) => Some(addr),
-            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
+            NodeAddress::None
+            | NodeAddress::Ip(_)
+            | NodeAddress::Private(_)
+            | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_public(&self) -> Option<&PublicAddress> {
         match self {
             NodeAddress::Public(p) => Some(p),
-            NodeAddress::None | NodeAddress::Ip(_) | NodeAddress::Interface(_) => None,
+            NodeAddress::None
+            | NodeAddress::Ip(_)
+            | NodeAddress::Private(_)
+            | NodeAddress::Interface(_) => None,
         }
     }
+}
+
+/// A node's address on an unmanaged private network when it also declares
+/// open ports: the IP, and the ports this node answers on it. A raw
+/// `x-clouduler.expose` port on the network is then only placed on a node that
+/// lists it. A node with no ports keeps the bare IP form.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(deny_unknown_fields)]
+pub struct PrivateAddress {
+    pub ip: IpAddr,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub open_ports: BTreeSet<OpenPort>,
+    /// Every port (any protocol) answers on this node, so the scheduler treats
+    /// all of them as open and `open_ports` is not consulted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_all: bool,
 }
 
 /// A node's address on an egress or wireguard network: the local host
@@ -128,8 +171,10 @@ impl NodeAddress {
 /// `open_ports` names ports the tunnel's far end forwards back to this node,
 /// so the scheduler only places a service exposing one where it will arrive.
 ///
-/// Serializes as a bare string when `open_ports` is empty and `fallback` is
-/// unset, so `vpn: wg0` round trips unchanged.
+/// `open_all` declares every port open, so `open_ports` is not consulted.
+///
+/// Serializes as a bare string when `open_ports` is empty, `open_all` is off and
+/// `fallback` is unset, so `vpn: wg0` round trips unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "ts",
@@ -139,6 +184,9 @@ impl NodeAddress {
 pub struct InterfaceAddress {
     pub interface: String,
     pub open_ports: BTreeSet<OpenPort>,
+    /// Every port (any protocol) is forwarded back to this node, so the scheduler
+    /// treats all of them as open and `open_ports` is not consulted.
+    pub open_all: bool,
     /// Egress networks only: a second interface to route out of while
     /// `health_check_ip` stops answering pings sent out `interface`. Re-checked
     /// every reconcile tick, so it switches back when the primary recovers. See
@@ -158,6 +206,8 @@ enum InterfaceAddressWire {
         interface: String,
         open_ports: BTreeSet<OpenPort>,
         #[ts(optional)]
+        open_all: Option<bool>,
+        #[ts(optional)]
         fallback: Option<EgressFallback>,
     },
 }
@@ -167,6 +217,7 @@ impl InterfaceAddress {
         Self {
             interface: interface.into(),
             open_ports: BTreeSet::new(),
+            open_all: false,
             fallback: None,
         }
     }
@@ -188,19 +239,22 @@ impl Serialize for InterfaceAddress {
     where
         S: serde::Serializer,
     {
-        if self.open_ports.is_empty() && self.fallback.is_none() {
+        if self.open_ports.is_empty() && !self.open_all && self.fallback.is_none() {
             serializer.serialize_str(&self.interface)
         } else {
             #[derive(Serialize)]
             struct Full<'a> {
                 interface: &'a str,
                 open_ports: &'a BTreeSet<OpenPort>,
+                #[serde(skip_serializing_if = "std::ops::Not::not")]
+                open_all: bool,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 fallback: &'a Option<EgressFallback>,
             }
             Full {
                 interface: &self.interface,
                 open_ports: &self.open_ports,
+                open_all: self.open_all,
                 fallback: &self.fallback,
             }
             .serialize(serializer)
@@ -220,6 +274,8 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
             #[serde(default)]
             open_ports: BTreeSet<OpenPort>,
             #[serde(default)]
+            open_all: bool,
+            #[serde(default)]
             fallback: Option<EgressFallback>,
         }
         #[derive(Deserialize)]
@@ -232,11 +288,13 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
             Raw::Bare(interface) => InterfaceAddress {
                 interface,
                 open_ports: BTreeSet::new(),
+                open_all: false,
                 fallback: None,
             },
             Raw::Full(full) => InterfaceAddress {
                 interface: full.interface,
                 open_ports: full.open_ports,
+                open_all: full.open_all,
                 fallback: full.fallback,
             },
         })
@@ -259,6 +317,22 @@ pub struct PublicAddress {
     /// on this network is only placed on a node that lists it here.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub open_ports: BTreeSet<OpenPort>,
+    /// Every port (any protocol) is forwarded to this node, so the scheduler
+    /// treats all of them as open and `open_ports` is not consulted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_all: bool,
+}
+
+impl NodeAddress {
+    /// Whether this address declares every port open.
+    pub fn opens_all_ports(&self) -> bool {
+        match self {
+            NodeAddress::Public(p) => p.open_all,
+            NodeAddress::Interface(i) => i.open_all,
+            NodeAddress::Private(p) => p.open_all,
+            NodeAddress::None | NodeAddress::Ip(_) => false,
+        }
+    }
 }
 
 impl PublicAddress {

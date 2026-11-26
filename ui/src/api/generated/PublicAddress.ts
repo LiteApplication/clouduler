@@ -10,4 +10,9 @@ export type PublicAddress = { ipv4: string | null, ipv6: string | null, domain: 
  * Ports this node's router forwards to it. A raw `x-clouduler.expose` port
  * on this network is only placed on a node that lists it here.
  */
-open_ports?: Array<OpenPort>, };
+open_ports?: Array<OpenPort>, 
+/**
+ * Every port (any protocol) is forwarded to this node, so the scheduler
+ * treats all of them as open and `open_ports` is not consulted.
+ */
+open_all?: boolean, };

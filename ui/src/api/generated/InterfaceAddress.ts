@@ -8,7 +8,9 @@ import type { OpenPort } from "./OpenPort";
  * `open_ports` names ports the tunnel's far end forwards back to this node,
  * so the scheduler only places a service exposing one where it will arrive.
  *
- * Serializes as a bare string when `open_ports` is empty and `fallback` is
- * unset, so `vpn: wg0` round trips unchanged.
+ * `open_all` declares every port open, so `open_ports` is not consulted.
+ *
+ * Serializes as a bare string when `open_ports` is empty, `open_all` is off and
+ * `fallback` is unset, so `vpn: wg0` round trips unchanged.
  */
-export type InterfaceAddress = string | { interface: string, open_ports: Array<OpenPort>, fallback?: EgressFallback, };
+export type InterfaceAddress = string | { interface: string, open_ports: Array<OpenPort>, open_all?: boolean, fallback?: EgressFallback, };

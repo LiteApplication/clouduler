@@ -47,6 +47,7 @@ fn addresses(node: &Node) -> String {
         let value = match addr {
             NodeAddress::None => "-".to_string(),
             NodeAddress::Ip(ip) => ip.to_string(),
+            NodeAddress::Private(p) => p.ip.to_string(),
             NodeAddress::Interface(iface) => iface.interface.clone(),
             NodeAddress::Public(p) => {
                 let mut parts = Vec::new();

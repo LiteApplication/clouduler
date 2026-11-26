@@ -39,7 +39,7 @@ The tests, in the order the scheduler applies them:
 | Volume copy | the node implements the drive but holds no current copy of the volume | scheduler-side only: not shown as a row on the Placement tab, see [drive holders](#drive-holders) |
 | Egress network | the service uses an egress or wireguard network the node has no interface for | `not on network` |
 | Other networks | the node does not implement a network the service names (nat networks always pass; a managed private network needs the node to list it, with or without an address; an unmanaged private network listed without an address is access only) | `not on network` |
-| Open ports | an `x-clouduler.expose` port on a public or wireguard network is not listed in the node's `open_ports` | `port closed` |
+| Open ports | an `x-clouduler.expose` port on a public or wireguard network, or on an unmanaged private network where some node lists `open_ports`, is not listed in the node's `open_ports` | `port closed` |
 | GPUs and devices | the service asks for NVIDIA GPUs or `devices:` and the node did not report them, unless the node is pinned to (see [GPUs and devices](#gpus-and-devices)) | `no NVIDIA GPU`, `no NVIDIA container toolkit`, `no GPU ID`, `N of M GPUs`, `no such device` |
 | Constraints | the node fails a `deploy.placement.constraints` entry | `NODE fails constraint KEY == VALUE` |
 | Configs and secrets | a config or secret the service needs is missing, or the node has no cluster key to open a secret | `missing`, `no cluster key` |
@@ -158,7 +158,7 @@ Networks narrow the choice of nodes, so adding a network to a service can move i
 
 - A service on an **egress** or **wireguard** network only lands on nodes that list a host interface (or an imported tunnel) for that network. Clouduler never creates an egress interface; if it is missing the service stays down behind a kill-switch.
 - A service on a **public** network needs a node that has a public address on it.
-- An `x-clouduler.expose` port on a **public** or **wireguard** network only schedules on nodes whose router forwards that port, declared as `open_ports` in the node's address.
+- An `x-clouduler.expose` port on a **public** or **wireguard** network only schedules on nodes whose router forwards that port, declared as `open_ports` in the node's address. An unmanaged **private** network works the same way as soon as any node declares `open_ports` on it (`lan: { ip: 192.168.1.5, open_ports: [{ port: 25 }] }`); until then it is not gated.
 - **nat** networks are available on every node and never narrow the choice.
 - With `proxy.dns_publish: owning-node`, all containers behind one proxy hostname are pinned to one node.
 

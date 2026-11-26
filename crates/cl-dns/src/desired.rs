@@ -165,6 +165,7 @@ mod tests {
                 ipv6: Some("2001:db8::9".parse().unwrap()),
                 domain: Some("n1.example.net".to_string()),
                 open_ports: Default::default(),
+                open_all: false,
             }),
         );
         let recs = records_for(&cfg, "svc", "wan", &node).unwrap();

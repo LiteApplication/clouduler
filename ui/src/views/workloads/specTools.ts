@@ -72,9 +72,21 @@ export function usePlacementContext(): PlacementContext {
               .filter(([, net]) => net.type === 'nat' || net.type === 'container')
               .map(([name]) => name),
           ),
+          // Mirrors ClusterConfig::port_gated_networks: an unmanaged private
+          // network is gated once some node lists open ports on it.
           portGatedNetworks: new Set(
             Object.entries(config?.networks ?? {})
-              .filter(([, net]) => net.type === 'public' || net.type === 'wireguard')
+              .filter(
+                ([name, net]) =>
+                  net.type === 'public' ||
+                  net.type === 'wireguard' ||
+                  (net.type === 'private' &&
+                    !net.managed &&
+                    Object.values(config?.nodes ?? {}).some((node) => {
+                      const addr = node.network[name];
+                      return !!addr && typeof addr === 'object' && 'open_ports' in addr && addr.open_ports.length > 0;
+                    })),
+              )
               .map(([name]) => name),
           ),
         });

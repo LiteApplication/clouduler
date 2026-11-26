@@ -1843,11 +1843,7 @@ fn to_state(
             .network
             .iter()
             .filter_map(|(name, addr)| {
-                let open_ports = match addr {
-                    cl_config::NodeAddress::Public(p) => &p.open_ports,
-                    cl_config::NodeAddress::Interface(i) => &i.open_ports,
-                    cl_config::NodeAddress::None | cl_config::NodeAddress::Ip(_) => return None,
-                };
+                let open_ports = addr.open_ports()?;
                 if open_ports.is_empty() {
                     return None;
                 }

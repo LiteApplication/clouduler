@@ -19,6 +19,7 @@ function netSummary(addr: NodeAddress | undefined): { address: string; ports: st
   if (addr === null) return { address: 'access only', ports: '' };
   if (typeof addr === 'string') return { address: addr, ports: '' };
   const ports = (addr.open_ports ?? []).map((p) => `${p.port}/${p.protocol}`).join(', ');
+  if ('ip' in addr) return { address: addr.ip, ports };
   if ('interface' in addr) {
     const fb = addr.fallback ? ` (backup ${addr.fallback})` : '';
     return { address: addr.interface ? `${addr.interface}${fb}` : '', ports };
@@ -228,7 +229,8 @@ export function NodeCard({
           />
         );
       }
-      const ip = typeof addr === 'string' ? addr : '';
+      const ip = typeof addr === 'string' ? addr : addr && 'ip' in addr ? addr.ip : '';
+      const privatePorts = addr && typeof addr === 'object' && 'ip' in addr ? addr.open_ports : [];
       // A private network can be listed with no address: the node routes into
       // it for access but hosts no containers there (serialized as null).
       const managedNet = isManaged(net);
@@ -280,9 +282,20 @@ export function NodeCard({
               }
               configKey={`nodes.${name}.network.${netName}`}
               value={ip}
-              onChange={(v) => setAddress(netName, v || (managedNet ? '' : null))}
+              onChange={(v) =>
+                setAddress(netName, !v ? (managedNet ? '' : null) : privatePorts.length > 0 ? { ip: v, open_ports: privatePorts } : v)
+              }
               disabled={disabled}
             />}
+            {net.type === 'private' && !managedNet && !accessOnly && (
+              <OpenPortsEditor
+                idPrefix={`node-${name}-${netName}`}
+                hint="Ports this node answers on its address here. A raw port a stack exposes on this network only schedules onto a node that lists it, once any node lists a port; a network where no node lists one is not gated."
+                ports={privatePorts}
+                onChange={(open_ports) => setAddress(netName, open_ports.length > 0 && ip ? { ip, open_ports } : ip)}
+                disabled={disabled || !ip}
+              />
+            )}
           </div>
           {!disabled && net.type !== 'internal' && (
             <button

@@ -21,7 +21,8 @@ export interface PlacementContext {
    *  one. Only consulted for `requirements.whole_drive_mounts` (`drive/.`
    *  mounts), which are only accepted pinned to the drive's sole real holder. */
   driveHolders: Record<string, string[]>;
-  /** Names of networks of kind `public` or `wireguard`: the only kinds a raw
+  /** Names of networks of kind `public` or `wireguard`, plus unmanaged private
+   *  networks where some node lists open ports: the only ones a raw
    *  `x-clouduler.expose` port is checked against (`NodeState.open_ports`). */
   portGatedNetworks: Set<string>;
 }

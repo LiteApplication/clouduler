@@ -20,8 +20,8 @@ pub use cluster::{
     ContainerNetwork, ContainerOpenPort, ContainerView, DnsPublishMode, Drive, DriveMode,
     EgressFallback, Failback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
     InterfaceAddress, ManagedOpenPort, McpConfig, Network, NetworkKind, Node, NodeAddress,
-    NodeRole, OidcConfig, OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress,
-    SecretsConfig, SelfUpdateConfig, TerraformConfig, WebConfig, DEFAULT_RPC_PORT,
+    NodeRole, OidcConfig, OpenPort, PortalPalette, PrivateAddress, ProxyAuthConfig, ProxyConfig,
+    PublicAddress, SecretsConfig, SelfUpdateConfig, TerraformConfig, WebConfig, DEFAULT_RPC_PORT,
     DEFAULT_STOP_GRACE, DEFAULT_TERRAFORM_IMAGE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE,
     MIN_IMAGE_CHECK_INTERVAL,
 };

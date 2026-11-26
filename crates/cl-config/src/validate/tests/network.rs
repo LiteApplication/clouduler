@@ -71,7 +71,11 @@ fn shortcut_is_a_per_link_map_on_subnetted_networks() {
         "wan:       { type: public,   domain: example.com, shortcut: { lan: false } }",
     )])
     .unwrap_err();
-    assert!(err.to_string().contains("only allowed on internal and private"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("only allowed on internal and private"),
+        "{err}"
+    );
 }
 
 /// Two distinct names whose derived value (octet or table id) collides,
@@ -296,4 +300,67 @@ fn publishing_to_dns_is_on_unless_a_private_network_opts_out() {
     );
     let err = ClusterConfig::parse(&bad).unwrap_err().to_string();
     assert!(err.contains("publish_dns"), "{err}");
+}
+
+#[test]
+fn private_address_with_open_ports_round_trips_and_gates_the_network() {
+    let cfg = parse(&[(
+        "      lan: 192.168.1.1",
+        "      lan: { ip: 192.168.1.1, open_ports: [{ port: 25 }, { port: 53, protocol: udp }] }",
+    )])
+    .expect("valid");
+    let addr = &cfg.nodes["n1"].network["lan"];
+    assert_eq!(addr.as_ip(), Some("192.168.1.1".parse().unwrap()));
+    assert_eq!(addr.open_ports().map(|p| p.len()), Some(2));
+    assert_eq!(
+        cfg.nodes["n1"].ip_on("lan"),
+        Some("192.168.1.1".parse().unwrap())
+    );
+
+    // Gated once some node lists a port; ungated without any.
+    assert!(cfg.port_gated_networks().contains("lan"));
+    let plain = ClusterConfig::parse(BASE).expect("base");
+    assert!(!plain.port_gated_networks().contains("lan"));
+
+    let yaml = serde_yaml::to_string(&cfg).unwrap();
+    let again = ClusterConfig::parse(&yaml).expect("round trip");
+    assert_eq!(again.nodes["n1"].network["lan"], *addr);
+    // A bare IP stays bare.
+    assert!(yaml.contains("192.168.1.1") && !yaml.contains("open_ports: []"));
+}
+
+#[test]
+fn private_address_ip_is_checked_and_ports_are_not_for_internal_or_managed() {
+    let outside = parse(&[(
+        "      lan: 192.168.1.1",
+        "      lan: { ip: 10.9.9.9, open_ports: [{ port: 25 }] }",
+    )])
+    .unwrap_err()
+    .to_string();
+    assert!(outside.contains("outside the lan subnet"), "{outside}");
+
+    let internal = parse(&[(
+        "      tailscale: 10.10.0.1",
+        "      tailscale: { ip: 10.10.0.1, open_ports: [{ port: 25 }] }",
+    )])
+    .unwrap_err()
+    .to_string();
+    assert!(internal.contains("takes a bare IP address"), "{internal}");
+
+    let managed = parse(&[
+        (
+            "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }",
+            "lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, managed: true }",
+        ),
+        (
+            "      lan: 192.168.1.1",
+            "      lan: { ip: 192.168.1.1, open_ports: [{ port: 25 }] }",
+        ),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(
+        managed.contains("managed network takes a bare IP"),
+        "{managed}"
+    );
 }

@@ -273,6 +273,7 @@ services:
             }]
             .into_iter()
             .collect(),
+            open_all: false,
         }),
     );
     stack(raw).validate(&cfg).expect("a node has the port open");
@@ -311,6 +312,7 @@ services:
             }]
             .into_iter()
             .collect(),
+            open_all: false,
             fallback: None,
         }),
     );
@@ -585,4 +587,55 @@ fn a_pinned_subnet_is_validated() {
     let none = "x-clouduler:\n  subnet: 172.30.5.0/24\nservices:\n  a:\n    image: x\n";
     let err = stack(none).validate(&cluster).unwrap_err();
     assert!(err.to_string().contains("no overlay network"), "{err}");
+}
+
+#[test]
+fn expose_port_on_a_private_network_is_gated_once_a_node_lists_open_ports() {
+    let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - port: 25
+          published: 25
+          network: lan
+"#;
+    let mut cfg = cluster();
+    // No node lists a port on lan: not gated, as before.
+    stack(raw)
+        .validate(&cfg)
+        .expect("an ungated private network");
+
+    let (node, ip) = cfg
+        .nodes
+        .iter()
+        .find_map(|(n, node)| node.ip_on("lan").map(|ip| (n.clone(), ip)))
+        .expect("a node on lan");
+    let open = |port: u16| crate::cluster::OpenPort {
+        port,
+        protocol: crate::stack::Protocol::Tcp,
+    };
+    cfg.nodes.get_mut(&node).unwrap().network.insert(
+        "lan".to_string(),
+        crate::cluster::NodeAddress::Private(crate::cluster::PrivateAddress {
+            ip,
+            open_ports: [open(80)].into_iter().collect(),
+            open_all: false,
+        }),
+    );
+    let err = stack(raw).validate(&cfg).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("no node has 25/tcp open on network lan"));
+
+    cfg.nodes.get_mut(&node).unwrap().network.insert(
+        "lan".to_string(),
+        crate::cluster::NodeAddress::Private(crate::cluster::PrivateAddress {
+            ip,
+            open_ports: [open(25)].into_iter().collect(),
+            open_all: false,
+        }),
+    );
+    stack(raw).validate(&cfg).expect("the node has 25 open");
 }
