@@ -139,7 +139,6 @@ async fn probe(addr: SocketAddr) -> Option<u64> {
     }
 }
 
-/// One probe round of every peer. The history fields are left empty for the caller to fill in.
 /// Authenticated, since the drive listener drops (and warns about) any connection that does not
 /// prove the cluster key; a bare connect would log a failed authentication per probe.
 async fn probe_drive(addr: SocketAddr, keys: &KeyWatch) -> Option<u64> {
@@ -155,6 +154,7 @@ async fn probe_drive(addr: SocketAddr, keys: &KeyWatch) -> Option<u64> {
     }
 }
 
+/// One probe round of every peer. The history fields are left empty for the caller to fill in.
 async fn probe_peers(self_name: &str, cfg: &ClusterConfig, keys: &KeyWatch) -> Vec<PeerLink> {
     let probes = cfg
         .nodes
