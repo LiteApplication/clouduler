@@ -1869,6 +1869,7 @@ fn to_state(
         arch: current.map(|c| c.arch.clone()).unwrap_or_default(),
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
         ui_hash: current.and_then(|c| c.ui_hash.clone()),
+        started_at: current.map(|c| c.started_at).unwrap_or_default(),
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
         version: current.map(|c| c.version.clone()).unwrap_or_default(),
@@ -1885,6 +1886,9 @@ fn to_state(
 /// Also heals a roster entry that predates one of these fields: `to_state` only
 /// fills a field in when creating the node, so it would otherwise stay empty/zero
 /// forever.
+/// When this process first reported itself, close enough to its start for `NodeState::started_at`.
+static STARTED_AT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
 async fn report_self(
     node_name: String,
     cluster: Arc<ClusterNode>,
@@ -1906,6 +1910,12 @@ async fn report_self(
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
         let version = cl_config::version().to_string();
+        let started_at = *STARTED_AT.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        });
         // Only a manager serves a ui; the directory name is the hash of the zip it came from.
         let ui_hash = if current.role == Role::Manager {
             cl_update::ui::serving_dir(&data_dir, &version)
@@ -1938,6 +1948,7 @@ async fn report_self(
             && current.arch == arch
             && current.binary_hash == binary_hash
             && current.ui_hash == ui_hash
+            && current.started_at == started_at
             && current.node_pubkey == node_pubkey
             && current.memory_total_bytes == memory_total_bytes
         {
@@ -1947,6 +1958,7 @@ async fn report_self(
             arch,
             binary_hash,
             ui_hash,
+            started_at,
             node_pubkey: node_pubkey.clone(),
             memory_total_bytes,
             version,

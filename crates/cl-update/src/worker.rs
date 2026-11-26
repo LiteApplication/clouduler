@@ -79,10 +79,11 @@ impl Worker {
             token.as_deref(),
             &self.data_dir,
             version,
+            false,
         )
         .await
         {
-            Ok(()) => info!(%version, "downloaded the web ui for the running version"),
+            Ok(_) => info!(%version, "downloaded the web ui for the running version"),
             Err(e) => warn!(error = %e, "cannot download the web ui for the running version"),
         }
     }
@@ -191,7 +192,7 @@ impl Worker {
             let staged = tokio::task::spawn_blocking(move || staged_matches(&path, &wanted))
                 .await
                 .unwrap_or(false);
-            if !binary_fetch_needed(staged, running_hash, Some(recorded), run.hold) {
+            if !run.force && !binary_fetch_needed(staged, running_hash, Some(recorded), run.hold) {
                 return Ok(());
             }
         }
@@ -236,6 +237,7 @@ impl Worker {
             .clone()
             .ok_or("the release manifest names a ui but no backend version")?;
         let ui_only = !run.hold
+            && !run.force
             && !running_hash.is_empty()
             && run.arch_hashes.get(arch).map(String::as_str) == Some(running_hash);
         // Same binary: the running version is what the ui has to be paired with.
@@ -246,7 +248,7 @@ impl Worker {
         };
 
         let data_dir = self.data_dir.clone();
-        if ui::has(&data_dir, &hash) {
+        if !run.force && ui::has(&data_dir, &hash) {
             let (dir, hash, version) = (data_dir.clone(), hash.clone(), paired_with.clone());
             tokio::task::spawn_blocking(move || ui::mark_compatible(&dir, &hash, &version))
                 .await

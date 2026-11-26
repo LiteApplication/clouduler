@@ -88,6 +88,8 @@ self_update:
   check_interval: 24h
 ```
 
+From a shell on a node, `clouduler self-update` downloads the web UI on a manager, starts a run and follows it (`--tag`, `--force` to reinstall everything even when the nodes already run the release, `--ui-only` for just the UI). See the [CLI reference](/docs/reference/cli).
+
 To track the official Clouduler releases, set the repository to `https://github.com/LiteApplication/clouduler`. The CLI has no command to start a rollout. Use the web UI or the API:
 
 ```bash title="Self-update through the API"

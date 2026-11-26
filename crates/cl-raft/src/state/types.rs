@@ -55,6 +55,11 @@ pub struct NodeState {
     /// directory); `None` on a worker or a node with no ui staged for its running version.
     #[serde(default)]
     pub ui_hash: Option<String>,
+    /// Unix seconds this node's daemon process started, self-reported; 0 until reported. A forced
+    /// self-update reinstall confirms a restart by this moving forward, since the binary hash
+    /// does not change.
+    #[serde(default)]
+    pub started_at: i64,
     /// X25519 public key (base64), self-reported once the local keypair exists, so a
     /// key holder can wrap the cluster secret key for this node (`wrapped_keys`).
     #[serde(default)]

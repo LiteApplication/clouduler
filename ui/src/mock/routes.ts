@@ -618,6 +618,7 @@ export function buildHttpRoutes(): HttpRoute[] {
         arch: 'x86_64',
         binary_hash: '',
         ui_hash: null,
+        started_at: 0,
         node_pubkey: null,
         memory_total_bytes: 0,
         last_resort: false,

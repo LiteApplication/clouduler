@@ -19,6 +19,7 @@ pub mod registry;
 pub mod report;
 pub mod restore;
 pub mod secret;
+pub mod self_update_cli;
 pub mod stack;
 pub mod status;
 pub mod terraform_cli;

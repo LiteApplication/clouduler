@@ -125,6 +125,14 @@ pub struct UpdateRunState {
     /// The ui zip asset to download when a manager does not hold `ui_hash` yet.
     #[serde(default)]
     pub ui_asset: Option<ReleaseAsset>,
+    /// Reinstall even where the node already runs the release: download the binary and the ui
+    /// again and restart every node.
+    #[serde(default)]
+    pub force: bool,
+    /// `NodeState::started_at` of the node being restarted, read when its restart was triggered;
+    /// a forced restart is confirmed by the node reporting a later one.
+    #[serde(default)]
+    pub restart_prev_started_at: Option<i64>,
 }
 
 impl UpdateRunState {
@@ -146,6 +154,8 @@ impl UpdateRunState {
             backend_version: None,
             ui_hash: None,
             ui_asset: None,
+            force: false,
+            restart_prev_started_at: None,
         }
     }
 

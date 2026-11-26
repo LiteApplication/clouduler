@@ -164,6 +164,7 @@ export class ScenarioBuilder {
         arch: 'x86_64',
         binary_hash: fakeDigest(`bin-${n.name}`).slice(7, 39),
         ui_hash: null,
+        started_at: 0,
         node_pubkey: `pk-${n.name}`,
         images: [],
         memory_total_bytes: (n.memGiB ?? 16) * GIB,

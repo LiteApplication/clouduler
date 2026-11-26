@@ -80,6 +80,7 @@ pub(crate) async fn harness() -> Harness {
         arch: Default::default(),
         binary_hash: Default::default(),
         ui_hash: Default::default(),
+        started_at: Default::default(),
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
         gpus: Default::default(),

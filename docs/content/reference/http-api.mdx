@@ -297,12 +297,14 @@ curl -N -H "Authorization: Bearer $KEY" \
 | Method | Path | Auth | Body | Success | Notes |
 |---|---|---|---|---|---|
 | GET, PUT | `/api/self-update/github-token` | user, admin | PUT: `{"token": "..."}` | status, 204 | Write-only. |
+| POST, GET | `/api/self-update/internal/run` | node key | POST: same body | run state | Node-to-node, signed with the cluster key; used by `clouduler self-update`. |
+| POST | `/api/self-update/internal/ui` | node key | `{"force"?}` | `{version, hash}` | Downloads and stages the UI of the running version before answering. |
 | GET, PUT | `/api/self-update/repo` | user, admin | `{"release_url": "..."}` | config or null, 204 | Write-once. |
 | PUT | `/api/self-update/check` | admin | `{"enabled": bool, "interval"?: string}` | 204 | Interval at least 1h. |
 | GET | `/api/self-update/latest` | user | none | `{tag, architectures, source, running_version, fetched_at}` | Cached 5 minutes. |
 | GET | `/api/self-update/releases` | any identity | none | `{tags}` | Stable (non-draft, non-prerelease) release tags of the configured repo, newest first. Cached 5 minutes. 409 if no release source is configured. |
 | GET | `/api/self-update/run` | user | none | run state or null | `target_tag` is the tag the run was asked for, or null. |
-| POST | `/api/self-update/run` | admin | none, or `{"tag": "v0.17.3", "downgrade"?: bool}` | 202 run state | With a tag, installs exactly that release of the configured repo (a tag pinned in `release_url` is overridden). 400 if the tag is empty or contains `/` or whitespace. 400 `tag X is older than the running version Y; downgrading is unsupported and must be requested explicitly` for a tag older than the running version unless `downgrade` is true. The same tag as the running version stays allowed. |
+| POST | `/api/self-update/run` | admin | none, or `{"tag": "v0.17.3", "downgrade"?: bool, "force"?: bool}` | 202 run state | `force` reinstalls even a release the nodes already run: every node downloads its binary and the UI again and restarts, each confirmed by reporting a later daemon start. With a tag, installs exactly that release of the configured repo (a tag pinned in `release_url` is overridden). 400 if the tag is empty or contains `/` or whitespace. 400 `tag X is older than the running version Y; downgrading is unsupported and must be requested explicitly` for a tag older than the running version unless `downgrade` is true. The same tag as the running version stays allowed. |
 | POST | `/api/self-update/cancel` | admin | none | 204 | |
 
 ### Alerts {#alerts}

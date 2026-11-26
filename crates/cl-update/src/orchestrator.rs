@@ -206,7 +206,7 @@ impl Orchestrator {
                 // serving the new ui. Keep looking at the other nodes meanwhile.
                 if let Some(node) = state.nodes.get(&name) {
                     let target = run.arch_hashes.get(&node.arch).map(String::as_str);
-                    if !needs_restart(node, target) && !ui_current(node, &run) {
+                    if !run.force && !needs_restart(node, target) && !ui_current(node, &run) {
                         waiting_for_ui = true;
                         continue;
                     }
@@ -355,10 +355,12 @@ impl Orchestrator {
 
         let back = !state.unreachable.contains(name)
             && expected_hash.as_deref() == Some(node.binary_hash.as_str())
-            && ui_current(node, run);
+            && ui_current(node, run)
+            && restarted(node, run);
         if back {
             run.per_node.insert(name.to_string(), NodePhase::Done);
             run.restart_started_at = None;
+            run.restart_prev_started_at = None;
             info!(node = name, "restart confirmed");
             return;
         }
@@ -390,7 +392,9 @@ impl Orchestrator {
         // what keeps `check_restart_progress` honest: it confirms a restart
         // by the hash changing, which needs the hash to differ beforehand.
         if let Some(node) = state.nodes.get(name) {
-            if !needs_restart(node, run.arch_hashes.get(&node.arch).map(String::as_str)) {
+            if !run.force
+                && !needs_restart(node, run.arch_hashes.get(&node.arch).map(String::as_str))
+            {
                 run.per_node.insert(name.to_string(), NodePhase::Done);
                 run.restart_started_at = None;
                 info!(
@@ -415,6 +419,7 @@ impl Orchestrator {
             Ok(()) => {
                 run.per_node.insert(name.to_string(), NodePhase::Restarting);
                 run.restart_started_at = Some(now());
+                run.restart_prev_started_at = state.nodes.get(name).map(|n| n.started_at);
                 info!(node = name, "triggered restart");
             }
             Err(e) => {
@@ -456,6 +461,15 @@ impl Orchestrator {
 /// `expected`. With no hash recorded there is nothing to compare, so restart.
 pub fn needs_restart(node: &NodeState, expected: Option<&str>) -> bool {
     expected != Some(node.binary_hash.as_str())
+}
+
+/// Whether `node` came back from the restart `run` triggered. Only a forced run needs the proof: a
+/// normal one is confirmed by the binary hash changing.
+fn restarted(node: &NodeState, run: &UpdateRunState) -> bool {
+    !run.force
+        || run
+            .restart_prev_started_at
+            .is_none_or(|prev| node.started_at > prev)
 }
 
 /// Whether `node` serves the ui `run` rolls out. Workers serve none, and a release without a
@@ -527,12 +541,27 @@ mod tests {
             arch: arch.to_string(),
             binary_hash: String::new(),
             ui_hash: Default::default(),
+            started_at: Default::default(),
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),
             images: Default::default(),
             version: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_forced_restart_is_confirmed_by_a_later_start_not_the_hash() {
+        let mut run = UpdateRunState::new("r".into(), [], 0);
+        let mut n = node("n1", Role::Worker, "x86_64");
+        n.started_at = 100;
+        // A normal run is confirmed by the hash alone.
+        assert!(restarted(&n, &run));
+        run.force = true;
+        run.restart_prev_started_at = Some(100);
+        assert!(!restarted(&n, &run));
+        n.started_at = 160;
+        assert!(restarted(&n, &run));
     }
 
     #[test]

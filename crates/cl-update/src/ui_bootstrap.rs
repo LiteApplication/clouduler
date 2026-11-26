@@ -9,13 +9,16 @@ use std::path::Path;
 use crate::{release, ui};
 
 /// Resolves the release of backend `version` (the pinned tag `v<version>` first, then whatever
-/// `release_url` points at), downloads its ui zip and stages it, paired with `version`.
+/// `release_url` points at), downloads its ui zip and stages it, paired with `version`. With
+/// `force` an already extracted copy is deleted and unpacked again. Returns the staged bundle's
+/// blake3.
 pub async fn fetch_running_ui(
     release_url: &str,
     token: Option<&str>,
     data_dir: &Path,
     version: &str,
-) -> Result<(), String> {
+    force: bool,
+) -> Result<String, String> {
     let mut candidates = Vec::new();
     if let Ok(pinned) = release::pinned_source(release_url, &format!("v{version}")) {
         candidates.push(pinned);
@@ -53,9 +56,23 @@ pub async fn fetch_running_ui(
         manifest.ui.blake3.clone(),
         version.to_string(),
     );
-    tokio::task::spawn_blocking(move || ui::stage_zip(&dir, &zip, &expect, &version))
-        .await
-        .map_err(|e| format!("staging the ui: {e}"))?
-        .map_err(|e| format!("staging the ui: {e}"))?;
-    Ok(())
+    let staged = expect.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if force && blake3::hash(&zip).to_hex().as_str() == expect {
+            // Only after the download checked out, so a bad one never costs the working copy.
+            let existing = ui::ui_root(&dir).join(&expect);
+            if existing.is_dir() {
+                std::fs::remove_dir_all(&existing)
+                    .map_err(|e| format!("removing the old ui: {e}"))?;
+            }
+        }
+        ui::stage_zip(&dir, &zip, &expect, &version).map_err(|e| format!("staging the ui: {e}"))?;
+        if force {
+            ui::activate(&dir, &expect).map_err(|e| format!("switching the ui: {e}"))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("staging the ui: {e}"))??;
+    Ok(staged)
 }

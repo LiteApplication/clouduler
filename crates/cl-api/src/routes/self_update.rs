@@ -15,7 +15,7 @@ use cl_update::orchestrator::load_run;
 use cl_update::plan::{UpdateRunState, GITHUB_TOKEN_SECRET, RUN_CONFIG};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::internal::InternalAuth;
+use crate::auth::internal::{InternalAuth, InternalBodyAuth};
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::server::AppState;
@@ -43,6 +43,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
         .route("/api/self-update/internal/restart", post(internal_restart))
+        // Node-to-node (the `clouduler self-update` command): same actions as the admin routes.
+        .route(
+            "/api/self-update/internal/run",
+            post(internal_start_run).get(internal_get_run),
+        )
+        .route("/api/self-update/internal/ui", post(internal_fetch_ui))
 }
 
 #[derive(Serialize)]
@@ -172,13 +178,16 @@ async fn get_repo(
     Json(state.cluster_config.read().await.self_update.clone())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct StartRunRequest {
     #[serde(default)]
     tag: Option<String>,
     /// Explicit opt-in to install a tag older than the running version (unsupported).
     #[serde(default)]
     downgrade: bool,
+    /// Reinstall even a release the nodes already run: download everything again and restart every node.
+    #[serde(default)]
+    force: bool,
 }
 
 /// Dotted numeric parts of a tag or version; a leading `v` is dropped and a non-numeric part counts as 0.
@@ -218,11 +227,18 @@ async fn start_run(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<Json<UpdateRunState>, ApiError> {
-    let target_tag = if body.iter().all(u8::is_ascii_whitespace) {
-        None
+    let req = if body.iter().all(u8::is_ascii_whitespace) {
+        StartRunRequest::default()
     } else {
-        let req: StartRunRequest = serde_json::from_slice(&body)
-            .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?;
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?
+    };
+    begin_run(&state, req).await.map(Json)
+}
+
+async fn begin_run(state: &AppState, req: StartRunRequest) -> Result<UpdateRunState, ApiError> {
+    let force = req.force;
+    let target_tag = {
         let downgrade = req.downgrade;
         match req.tag {
             None => None,
@@ -270,8 +286,84 @@ async fn start_run(
         .map(|(name, _)| name.clone());
     let mut run = UpdateRunState::new(id, nodes_to_update, now());
     run.target_tag = target_tag;
-    submit_run(&state, &run, revision).await?;
-    Ok(Json(run))
+    run.force = force;
+    submit_run(state, &run, revision).await?;
+    Ok(run)
+}
+
+async fn internal_start_run(
+    auth: InternalBodyAuth,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<UpdateRunState>, ApiError> {
+    auth.check(&body)?;
+    let req = if body.is_empty() {
+        StartRunRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?
+    };
+    begin_run(&state, req).await.map(Json)
+}
+
+async fn internal_get_run(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Json<Option<UpdateRunState>> {
+    let cluster_state = state.cluster.snapshot().await;
+    Json(load_run(&cluster_state))
+}
+
+#[derive(Deserialize, Default)]
+struct FetchUiRequest {
+    /// Download and unpack again even when this node already holds the ui.
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Serialize)]
+struct FetchedUi {
+    version: String,
+    hash: String,
+}
+
+/// Downloads the ui of the release this node's backend came from and waits for it, so the answer
+/// says whether the dashboard can be served now.
+async fn internal_fetch_ui(
+    auth: InternalBodyAuth,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<FetchedUi>, ApiError> {
+    auth.check(&body)?;
+    let req: FetchUiRequest = if body.is_empty() {
+        FetchUiRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?
+    };
+    let release_url = state
+        .cluster_config
+        .read()
+        .await
+        .self_update
+        .as_ref()
+        .map(|s| s.release_url.clone())
+        .ok_or_else(|| ApiError::Conflict("no self-update release is configured".into()))?;
+    let version = cl_config::version();
+    let token = unseal_github_token(&state).await;
+    let hash = cl_update::ui_bootstrap::fetch_running_ui(
+        &release_url,
+        token.as_deref(),
+        &state.data_dir,
+        version,
+        req.force,
+    )
+    .await
+    .map_err(ApiError::Unavailable)?;
+    Ok(Json(FetchedUi {
+        version: version.to_string(),
+        hash,
+    }))
 }
 
 async fn get_run(

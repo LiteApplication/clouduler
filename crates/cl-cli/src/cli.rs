@@ -364,6 +364,30 @@ pub enum Command {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// Download the web ui on a manager now, then start a cluster self-update
+    /// to the configured release source and follow it. Needs
+    /// `self_update.release_url` in the config. Talks to a running daemon.
+    SelfUpdate {
+        /// Install this release tag instead of the source's latest.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Reinstall even where the nodes already run the release: download
+        /// the binaries and the ui again and restart every node.
+        #[arg(long)]
+        force: bool,
+        /// Allow a tag older than the running version (unsupported).
+        #[arg(long, requires = "tag")]
+        downgrade: bool,
+        /// Only download the ui on the manager; start no run.
+        #[arg(long, conflicts_with_all = ["tag", "downgrade", "no_wait"])]
+        ui_only: bool,
+        /// Start the run and return instead of following it.
+        #[arg(long)]
+        no_wait: bool,
+        /// Manager to ask. Defaults to any manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// Print or install shell completions.
     ///
     /// Completions are dynamic: past the fixed set of subcommands and flags,

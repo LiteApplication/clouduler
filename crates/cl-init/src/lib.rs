@@ -758,9 +758,13 @@ async fn setup_ui<R: BufRead, W: Write>(
     node_name: &str,
 ) -> Result<()> {
     let ui_dir_override = std::env::var_os("CL_UI_DIR").is_some_and(|d| !d.is_empty());
-    if let Some(line) =
-        ui_download::download_ui(&ui_download::GithubFetcher, config, node_name, ui_dir_override)
-            .await
+    if let Some(line) = ui_download::download_ui(
+        &ui_download::GithubFetcher,
+        config,
+        node_name,
+        ui_dir_override,
+    )
+    .await
     {
         prompt.say(&line)?;
     }

@@ -80,6 +80,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             arch: Default::default(),
             binary_hash: Default::default(),
             ui_hash: Default::default(),
+            started_at: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),

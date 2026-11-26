@@ -47,6 +47,12 @@ binary_hash: string,
  */
 ui_hash: string | null, 
 /**
+ * Unix seconds this node's daemon process started, self-reported; 0 until reported. A forced
+ * self-update reinstall confirms a restart by this moving forward, since the binary hash
+ * does not change.
+ */
+started_at: number, 
+/**
  * X25519 public key (base64), self-reported once the local keypair exists, so a
  * key holder can wrap the cluster secret key for this node (`wrapped_keys`).
  */

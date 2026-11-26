@@ -1276,6 +1276,7 @@
         "open_ports": {},
         "role": "manager",
         "rpc_addr": "<volatile>",
+        "started_at": 0,
         "ui_hash": null,
         "version": ""
       },
@@ -1306,6 +1307,7 @@
         "open_ports": {},
         "role": "manager",
         "rpc_addr": "<volatile>",
+        "started_at": 0,
         "ui_hash": null,
         "version": ""
       }

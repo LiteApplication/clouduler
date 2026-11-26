@@ -173,6 +173,8 @@ export interface NodeState {
   binary_hash: string;
   /** Blake3 hex of the ui bundle this node serves; null on a worker or a node with no ui staged. */
   ui_hash?: string | null;
+  /** Unix seconds this node's daemon started; 0 until it has reported. */
+  started_at?: number;
   /** This node's X25519 public key, base64. Null until it has reported in at
    *  least once. Lets a key-holding node deliver the cluster key to it
    *  without the plaintext ever crossing the network. */

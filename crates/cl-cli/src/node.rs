@@ -59,6 +59,7 @@ pub async fn add(
             arch: String::new(),
             binary_hash: String::new(),
             ui_hash: Default::default(),
+            started_at: Default::default(),
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),

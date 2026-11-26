@@ -462,6 +462,27 @@ async fn main() -> Result<()> {
         Command::Update { instances, via } => {
             cl_cli::update_cli::apply(&cfg, instances, via.as_deref()).await
         }
+        Command::SelfUpdate {
+            tag,
+            force,
+            downgrade,
+            ui_only,
+            no_wait,
+            via,
+        } => {
+            cl_cli::self_update_cli::run(
+                &cfg,
+                via.as_deref(),
+                cl_cli::self_update_cli::Options {
+                    tag,
+                    force,
+                    downgrade,
+                    ui_only,
+                    no_wait,
+                },
+            )
+            .await
+        }
     }
 }
 
