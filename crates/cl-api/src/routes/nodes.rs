@@ -454,6 +454,7 @@ async fn add(
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),
+            open_all_ports: Default::default(),
             arch: String::new(),
             binary_hash: String::new(),
             ui_hash: Default::default(),

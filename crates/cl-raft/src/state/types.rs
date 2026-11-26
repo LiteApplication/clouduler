@@ -45,6 +45,10 @@ pub struct NodeState {
     /// `x-clouduler.expose` port is only placed on a node listing its `(protocol, port)`.
     #[serde(default)]
     pub open_ports: BTreeMap<String, BTreeSet<(PortProtocol, u16)>>,
+    /// Networks on which this node declares every port open (`open_all`); `open_ports` is
+    /// not consulted for them.
+    #[serde(default)]
+    pub open_all_ports: BTreeSet<String>,
     /// `std::env::consts::ARCH` of the running binary; groups nodes by native build for self-update.
     #[serde(default)]
     pub arch: String,
@@ -180,9 +184,11 @@ impl NodeState {
     }
 
     pub fn opens_port(&self, network: &str, protocol: PortProtocol, port: u16) -> bool {
-        self.open_ports
-            .get(network)
-            .is_some_and(|ports| ports.contains(&(protocol, port)))
+        self.open_all_ports.contains(network)
+            || self
+                .open_ports
+                .get(network)
+                .is_some_and(|ports| ports.contains(&(protocol, port)))
     }
 
     pub fn schedulable(&self) -> bool {

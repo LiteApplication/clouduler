@@ -1856,6 +1856,12 @@ fn to_state(
                 ))
             })
             .collect(),
+        open_all_ports: node
+            .network
+            .iter()
+            .filter(|(_, addr)| addr.opens_all_ports())
+            .map(|(name, _)| name.clone())
+            .collect(),
         // Not derived from this process's own environment: this runs on
         // whichever node currently leads, so `std::env::consts::ARCH` and the
         // local binary would describe the leader, not `name`. Left as

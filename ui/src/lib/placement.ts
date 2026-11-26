@@ -178,6 +178,7 @@ export function buildPlacementRows(
       id: `port: ${p.published}/${p.protocol} open on ${p.network}`,
       label: `port: ${p.published}/${p.protocol} open on ${p.network}`,
       ok: (n) =>
+        (cluster.nodes[n]?.open_all_ports ?? []).includes(p.network) ||
         (cluster.nodes[n]?.open_ports[p.network] ?? []).some(([proto, port]) => proto === p.protocol && port === p.published),
       reason: () => 'port closed',
     });

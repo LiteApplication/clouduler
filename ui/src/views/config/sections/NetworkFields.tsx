@@ -268,12 +268,18 @@ export function OpenPortsEditor({
   onChange,
   disabled,
   withTarget = false,
+  openAll,
+  onOpenAllChange,
 }: {
   idPrefix: string;
   hint: string;
   ports: ContainerOpenPort[];
   onChange: (ports: ContainerOpenPort[]) => void;
   disabled: boolean;
+  /** Every port is open: the list is hidden and not consulted. Only shown when
+   *  `onOpenAllChange` is given. */
+  openAll?: boolean;
+  onOpenAllChange?: (openAll: boolean) => void;
   /** Also edit `target_port` (the host port the traffic is forwarded to). */
   withTarget?: boolean;
 }) {
@@ -295,8 +301,35 @@ export function OpenPortsEditor({
     onChange(ports.filter((p) => !(p.port === target.port && p.protocol === target.protocol)));
   };
 
+  if (onOpenAllChange && openAll) {
+    return (
+      <div className="field">
+        <CheckboxField
+          id={`${idPrefix}-open-all`}
+          label="All ports open"
+          value
+          onChange={onOpenAllChange}
+          hint="The port list below is ignored while this is on."
+          help="Every port and protocol counts as open on this node, so a raw port a stack exposes on this network can be placed here regardless of the list. Turn it off to list ports individually."
+          disabled={disabled}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="field">
+      {onOpenAllChange && (
+        <CheckboxField
+          id={`${idPrefix}-open-all`}
+          label="All ports open"
+          value={false}
+          onChange={onOpenAllChange}
+          hint="Treat every port and protocol as open on this node."
+          help="Every port and protocol counts as open on this node, so a raw port a stack exposes on this network can be placed here regardless of the list. Turn it off to list ports individually."
+          disabled={disabled}
+        />
+      )}
       <div className="fld__head">
         <label>Open ports</label>
         <HelpTip label="Open ports">{hint}</HelpTip>
@@ -576,7 +609,9 @@ export function WireguardAddressField({
           idPrefix={`node-${nodeName}-${netName}`}
           hint="Ports the tunnel's far end forwards back to this node, e.g. a VPN provider's port forwarding feature. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
           ports={addr.open_ports}
-          onChange={(open_ports) => onChange({ interface: addr.interface, open_ports })}
+          onChange={(open_ports) => onChange({ ...addr, open_ports })}
+          openAll={!!addr.open_all}
+          onOpenAllChange={(open_all) => onChange({ ...addr, open_all })}
           disabled={disabled}
         />
         {!disabled && (

@@ -34,6 +34,11 @@ networks: Array<string>,
  */
 open_ports: { [key in string]: Array<[PortProtocol, number]> }, 
 /**
+ * Networks on which this node declares every port open (`open_all`); `open_ports` is
+ * not consulted for them.
+ */
+open_all_ports: Array<string>, 
+/**
  * `std::env::consts::ARCH` of the running binary; groups nodes by native build for self-update.
  */
 arch: string, 

@@ -79,6 +79,7 @@ pub(super) fn node(name: &str, drives: &[&str]) -> NodeState {
         egress_networks: Default::default(),
         networks: Default::default(),
         open_ports: Default::default(),
+        open_all_ports: Default::default(),
         arch: Default::default(),
         binary_hash: Default::default(),
         ui_hash: Default::default(),

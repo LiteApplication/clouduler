@@ -615,6 +615,7 @@ export function buildHttpRoutes(): HttpRoute[] {
         egress_networks: [],
         networks: [],
         open_ports: {},
+        open_all_ports: [],
         arch: 'x86_64',
         binary_hash: '',
         ui_hash: null,

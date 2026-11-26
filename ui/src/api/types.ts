@@ -166,6 +166,9 @@ export interface NodeState {
   /** network name -> ports this node has open on it (public router
    *  forwarding, or a wireguard tunnel's far end forwarding a port back). */
   open_ports: Record<string, [PortProtocol, number][]>;
+  /** Networks on which this node declares every port open (`open_all`); the
+   *  server always sends it, optional here for older fixtures. */
+  open_all_ports?: string[];
   /** std::env::consts::ARCH of the running binary, e.g. "x86_64". Empty until
    *  the node has reported in at least once since this field was added. */
   arch: string;
@@ -791,6 +794,9 @@ export interface PublicAddress {
   ipv6: string | null;
   domain: string | null;
   open_ports: OpenPort[];
+  /** Every port is open on this node, so `open_ports` is not consulted.
+   *  Absent when off — the server omits the key. */
+  open_all?: boolean;
 }
 
 /** A node's address on an unmanaged private network that also declares open
@@ -798,6 +804,8 @@ export interface PublicAddress {
 export interface PrivateAddress {
   ip: string;
   open_ports: OpenPort[];
+  /** Every port is open on this node; `open_ports` is not consulted. Absent when off. */
+  open_all?: boolean;
 }
 
 /** An egress or wireguard network's host interface address. Serializes as a
@@ -805,6 +813,9 @@ export interface PrivateAddress {
 export interface InterfaceAddress {
   interface: string;
   open_ports: OpenPort[];
+  /** Every port is open on this node, so `open_ports` is not consulted.
+   *  Absent when off — the server omits the key. */
+  open_all?: boolean;
   /** Absent when unset — the server omits the key entirely rather than
    *  sending `null`. */
   fallback?: EgressFallback | null;

@@ -161,6 +161,7 @@ export class ScenarioBuilder {
         egress_networks: [],
         networks: [net, ...Object.keys(n.extraNetworks ?? {})],
         open_ports: {},
+        open_all_ports: [],
         arch: 'x86_64',
         binary_hash: fakeDigest(`bin-${n.name}`).slice(7, 39),
         ui_hash: null,

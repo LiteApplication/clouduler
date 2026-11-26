@@ -34,6 +34,22 @@ describe('placement rows', () => {
   });
 
 
+  it('passes a port row on a node that declares open_all for the network', () => {
+    const open = {
+      nodes: { a: node('a', { open_all_ports: ['wan'] }), b: node('b', { open_ports: { wan: [['tcp', 25]] } }), c: node('c') },
+      unreachable: [], configs: {}, secrets: {}, wrapped_keys: { a: {}, b: {}, c: {} },
+    } as unknown as ClusterState;
+    const gated = { ...ctx, portGatedNetworks: new Set(['wan']) };
+    const rows = buildPlacementRows(reqs({ bound_ports: [{ network: 'wan', published: 53, protocol: 'udp' }] }), open, gated);
+    const row = rows.find((r) => r.id.startsWith('port:'))!;
+    expect(row.ok('a')).toBe(true);
+    expect(row.ok('b')).toBe(false);
+    expect(row.ok('c')).toBe(false);
+    // open_all is per network.
+    const other = buildPlacementRows(reqs({ bound_ports: [{ network: 'lan', published: 53, protocol: 'udp' }] }), open, { ...ctx, portGatedNetworks: new Set(['lan']) });
+    expect(other.find((r) => r.id.startsWith('port:'))!.ok('a')).toBe(false);
+  });
+
   it('parses swarm constraints with != taking precedence', () => {
     expect(parseConstraint('node.labels.fast!=true')).toEqual({ key: 'node.labels.fast', equal: false, value: 'true' });
     expect(parseConstraint('nonsense')).toBeNull();

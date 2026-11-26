@@ -670,6 +670,7 @@ mod tests {
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),
+            open_all_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
             ui_hash: Default::default(),
@@ -1200,6 +1201,32 @@ mod tests {
         assert!(rejected
             .iter()
             .any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
+    }
+
+    #[test]
+    fn open_all_ports_pass_any_bound_port_on_that_network() {
+        let mut state = cluster();
+        state.nodes.get_mut("n1").unwrap().open_all_ports = ["wan".to_string()].into();
+        let mut item = desired("mail", 0);
+        item.bound_ports = [
+            ("wan".to_string(), cl_raft::state::PortProtocol::Tcp, 25),
+            ("wan".to_string(), cl_raft::state::PortProtocol::Udp, 53),
+        ]
+        .into();
+
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].name, "n1");
+        assert!(rejected
+            .iter()
+            .any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
+
+        // Only on the network that declared it.
+        item.bound_ports = [("other".to_string(), cl_raft::state::PortProtocol::Tcp, 25)].into();
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert!(eligible.iter().all(|n| n.name != "n1"));
     }
 
     #[test]

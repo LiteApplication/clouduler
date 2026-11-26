@@ -221,6 +221,48 @@ fn wireguard_interface_open_ports_round_trip_and_stay_bare_when_empty() {
 }
 
 #[test]
+fn open_all_round_trips_defaults_off_and_is_skipped_when_off() {
+    let cfg = parse(&[
+        (
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard }",
+        ),
+        (
+            "      tailscale: 10.10.0.1",
+            "      tailscale: 10.10.0.1\n      vpn: { interface: wg0, open_all: true }",
+        ),
+    ])
+    .expect("valid");
+    let vpn = cfg.nodes["n1"].network["vpn"]
+        .as_interface_address()
+        .unwrap();
+    assert!(vpn.open_all && vpn.open_ports.is_empty());
+    assert!(cfg.nodes["n1"].network["vpn"].opens_all_ports());
+    let yaml = serde_yaml::to_string(&cfg).unwrap();
+    let again = ClusterConfig::parse(&yaml).expect("round trip");
+    assert_eq!(
+        again.nodes["n1"].network["vpn"],
+        cfg.nodes["n1"].network["vpn"]
+    );
+    assert!(yaml.contains("open_all: true"));
+    // Off by default and never written when off: a bare interface stays bare.
+    let bare = serde_yaml::to_string(&crate::cluster::NodeAddress::Interface(
+        crate::cluster::InterfaceAddress::new("wg0"),
+    ))
+    .unwrap();
+    assert_eq!(bare.trim(), "wg0");
+    assert!(!cfg.nodes["n2"].network["tailscale"].opens_all_ports());
+    assert!(!yaml.contains("open_all: false"));
+
+    let public: crate::cluster::PublicAddress = serde_yaml::from_str("ipv4: 203.0.113.9").unwrap();
+    assert!(!public.open_all);
+    assert!(!serde_yaml::to_string(&public).unwrap().contains("open_all"));
+    let public: crate::cluster::PublicAddress =
+        serde_yaml::from_str("ipv4: 203.0.113.9\nopen_all: true").unwrap();
+    assert!(public.open_all);
+}
+
+#[test]
 fn egress_fallback_round_trips_and_is_rejected_when_it_matches_the_primary() {
     let cfg = parse(&[
         (

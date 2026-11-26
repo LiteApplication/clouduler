@@ -18,7 +18,9 @@ function netSummary(addr: NodeAddress | undefined): { address: string; ports: st
   if (addr === undefined) return { address: '', ports: '' };
   if (addr === null) return { address: 'access only', ports: '' };
   if (typeof addr === 'string') return { address: addr, ports: '' };
-  const ports = (addr.open_ports ?? []).map((p) => `${p.port}/${p.protocol}`).join(', ');
+  const ports = addr.open_all
+    ? 'all'
+    : (addr.open_ports ?? []).map((p) => `${p.port}/${p.protocol}`).join(', ');
   if ('ip' in addr) return { address: addr.ip, ports };
   if ('interface' in addr) {
     const fb = addr.fallback ? ` (backup ${addr.fallback})` : '';
@@ -126,6 +128,7 @@ export function NodeCard({
               ? {
                   interface: addr.interface,
                   open_ports: addr.open_ports ?? [],
+                  ...(addr.open_all ? { open_all: true } : {}),
                 }
               : null;
         return (
@@ -134,7 +137,7 @@ export function NodeCard({
             nodeName={name}
             netName={netName}
             addr={wg}
-            onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports } : null)}
+            onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports, ...(v.open_all ? { open_all: true } : {}) } : null)}
             onCancel={
               wg === null ? () => setPendingWireguard((prev) => prev.filter((n) => n !== netName)) : undefined
             }
@@ -150,9 +153,12 @@ export function NodeCard({
             ipv6: pub.ipv6 ?? null,
             domain: pub.domain ?? null,
             open_ports: pub.open_ports ?? [],
+            ...(pub.open_all ? { open_all: true } : {}),
             ...patch,
           };
-          const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain && merged.open_ports.length === 0;
+          if (!merged.open_all) delete merged.open_all;
+          const empty =
+            !merged.ipv4 && !merged.ipv6 && !merged.domain && merged.open_ports.length === 0 && !merged.open_all;
           setAddress(netName, empty ? null : merged);
         };
         return (
@@ -202,6 +208,8 @@ export function NodeCard({
               hint="Ports this node's router forwards to it here. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
               ports={pub.open_ports ?? []}
               onChange={(open_ports) => update({ open_ports })}
+              openAll={!!pub.open_all}
+              onOpenAllChange={(open_all) => update({ open_all })}
               disabled={disabled}
             />
           </div>
@@ -215,6 +223,7 @@ export function NodeCard({
               ? {
                   interface: addr.interface,
                   open_ports: addr.open_ports ?? [],
+                  ...(addr.open_all ? { open_all: true } : {}),
                   fallback: addr.fallback ?? null,
                 }
               : { interface: '', open_ports: [], fallback: null };

@@ -242,7 +242,7 @@ export function NodeDetail() {
 export function describeAddress(addr: NodeAddress): string {
   if (addr === null) return '(no address, access only)';
   if (typeof addr === 'string') return addr;
-  const ports = addr.open_ports.map((p) => `${p.port}/${p.protocol}`).join(', ');
+  const ports = addr.open_all ? 'all ports' : addr.open_ports.map((p) => `${p.port}/${p.protocol}`).join(', ');
   if ('ip' in addr) return ports ? `${addr.ip} (open: ${ports})` : addr.ip;
   if ('interface' in addr) return ports ? `${addr.interface} (open: ${ports})` : addr.interface;
   const parts = [addr.ipv4, addr.ipv6, addr.domain].filter((v): v is string => !!v);

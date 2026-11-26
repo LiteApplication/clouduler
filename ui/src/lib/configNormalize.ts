@@ -22,13 +22,14 @@ function normalizeAddress(addr: NodeAddress): NodeAddress {
     return { ip: addr.ip, open_ports: addr.open_ports ?? [] };
   }
   if ('interface' in addr) {
-    return { interface: addr.interface, open_ports: addr.open_ports ?? [] };
+    return { interface: addr.interface, open_ports: addr.open_ports ?? [], open_all: !!addr.open_all };
   }
   return {
     ipv4: nullable(addr.ipv4),
     ipv6: nullable(addr.ipv6),
     domain: nullable(addr.domain),
     open_ports: addr.open_ports ?? [],
+    open_all: !!addr.open_all,
   };
 }
 

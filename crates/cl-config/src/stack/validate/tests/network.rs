@@ -277,6 +277,18 @@ services:
         }),
     );
     stack(raw).validate(&cfg).expect("a node has the port open");
+
+    // `open_all` opens every port, so no list is needed.
+    let mut all = cluster();
+    all.nodes.get_mut("n1").unwrap().network.insert(
+        "wan".to_string(),
+        crate::cluster::NodeAddress::Public(crate::cluster::PublicAddress {
+            ipv4: Some("203.0.113.9".parse().unwrap()),
+            open_all: true,
+            ..Default::default()
+        }),
+    );
+    stack(raw).validate(&all).expect("open_all opens port 25");
 }
 
 #[test]
@@ -319,6 +331,16 @@ services:
     stack(raw)
         .validate(&cfg)
         .expect("n1's tunnel has the port open");
+
+    let mut tunnel = crate::cluster::InterfaceAddress::new("wg-vpn");
+    tunnel.open_all = true;
+    cfg.nodes.get_mut("n1").unwrap().network.insert(
+        "vpn".to_string(),
+        crate::cluster::NodeAddress::Interface(tunnel),
+    );
+    stack(raw)
+        .validate(&cfg)
+        .expect("open_all opens every tunnel port");
 }
 
 fn net_stack(allowed: &str) -> StackFile {

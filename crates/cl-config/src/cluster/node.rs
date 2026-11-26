@@ -324,7 +324,8 @@ pub struct PublicAddress {
 }
 
 impl NodeAddress {
-    /// Whether this address declares every port open.
+    /// Whether this address declares every port open (`open_all`), on a public
+    /// network's router, an egress or wireguard tunnel, or a private address.
     pub fn opens_all_ports(&self) -> bool {
         match self {
             NodeAddress::Public(p) => p.open_all,
