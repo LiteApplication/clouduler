@@ -12,6 +12,6 @@ pub use deliver::{deliver, DeliveryError, DestinationSecrets};
 pub use message::{AlertMessage, Body, Link, Notification, Phase};
 pub use settings::{
     AlertSettings, Destination, DestinationKind, DiscordNotify, DiscordNotifyLevels,
-    DiscordOptions, DiscordStyle, EventOverride, MatrixOptions, MatrixStyle, Route, Severity, SmtpSecurity,
-    SmtpSettings, Thresholds,
+    DiscordOptions, DiscordStyle, EventOverride, MatrixOptions, MatrixStyle, Route, Severity,
+    SmtpSecurity, SmtpSettings, Thresholds,
 };

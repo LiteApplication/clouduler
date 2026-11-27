@@ -1179,6 +1179,53 @@ pub(crate) fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> 
         .unwrap_or(default)
 }
 
+/// Container names of the `instances` assigned to `node_name`.
+pub(crate) fn local_container_names(
+    state: &ClusterState,
+    node_name: &str,
+    instances: &[InstanceId],
+) -> Vec<String> {
+    state
+        .assignments
+        .values()
+        .filter(|a| a.node == node_name && instances.contains(&a.instance))
+        .map(|a| a.instance.container_name())
+        .collect()
+}
+
+/// The `instances` not in `local` whose own node has not reported them stopped (no report
+/// counts as still running).
+pub(crate) fn remote_not_stopped(
+    state: &ClusterState,
+    instances: &[InstanceId],
+    local: &[String],
+) -> Vec<String> {
+    instances
+        .iter()
+        .filter(|i| !local.contains(&i.container_name()))
+        .filter(|i| !matches!(state.container_status.get(i), Some(s) if !s.running))
+        .map(|i| i.container_name())
+        .collect()
+}
+
+/// Errors naming `not_stopped` once `deadline` has passed since `start`; otherwise returns the
+/// time elapsed so far.
+pub(crate) fn check_stop_deadline(
+    not_stopped: &[String],
+    start: tokio::time::Instant,
+    deadline: Duration,
+) -> Result<Duration> {
+    let elapsed = start.elapsed();
+    if elapsed >= deadline {
+        bail!(
+            "could not confirm {} stopped within {}s",
+            not_stopped.join(", "),
+            deadline.as_secs()
+        );
+    }
+    Ok(elapsed)
+}
+
 /// Polls local docker for instances assigned to `node_name`, and the cluster's
 /// self-reported `container_status` for those assigned elsewhere.
 /// Fails if docker cannot be reached or anything is not confirmed stopped at
@@ -1196,12 +1243,7 @@ pub(crate) async fn wait_for_stopped(
         match client.state().await {
             Err(e) => not_stopped.push(format!("(cluster state unavailable: {e})")),
             Ok(state) => {
-                let local: Vec<String> = state
-                    .assignments
-                    .values()
-                    .filter(|a| a.node == node_name && instances.contains(&a.instance))
-                    .map(|a| a.instance.container_name())
-                    .collect();
+                let local = local_container_names(&state, node_name, instances);
                 if !local.is_empty() && docker.is_none() {
                     docker = Some(cl_docker::Docker::connect().map_err(|e| {
                         anyhow!("cannot reach docker to confirm the containers stopped: {e}")
@@ -1216,28 +1258,13 @@ pub(crate) async fn wait_for_stopped(
                         }
                     }
                 }
-                for instance in instances {
-                    if local.contains(&instance.container_name()) {
-                        continue;
-                    }
-                    match state.container_status.get(instance) {
-                        Some(status) if !status.running => {}
-                        _ => not_stopped.push(instance.container_name()),
-                    }
-                }
+                not_stopped.extend(remote_not_stopped(&state, instances, &local));
             }
         }
         if not_stopped.is_empty() {
             return Ok(());
         }
-        let elapsed = start.elapsed();
-        if elapsed >= deadline {
-            bail!(
-                "could not confirm {} stopped within {}s",
-                not_stopped.join(", "),
-                deadline.as_secs()
-            );
-        }
+        let elapsed = check_stop_deadline(&not_stopped, start, deadline)?;
         tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
     }
 }

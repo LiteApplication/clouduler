@@ -209,7 +209,7 @@ impl GitBackup {
     /// remote has no such branch yet.
     pub fn fetch_remote_tip(&self, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         let mut remote = self.repo.find_remote("origin")?;
-        let mut callbacks = self.key_callbacks(private_key_pem);
+        let callbacks = self.key_callbacks(private_key_pem);
 
         let mut fetch_options = git2::FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);

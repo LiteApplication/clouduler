@@ -29,6 +29,9 @@
 //! still in flight then yields a partial tree for that run; the next scheduled
 //! run (or the stale-run watchdog) corrects it.
 
+use crate::backup_restore::{
+    check_stop_deadline, local_container_names, max_stop_grace, remote_not_stopped,
+};
 use crate::supervisor::log_err;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -574,19 +577,6 @@ fn resolve_stop_containers(
     resolved.is_empty() || resolved.into_iter().any(|b| b)
 }
 
-fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
-    let default = cl_sched::run::configured_stop_grace(state);
-    instances
-        .iter()
-        .filter_map(|i| {
-            let stack = state.stacks.get(&i.stack)?;
-            let file = StackFile::parse(&stack.spec).ok()?;
-            file.services.get(&i.service)?.stop_grace_period
-        })
-        .max()
-        .unwrap_or(default)
-}
-
 async fn set_desired(
     cluster: &Arc<ClusterNode>,
     instances: &[InstanceId],
@@ -621,12 +611,7 @@ async fn wait_for_stopped(
     let start = tokio::time::Instant::now();
     loop {
         let state = cluster.snapshot().await;
-        let local: Vec<String> = state
-            .assignments
-            .values()
-            .filter(|a| a.node == node_name && instances.contains(&a.instance))
-            .map(|a| a.instance.container_name())
-            .collect();
+        let local = local_container_names(&state, node_name, instances);
 
         let mut not_stopped: Vec<String> = Vec::new();
         match docker.get().await {
@@ -642,27 +627,12 @@ async fn wait_for_stopped(
             None => not_stopped.extend(local.iter().cloned()),
         }
 
-        for instance in instances {
-            if local.contains(&instance.container_name()) {
-                continue;
-            }
-            match state.container_status.get(instance) {
-                Some(status) if !status.running => {}
-                _ => not_stopped.push(instance.container_name()),
-            }
-        }
+        not_stopped.extend(remote_not_stopped(&state, instances, &local));
 
         if not_stopped.is_empty() {
             return Ok(());
         }
-        let elapsed = start.elapsed();
-        if elapsed >= deadline {
-            bail!(
-                "could not confirm {} stopped within {}s",
-                not_stopped.join(", "),
-                deadline.as_secs()
-            );
-        }
+        let elapsed = check_stop_deadline(&not_stopped, start, deadline)?;
         tokio::time::sleep(Duration::from_secs(1).min(deadline - elapsed)).await;
     }
 }
