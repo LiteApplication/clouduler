@@ -39,6 +39,14 @@ impl ImageCache {
             .cloned()
     }
 
+    pub(crate) fn remove(&self, id: &str) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     pub(crate) fn insert(&self, id: &str, info: std::sync::Arc<bollard::models::ImageInspect>) {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= IMAGE_CACHE_LIMIT {
@@ -56,6 +64,11 @@ impl Docker {
             inner,
             image_cache: ImageCache::default(),
         })
+    }
+
+    /// Forget every cached image inspection, so the next lookup asks docker again.
+    pub fn clear_image_cache(&self) {
+        self.image_cache.clear();
     }
 
     /// Health check, for failing fast at startup on a dead daemon.
@@ -93,6 +106,18 @@ mod tests {
         let hit = cache.get("sha256:a").expect("cached");
         assert_eq!(hit.id.as_deref(), Some("sha256:a"));
         assert!(cache.get("sha256:b").is_none());
+    }
+
+    #[test]
+    fn image_cache_remove_and_clear() {
+        let cache = ImageCache::default();
+        let info = std::sync::Arc::new(bollard::models::ImageInspect::default());
+        cache.insert("a", info.clone());
+        cache.insert("b", info);
+        cache.remove("a");
+        assert!(cache.get("a").is_none() && cache.get("b").is_some());
+        cache.clear();
+        assert!(cache.get("b").is_none());
     }
 
     #[tokio::test]

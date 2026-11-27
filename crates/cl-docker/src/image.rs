@@ -275,7 +275,21 @@ impl Docker {
         while let Some(item) = stream.next().await {
             item.map_err(classify)?;
         }
-        self.resolve_digest(image).await?.ok_or_else(|| {
+        // A pull can add repo digests to an image id we already inspected, so drop that
+        // id's cached inspection: only the pulled image, not the whole cache.
+        let digest = match self.inner.inspect_image(image).await {
+            Ok(info) => {
+                if let Some(id) = info.id.as_deref() {
+                    self.image_cache.remove(id);
+                }
+                extract_digest(&info)
+            }
+            Err(e) => match classify(e) {
+                DockerError::NotFound(_) => None,
+                other => return Err(other),
+            },
+        };
+        digest.ok_or_else(|| {
             DockerError::NotFound(format!("image not found locally after pull: {image}"))
         })
     }

@@ -40,10 +40,63 @@ pub fn router() -> Router<AppState> {
         .route("/api/updates/apply", post(apply))
         // Node-to-node only: one node's answer about its own containers.
         .route("/api/updates/internal/scan", get(internal_scan))
+        .route(
+            "/api/updates/internal/clear-cache",
+            get(internal_clear_cache),
+        )
         .route("/api/updates/internal/apply", post(apply_internal))
 }
 
 const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
+const INTERNAL_CLEAR_CACHE_PATH: &str = "/api/updates/internal/clear-cache";
+
+/// Drop every node's cached docker image inspections, so the next scan reads fresh digests.
+/// A node that cannot be reached keeps its cache; it is only an optimisation.
+async fn clear_image_caches(state: &AppState) {
+    let nodes: Vec<String> = state
+        .cluster
+        .snapshot()
+        .await
+        .nodes
+        .keys()
+        .cloned()
+        .collect();
+    futures::future::join_all(nodes.iter().map(|node| async move {
+        if *node == state.node_name {
+            if let Some(docker) = state.docker.get().await {
+                docker.clear_image_cache();
+            }
+            return;
+        }
+        if let Err(e) = internal_peer::fetch_json_within::<serde_json::Value>(
+            state,
+            node,
+            INTERNAL_CLEAR_CACHE_PATH,
+            SCAN_TIMEOUT,
+        )
+        .await
+        {
+            warn!(%node, error = %e, "could not clear a node's image cache");
+        }
+    }))
+    .await;
+}
+
+async fn internal_clear_cache(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    if let Some(docker) = state.docker.get().await {
+        docker.clear_image_cache();
+    }
+    Json(serde_json::Value::Null)
+}
+
+/// A manual refresh: forget cached local image data on every node, then ask the registries.
+pub(crate) async fn refresh_now(state: &AppState) {
+    clear_image_caches(state).await;
+    check_images(state).await;
+}
 
 /// The reference the stack file declares (`nginx:1.25`), not `ContainerState::image`, which
 /// once pinned is `repo@sha256:...`. Asking the registry about a digest reference is a no-op
@@ -135,7 +188,7 @@ async fn refresh(
     let started = !recent && !CHECKING.load(std::sync::atomic::Ordering::SeqCst);
     if started {
         let worker = state.clone();
-        tokio::spawn(async move { check_images(&worker).await });
+        tokio::spawn(async move { refresh_now(&worker).await });
     }
     (StatusCode::ACCEPTED, Json(Refresh { started }))
 }

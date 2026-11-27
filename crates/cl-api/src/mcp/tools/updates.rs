@@ -28,7 +28,7 @@ fn describe(behind: &[updates::BehindInstance]) -> String {
 
 /// Cluster-wide: a registry lookup is shared by every instance using the image, so it is not per stack.
 pub(super) async fn refresh_updates(ctx: &Ctx, _args: NoArgs) -> ToolResult {
-    updates::check_images(&ctx.state).await;
+    updates::refresh_now(&ctx.state).await;
     let behind = updates::behind(&ctx.state).await;
     if behind.is_empty() {
         return Ok("registries checked; no instance is behind its image".to_string());
