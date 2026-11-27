@@ -12,6 +12,7 @@
 mod error;
 pub mod internal_auth;
 mod key;
+mod keyfile;
 mod keypair;
 mod seal;
 pub mod stream_auth;

@@ -5,8 +5,8 @@ use std::path::Path;
 use base64::Engine;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::error::{Result, SecretError};
-
+use crate::error::Result;
+use crate::keyfile;
 pub const PUBLIC_KEY_BYTES: usize = 32;
 
 /// A node's own asymmetric keypair. Unlike [`crate::ClusterKey`], every node
@@ -41,87 +41,23 @@ impl NodeKeypair {
 
     /// Read a keypair file. Same format as `ClusterKey`: base64 on one line.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        check_permissions(path)?;
-
-        let raw = std::fs::read_to_string(path).map_err(|source| SecretError::ReadKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::parse(raw.trim()).map_err(|reason| SecretError::BadKey {
-            path: path.to_path_buf(),
-            reason,
-        })
+        keyfile::load(path.as_ref(), Self::parse)
     }
 
     /// Load the keypair, or create one if missing. Returns whether one was
     /// created. Unlike `ClusterKey`, creation is never refused.
     pub fn load_or_create(path: impl AsRef<Path>) -> Result<(Self, bool)> {
-        let path = path.as_ref();
-        if path.exists() {
-            return Ok((Self::load(path)?, false));
-        }
-
-        let keypair = Self::generate();
-        match keypair.save(path) {
-            Ok(()) => Ok((keypair, true)),
-            // Someone else created it between the check and the write —
-            // adopt theirs, same reasoning as ClusterKey::load_or_create.
-            Err(SecretError::WriteKey { source, .. })
-                if source.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                Ok((Self::load(path)?, false))
-            }
-            Err(e) => Err(e),
-        }
+        keyfile::load_or_create(
+            path.as_ref(),
+            |p| Self::load(p),
+            Self::generate,
+            |key, p| key.save(p),
+        )
     }
 
     /// Write the keypair out owner read/write, group read.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| SecretError::WriteKey {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
-
-        // Atomic create via tmp + hard_link, same as ClusterKey::save.
-        let temp = path.with_extension(format!("tmp.{}", std::process::id()));
-        let result = self.write_temp(&temp).and_then(|()| {
-            std::fs::hard_link(&temp, path).map_err(|source| SecretError::WriteKey {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-
-        let _ = std::fs::remove_file(&temp);
-        result
-    }
-
-    fn write_temp(&self, temp: &Path) -> Result<()> {
-        use std::io::Write;
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o640);
-        }
-
-        let mut file = options.open(temp).map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })?;
-        writeln!(file, "{}", self.encode()).map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })?;
-        file.sync_all().map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })
+        keyfile::save(path.as_ref(), &self.encode())
     }
 
     /// Base64 of the private scalar, for the keypair file.
@@ -153,29 +89,10 @@ impl NodeKeypair {
     }
 }
 
-/// Same permission check as `ClusterKey`, including the group-read exception.
-fn check_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|source| SecretError::ReadKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        const ALLOWED_GROUP_READ: u32 = 0o040;
-        if meta.permissions().mode() & 0o077 & !ALLOWED_GROUP_READ != 0 {
-            return Err(SecretError::KeyPermissions {
-                path: path.to_path_buf(),
-            });
-        }
-    }
-    let _ = path;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SecretError;
 
     #[test]
     fn keypairs_round_trip_through_a_file() {

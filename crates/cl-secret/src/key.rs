@@ -6,6 +6,7 @@ use base64::Engine;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{Result, SecretError};
+use crate::keyfile;
 
 pub const KEY_BYTES: usize = 32;
 
@@ -47,17 +48,7 @@ impl ClusterKey {
     /// Read a key file. The file holds the key base64 encoded on one line, so
     /// it can be pasted into the web ui when rebuilding a cluster.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        check_permissions(path)?;
-
-        let raw = std::fs::read_to_string(path).map_err(|source| SecretError::ReadKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::parse(raw.trim()).map_err(|reason| SecretError::BadKey {
-            path: path.to_path_buf(),
-            reason,
-        })
+        keyfile::load(path.as_ref(), Self::parse)
     }
 
     /// Load the key, or create one if the file is missing and we are allowed to.
@@ -66,83 +57,15 @@ impl ClusterKey {
     /// a key they now need to back up.
     pub fn load_or_create(path: impl AsRef<Path>, create: bool) -> Result<(Self, bool)> {
         let path = path.as_ref();
-        if path.exists() {
-            return Ok((Self::load(path)?, false));
-        }
-        if !create {
+        if !path.exists() && !create {
             return Err(SecretError::NoKey);
         }
-
-        let key = Self::generate();
-        match key.save(path) {
-            Ok(()) => Ok((key, true)),
-            // Someone else created it between the check and the write. Theirs
-            // is as good as ours, and taking it is the only safe move: two
-            // nodes each keeping their own key would seal secrets the other
-            // cannot open.
-            Err(SecretError::WriteKey { source, .. })
-                if source.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                Ok((Self::load(path)?, false))
-            }
-            Err(e) => Err(e),
-        }
+        keyfile::load_or_create(path, |p| Self::load(p), Self::generate, |key, p| key.save(p))
     }
 
     /// Write the key out with owner-only permissions.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| SecretError::WriteKey {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
-
-        // Write a complete temp file first, then link it into place. A reader
-        // arriving mid-write would otherwise see a truncated key and conclude
-        // the key is corrupt. The link fails if the target exists, which is
-        // what makes this an atomic create rather than an overwrite.
-        let temp = path.with_extension(format!("tmp.{}", std::process::id()));
-        let result = self.write_temp(&temp).and_then(|()| {
-            std::fs::hard_link(&temp, path).map_err(|source| SecretError::WriteKey {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-
-        let _ = std::fs::remove_file(&temp);
-        result
-    }
-
-    fn write_temp(&self, temp: &Path) -> Result<()> {
-        use std::io::Write;
-
-        // Owner read/write, group read, from creation: the `clouduler`
-        // system group needs to read this file for the cli to seal/unseal
-        // secrets as any group member, and there is no window where it is
-        // briefly wider than that since the mode is set at open time, not
-        // chmod'd on afterwards.
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o640);
-        }
-
-        let mut file = options.open(temp).map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })?;
-        writeln!(file, "{}", self.encode()).map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })?;
-        file.sync_all().map_err(|source| SecretError::WriteKey {
-            path: temp.to_path_buf(),
-            source,
-        })
+        keyfile::save(path.as_ref(), &self.encode())
     }
 
     /// Base64 form, for the key file and for showing the operator once.
@@ -181,28 +104,6 @@ impl ClusterKey {
         }
         format!("{acc:016x}")
     }
-}
-
-/// A key other users can read is a key you have to assume is gone, except group
-/// read, which is allowed so the `clouduler` group can run the cli. Group
-/// write/execute and any "other" bit are refused.
-fn check_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|source| SecretError::ReadKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        const ALLOWED_GROUP_READ: u32 = 0o040;
-        if meta.permissions().mode() & 0o077 & !ALLOWED_GROUP_READ != 0 {
-            return Err(SecretError::KeyPermissions {
-                path: path.to_path_buf(),
-            });
-        }
-    }
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]
