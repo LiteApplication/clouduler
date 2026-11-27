@@ -1097,27 +1097,17 @@ services:
     #[test]
     fn restart_policies_map_across() {
         let s = service("services:\n  web:\n    image: nginx\n    restart: always\n");
-        assert_eq!(
-            build_plain(&s, 1)
-            .restart_policy,
-            RestartPolicy::Always
-        );
+        assert_eq!(build_plain(&s, 1).restart_policy, RestartPolicy::Always);
 
         let s = service("services:\n  web:\n    image: nginx\n");
-        assert_eq!(
-            build_plain(&s, 1)
-            .restart_policy,
-            RestartPolicy::No
-        );
+        assert_eq!(build_plain(&s, 1).restart_policy, RestartPolicy::No);
     }
 
     #[test]
     fn a_disabled_healthcheck_produces_none() {
         let s =
             service("services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n");
-        assert!(build_plain(&s, 1)
-        .healthcheck
-        .is_none());
+        assert!(build_plain(&s, 1).healthcheck.is_none());
     }
 
     #[test]
@@ -1125,9 +1115,7 @@ services:
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      test: curl -f localhost\n      retries: 3\n",
         );
-        let check = build_plain(&s, 1)
-        .healthcheck
-        .expect("healthcheck");
+        let check = build_plain(&s, 1).healthcheck.expect("healthcheck");
         assert_eq!(check.test[0], "CMD-SHELL");
         assert_eq!(check.retries, Some(3));
     }

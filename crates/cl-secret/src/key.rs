@@ -60,7 +60,12 @@ impl ClusterKey {
         if !path.exists() && !create {
             return Err(SecretError::NoKey);
         }
-        keyfile::load_or_create(path, |p| Self::load(p), Self::generate, |key, p| key.save(p))
+        keyfile::load_or_create(
+            path,
+            |p| Self::load(p),
+            Self::generate,
+            |key, p| key.save(p),
+        )
     }
 
     /// Write the key out with owner-only permissions.
