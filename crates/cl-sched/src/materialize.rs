@@ -544,19 +544,24 @@ mod tests {
         InstanceId::new("site", "web", 0)
     }
 
+    /// A materializer under `dir` that holds a copy of `key`.
+    fn materializer_with_key(dir: &Path, key: &ClusterKey) -> Materializer {
+        Materializer::new(
+            dir,
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        )
+    }
+
     #[test]
     fn configs_and_secrets_land_on_disk_and_mount() {
         let dir = tempfile::tempdir().expect("tempdir");
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let out = m
             .prepare(
                 &state,
@@ -651,13 +656,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -686,13 +685,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let mut r = ObjectRef::new("db_password");
         r.uid = Some("hermes".into());
         let err = m.prepare(&state, &instance(), &[], &[r]).unwrap_err();
@@ -705,13 +698,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let out = m
             .prepare(
                 &state,
@@ -746,13 +733,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -770,13 +751,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         m.prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
         let other = InstanceId::new("site", "web", 1);
@@ -796,13 +771,7 @@ mod tests {
         let key = ClusterKey::generate();
         let mut state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let first = m
             .prepare(&state, &instance(), &[ObjectRef::new("nginx_conf")], &[])
             .expect("prepare");
@@ -830,13 +799,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let out = m
             .prepare(
                 &state,
@@ -877,13 +840,7 @@ mod tests {
             owner: None,
         });
 
-        let m = Materializer::new(
-            dir.path(),
-            tokio::sync::watch::channel(Some(Arc::new(
-                ClusterKey::parse(&key.encode()).expect("key"),
-            )))
-            .1,
-        );
+        let m = materializer_with_key(dir.path(), &key);
         let err = m
             .prepare(
                 &state,
