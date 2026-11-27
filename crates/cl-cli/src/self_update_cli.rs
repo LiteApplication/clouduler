@@ -10,7 +10,7 @@ use cl_update::internal_client;
 use cl_update::plan::{NodePhase, UpdateRunState};
 use serde::{Deserialize, Serialize};
 
-use crate::update_cli::pick_node;
+use crate::node_channel::{internal_http_client, load_key, pick_node};
 
 const UI_PATH: &str = "/api/self-update/internal/ui";
 const RUN_PATH: &str = "/api/self-update/internal/run";
@@ -110,18 +110,9 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, options: Options) -> Re
     let first = peers
         .first()
         .ok_or_else(|| anyhow!("no manager has an address on the internal network"))?;
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to {}",
-            cfg.secrets.key_file.display(),
-            first.name
-        )
-    })?;
+    let key = load_key(cfg, &first.name)?;
     let client = Client {
-        http: reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .context("building the http client")?,
+        http: internal_http_client(None)?,
         key,
     };
 

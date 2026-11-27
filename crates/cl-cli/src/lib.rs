@@ -13,6 +13,7 @@ pub mod git_backup_cli;
 pub mod health;
 pub mod logs;
 pub mod node;
+pub mod node_channel;
 pub mod prioritize;
 pub mod rebalance;
 pub mod registry;

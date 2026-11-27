@@ -13,6 +13,8 @@ use cl_config::ClusterConfig;
 use cl_raft::state::ClusterState;
 use cl_raft::{Assignment, DesiredState};
 use cl_secret::ClusterKey;
+
+use crate::node_channel::{internal_http_client, load_key};
 use cl_update::internal_client;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -110,16 +112,8 @@ pub(crate) async fn print_problems(
     state: &ClusterState,
     flags: &ShowFlags,
 ) -> Result<bool> {
-    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the node(s) running this",
-            cfg.secrets.key_file.display()
-        )
-    })?);
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let key = Arc::new(load_key(cfg, "the node(s) running this")?);
+    let http = internal_http_client(None)?;
 
     let mut rows: BTreeMap<String, Vec<Row>> = BTreeMap::new();
 
@@ -192,17 +186,8 @@ pub(crate) async fn stack_status(
     state: &ClusterState,
     stacks: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<InstanceStatus>> {
-    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {}",
-            cfg.secrets.key_file.display()
-        )
-    })?);
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("building the http client")?;
+    let key = Arc::new(load_key(cfg, "the node(s) running this")?);
+    let http = internal_http_client(Some(Duration::from_secs(5)))?;
 
     let mut rows: Vec<Row> = futures::future::join_all(
         state

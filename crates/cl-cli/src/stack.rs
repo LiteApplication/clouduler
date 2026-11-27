@@ -8,6 +8,8 @@ use cl_config::{ClusterConfig, StackBundle};
 use cl_raft::client::Client;
 use cl_raft::state::{base64_encode, DesiredState, Request, MAX_OBJECT_BYTES};
 use cl_secret::{ClusterKey, Sealed};
+
+use crate::node_channel::{internal_http_client, load_key};
 use tracing::debug;
 
 /// Pick a node to talk to. Any node will do for a write, since it forwards to
@@ -392,16 +394,8 @@ pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resu
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let instances = crate::logs::resolve_target(&state, name)?;
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the nodes",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let key = load_key(cfg, "the nodes")?;
+    let http = internal_http_client(None)?;
 
     let mut failed = Vec::new();
     let mut restarted = 0;

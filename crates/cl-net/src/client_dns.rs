@@ -16,7 +16,7 @@ use std::sync::Arc;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, TSigResponseContext};
-use hickory_server::server::{Request, RequestInfo, Server};
+use hickory_server::server::{Request, RequestInfo};
 use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{
     AuthLookup, AxfrPolicy, Catalog, LookupControlFlow, LookupError, LookupOptions, ZoneHandler,
@@ -24,7 +24,7 @@ use hickory_server::zone_handler::{
 };
 use tokio::sync::RwLock;
 
-use crate::dns::{build_split_dns_forwarder, RECORD_TTL};
+use crate::dns::{build_split_dns_forwarder, serve_udp, RECORD_TTL};
 use crate::error::{NetError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,18 +216,7 @@ impl ClientDns {
             LowerName::from(Name::root()),
             vec![self.zone.clone() as Arc<dyn ZoneHandler>, forwarder],
         );
-        let mut server = Server::new(catalog);
-        let socket = tokio::net::UdpSocket::bind(bind_addr)
-            .await
-            .map_err(|source| NetError::Io {
-                context: format!("dns bind {bind_addr}"),
-                source,
-            })?;
-        server.register_socket(socket);
-        server
-            .block_until_done()
-            .await
-            .map_err(|e| NetError::Dns(e.to_string()))
+        serve_udp(catalog, bind_addr).await
     }
 }
 
