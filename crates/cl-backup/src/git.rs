@@ -90,96 +90,9 @@ impl GitBackup {
         private_key_pem: &str,
         author: Option<(&str, &str)>,
     ) -> Result<Option<git2::Oid>> {
-        let remote_tip = self.fetch_remote_tip(private_key_pem)?;
-        let remote_tip_commit = match remote_tip {
-            Some(oid) => Some(self.repo.find_commit(oid)?),
-            None => None,
-        };
-        let parent_tree = remote_tip_commit.as_ref().map(|c| c.tree()).transpose()?;
-
-        // Build the candidate tree in the odb, preserving unmanaged files from parent tree.
-        let tree_oid = build_git_tree_on_parent(&self.repo, parent_tree.as_ref(), files)?;
-        let tree = self.repo.find_tree(tree_oid)?;
-
-        if let Some(tip_commit) = &remote_tip_commit {
-            if tip_commit.tree()?.id() == tree_oid {
-                return Ok(None);
-            }
-        }
-
-        let signature = match author {
-            Some((name, email)) => Signature::now(name, email)?,
-            None => Signature::now("clouduler", "clouduler@localhost")?,
-        };
-
-        let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
-            let parents = match parent {
-                Some(oid) => vec![self.repo.find_commit(oid)?],
-                None => vec![],
-            };
-            let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-            let commit_oid = self.repo.commit(
-                None, // detached — not attached to any local ref yet
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &parent_refs,
-            )?;
-            // Temporarily attach a local branch ref so `push` has
-            // something to push — this ref is a push handle, not a
-            // "known good" baseline.
-            self.repo.reference(
-                &format!("refs/heads/{}", self.branch),
-                commit_oid,
-                true,
-                "export",
-            )?;
-            self.push(private_key_pem)?;
-            Ok(commit_oid)
-        };
-
-        match attempt(remote_tip) {
-            Ok(oid) => Ok(Some(oid)),
-            Err(e) if is_push_rejection(&e) => {
-                // Remote moved concurrently — re-fetch and retry once.
-                let new_remote_tip = self.fetch_remote_tip(private_key_pem)?;
-                let new_parent_tree = match new_remote_tip {
-                    Some(oid) => Some(self.repo.find_commit(oid)?.tree()?),
-                    None => None,
-                };
-                let new_tree_oid =
-                    build_git_tree_on_parent(&self.repo, new_parent_tree.as_ref(), files)?;
-                let new_tree = self.repo.find_tree(new_tree_oid)?;
-                if let Some(oid) = new_remote_tip {
-                    if self.repo.find_commit(oid)?.tree()?.id() == new_tree_oid {
-                        return Ok(None);
-                    }
-                }
-                let parents = match new_remote_tip {
-                    Some(oid) => vec![self.repo.find_commit(oid)?],
-                    None => vec![],
-                };
-                let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-                let commit_oid = self.repo.commit(
-                    None,
-                    &signature,
-                    &signature,
-                    message,
-                    &new_tree,
-                    &parent_refs,
-                )?;
-                self.repo.reference(
-                    &format!("refs/heads/{}", self.branch),
-                    commit_oid,
-                    true,
-                    "export retry",
-                )?;
-                self.push(private_key_pem)?;
-                Ok(Some(commit_oid))
-            }
-            Err(e) => Err(e),
-        }
+        let (oid, changed) =
+            self.commit_and_push(files, message, private_key_pem, author, "export")?;
+        Ok(changed.then_some(oid))
     }
 
     /// Reconciles the repo with `files` on top of the remote tip, preserving
@@ -191,84 +104,68 @@ impl GitBackup {
         private_key_pem: &str,
         author: Option<(&str, &str)>,
     ) -> Result<git2::Oid> {
-        let remote_tip = self.fetch_remote_tip(private_key_pem)?;
-        let remote_tip_commit = match remote_tip {
-            Some(oid) => Some(self.repo.find_commit(oid)?),
-            None => None,
-        };
-        let parent_tree = remote_tip_commit.as_ref().map(|c| c.tree()).transpose()?;
+        Ok(self
+            .commit_and_push(files, message, private_key_pem, author, "reconcile")?
+            .0)
+    }
 
-        let tree_oid = build_git_tree_on_parent(&self.repo, parent_tree.as_ref(), files)?;
-        let tree = self.repo.find_tree(tree_oid)?;
-
-        if let Some(tip_commit) = &remote_tip_commit {
-            if tip_commit.tree()?.id() == tree_oid {
-                return Ok(tip_commit.id());
-            }
-        }
-
-        let signature = match author {
-            Some((name, email)) => Signature::now(name, email)?,
-            None => Signature::now("clouduler", "clouduler@localhost")?,
-        };
-        let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
-            let parents = match parent {
-                Some(oid) => vec![self.repo.find_commit(oid)?],
-                None => vec![],
+    /// Builds `files` on top of the remote tip and pushes the result; a rejected push (the
+    /// remote moved concurrently) re-fetches and rebuilds once. Returns the commit oid and
+    /// whether a new commit was pushed (false: the tip already had that tree, its id is returned).
+    fn commit_and_push(
+        &self,
+        files: &[TreeFile],
+        message: &str,
+        private_key_pem: &str,
+        author: Option<(&str, &str)>,
+        reflog: &str,
+    ) -> Result<(git2::Oid, bool)> {
+        let mut reflog = reflog.to_string();
+        let mut retried = false;
+        loop {
+            let remote_tip = self.fetch_remote_tip(private_key_pem)?;
+            let tip_commit = match remote_tip {
+                Some(oid) => Some(self.repo.find_commit(oid)?),
+                None => None,
             };
-            let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-            let commit_oid =
-                self.repo
-                    .commit(None, &signature, &signature, message, &tree, &parent_refs)?;
-            self.repo.reference(
-                &format!("refs/heads/{}", self.branch),
-                commit_oid,
-                true,
-                "reconcile",
-            )?;
-            self.push(private_key_pem)?;
-            Ok(commit_oid)
-        };
+            let parent_tree = tip_commit.as_ref().map(|c| c.tree()).transpose()?;
 
-        match attempt(remote_tip) {
-            Ok(oid) => Ok(oid),
-            Err(e) if is_push_rejection(&e) => {
-                let new_remote_tip = self.fetch_remote_tip(private_key_pem)?;
-                let new_parent_tree = match new_remote_tip {
-                    Some(oid) => Some(self.repo.find_commit(oid)?.tree()?),
-                    None => None,
-                };
-                let new_tree_oid =
-                    build_git_tree_on_parent(&self.repo, new_parent_tree.as_ref(), files)?;
-                let new_tree = self.repo.find_tree(new_tree_oid)?;
-                if let Some(oid) = new_remote_tip {
-                    if self.repo.find_commit(oid)?.tree()?.id() == new_tree_oid {
-                        return Ok(oid);
-                    }
+            // Build the candidate tree in the odb, preserving unmanaged files from the parent tree.
+            let tree_oid = build_git_tree_on_parent(&self.repo, parent_tree.as_ref(), files)?;
+            let tree = self.repo.find_tree(tree_oid)?;
+            if let Some(tip_commit) = &tip_commit {
+                if tip_commit.tree()?.id() == tree_oid {
+                    return Ok((tip_commit.id(), false));
                 }
-                let parents = match new_remote_tip {
-                    Some(oid) => vec![self.repo.find_commit(oid)?],
-                    None => vec![],
-                };
-                let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+            }
+
+            let signature = signature(author)?;
+            let parents: Vec<&git2::Commit> = tip_commit.iter().collect();
+            let attempt = || -> Result<git2::Oid> {
                 let commit_oid = self.repo.commit(
-                    None,
-                    &signature,
-                    &signature,
-                    message,
-                    &new_tree,
-                    &parent_refs,
+                    None, // detached - not attached to any local ref yet
+                    &signature, &signature, message, &tree, &parents,
                 )?;
+                // Temporarily attach a local branch ref so `push` has
+                // something to push - this ref is a push handle, not a
+                // "known good" baseline.
                 self.repo.reference(
                     &format!("refs/heads/{}", self.branch),
                     commit_oid,
                     true,
-                    "reconcile retry",
+                    &reflog,
                 )?;
                 self.push(private_key_pem)?;
                 Ok(commit_oid)
+            };
+            match attempt() {
+                Ok(oid) => return Ok((oid, true)),
+                Err(e) if !retried && is_push_rejection(&e) => {
+                    retried = true;
+                    reflog = format!("{reflog} retry");
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -283,23 +180,10 @@ impl GitBackup {
     /// Pushes `refspecs` to `origin`; a rejected ref update becomes `BackupError::PushRejected`.
     fn push_refspecs(&self, refspecs: &[String], private_key_pem: &str) -> Result<()> {
         let mut remote = self.repo.find_remote("origin")?;
-        let known_hosts_path = self.known_hosts_path();
         let rejection: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let rejection_cb = Rc::clone(&rejection);
 
-        let mut callbacks = RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed| {
-            Cred::ssh_key_from_memory(
-                username_from_url.unwrap_or("git"),
-                None,
-                private_key_pem,
-                None,
-            )
-        });
-        callbacks.certificate_check(move |cert, host| {
-            check_host_key(&known_hosts_path, cert, host)
-                .map_err(|e| git2::Error::from_str(&e.to_string()))
-        });
+        let mut callbacks = self.key_callbacks(private_key_pem);
         callbacks.push_update_reference(move |refname, status| {
             if let Some(reason) = status {
                 rejection_cb
@@ -325,21 +209,7 @@ impl GitBackup {
     /// remote has no such branch yet.
     pub fn fetch_remote_tip(&self, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         let mut remote = self.repo.find_remote("origin")?;
-        let known_hosts_path = self.known_hosts_path();
-
-        let mut callbacks = RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed| {
-            Cred::ssh_key_from_memory(
-                username_from_url.unwrap_or("git"),
-                None,
-                private_key_pem,
-                None,
-            )
-        });
-        callbacks.certificate_check(move |cert, host| {
-            check_host_key(&known_hosts_path, cert, host)
-                .map_err(|e| git2::Error::from_str(&e.to_string()))
-        });
+        let callbacks = self.key_callbacks(private_key_pem);
 
         let mut fetch_options = git2::FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
@@ -521,10 +391,7 @@ impl GitBackup {
         let bad_commit = self.repo.find_commit(bad)?;
         let preserved_branch = format!("rejected/{}-{}", self.branch, &bad.to_string()[..12]);
 
-        let signature = match author {
-            Some((name, email)) => Signature::now(name, email)?,
-            None => Signature::now("clouduler", "clouduler@localhost")?,
-        };
+        let signature = signature(author)?;
         // An empty-diff commit on top of `bad`, on the preserved branch only,
         // so the explanation travels with the rejected history instead of
         // polluting the tracked branch with a synthetic commit.
@@ -671,10 +538,7 @@ impl GitBackup {
             return Ok(None);
         }
         let tree = self.repo.find_tree(tree_oid)?;
-        let signature = match author {
-            Some((name, email)) => Signature::now(name, email)?,
-            None => Signature::now("clouduler", "clouduler@localhost")?,
-        };
+        let signature = signature(author)?;
         let message = format!("Roll back configuration to {}", &target.to_string()[..12]);
         let commit_oid = self.repo.commit(
             None,
@@ -835,6 +699,25 @@ impl GitBackup {
 
     /// Where trust-on-first-use host key pins for this repo's remote are
     /// kept - inside the bare repo's own `.git`-style directory.
+    /// Remote callbacks authenticating with `private_key_pem` and pinning host keys.
+    fn key_callbacks<'a>(&self, private_key_pem: &'a str) -> RemoteCallbacks<'a> {
+        let known_hosts_path = self.known_hosts_path();
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, _allowed| {
+            Cred::ssh_key_from_memory(
+                username_from_url.unwrap_or("git"),
+                None,
+                private_key_pem,
+                None,
+            )
+        });
+        callbacks.certificate_check(move |cert, host| {
+            check_host_key(&known_hosts_path, cert, host)
+                .map_err(|e| git2::Error::from_str(&e.to_string()))
+        });
+        callbacks
+    }
+
     fn known_hosts_path(&self) -> PathBuf {
         self.repo.path().join("clouduler_known_hosts")
     }
@@ -1134,6 +1017,14 @@ pub struct RejectOutcome {
 }
 
 /// Whether `err` represents a rejected (non-fast-forward) push.
+/// The commit signature: `author`, or the default clouduler identity.
+fn signature(author: Option<(&str, &str)>) -> Result<Signature<'static>> {
+    Ok(match author {
+        Some((name, email)) => Signature::now(name, email)?,
+        None => Signature::now("clouduler", "clouduler@localhost")?,
+    })
+}
+
 fn is_push_rejection(err: &BackupError) -> bool {
     matches!(err, BackupError::PushRejected(_))
         || matches!(err, BackupError::Git(e) if e.code() == git2::ErrorCode::NotFastForward)
