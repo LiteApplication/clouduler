@@ -15,6 +15,7 @@ use cl_update::internal_client;
 use futures::StreamExt;
 use serde::Deserialize;
 
+use crate::node_channel::{internal_http_client, load_key};
 use cl_raft::client::client_for;
 
 pub struct LogsArgs {
@@ -35,21 +36,8 @@ async fn prepare(
         .map_err(|e| anyhow!("{e}"))?;
     let instances = resolve_target(&state, target)?;
     let key = Arc::new(load_key(cfg, "the node(s) running this")?);
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let http = internal_http_client(None)?;
     Ok((instances, key, http))
-}
-
-/// Loads this node's cluster key; `to` completes "to authenticate to ...".
-pub fn load_key(cfg: &ClusterConfig, to: &str) -> Result<ClusterKey> {
-    ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to {to}",
-            cfg.secrets.key_file.display()
-        )
-    })
 }
 
 /// Internal-network base url of the node running `assignment`.

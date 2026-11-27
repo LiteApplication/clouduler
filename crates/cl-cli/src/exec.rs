@@ -15,7 +15,8 @@ use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
-use crate::logs::{load_key, node_base_url, resolve_single};
+use crate::logs::{node_base_url, resolve_single};
+use crate::node_channel::load_key;
 use cl_raft::Assignment;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};

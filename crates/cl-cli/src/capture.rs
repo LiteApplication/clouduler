@@ -11,7 +11,8 @@ use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::exec::connect_ws;
-use crate::logs::{load_key, resolve_single};
+use crate::logs::resolve_single;
+use crate::node_channel::load_key;
 
 pub async fn run(
     cfg: &ClusterConfig,

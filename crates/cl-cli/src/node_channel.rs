@@ -25,6 +25,26 @@ pub fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a
     }
 }
 
+/// Loads this node's cluster key; `to` completes "to authenticate to ...".
+pub fn load_key(cfg: &ClusterConfig, to: &str) -> Result<ClusterKey> {
+    ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to {to}",
+            cfg.secrets.key_file.display()
+        )
+    })
+}
+
+/// The http client for node-to-node calls: nodes serve self-signed certificates, the
+/// request signature is what authenticates them.
+pub fn internal_http_client(timeout: Option<Duration>) -> Result<reqwest::Client> {
+    let mut http = reqwest::Client::builder().danger_accept_invalid_certs(true);
+    if let Some(timeout) = timeout {
+        http = http.timeout(timeout);
+    }
+    http.build().context("building the http client")
+}
+
 /// One node's internal api, with the cluster key and an http client ready to sign requests.
 pub struct NodeChannel<'a> {
     pub node: &'a str,
@@ -43,17 +63,8 @@ impl<'a> NodeChannel<'a> {
         let node = pick_node(cfg, via)?;
         let base = cl_update::peers::base_url(cfg, node)
             .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
-        let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-            format!(
-                "loading the cluster key from {} to authenticate to {node}",
-                cfg.secrets.key_file.display()
-            )
-        })?;
-        let mut http = reqwest::Client::builder().danger_accept_invalid_certs(true);
-        if let Some(timeout) = timeout {
-            http = http.timeout(timeout);
-        }
-        let http = http.build().context("building the http client")?;
+        let key = load_key(cfg, node)?;
+        let http = internal_http_client(timeout)?;
         Ok(Self {
             node,
             base,
