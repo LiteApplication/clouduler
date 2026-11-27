@@ -80,9 +80,6 @@ pub struct Desired {
     /// `(network, protocol, published port)` per `x-clouduler.expose` on a public network; a
     /// candidate must have the port open (`NodeState::opens_port`).
     pub bound_ports: BTreeSet<(String, PortProtocol, u16)>,
-    /// Hostnames this instance's `x-clouduler.proxy` routes publish, only under DNS-level
-    /// routing: instances sharing one must land on the same node. Empty otherwise.
-    pub proxy_hosts: BTreeSet<String>,
     /// `x-clouduler.colocate` group: instances sharing the key must share a node.
     pub colocate_key: Option<String>,
     /// `deploy.resources.limits.memory` in bytes. `None` makes `rebalance::plan` weigh this
@@ -95,13 +92,11 @@ pub struct Desired {
 }
 
 impl Desired {
-    /// Anchor keys (DNS-mode proxy hostnames plus `x-clouduler.colocate`): instances sharing
-    /// one must land on the same node.
+    /// Anchor keys (the `x-clouduler.colocate` group): instances sharing one must land on
+    /// the same node. Services sharing a proxy hostname are not anchored: the proxy on any
+    /// node relays to wherever each route's container runs.
     pub fn anchor_keys(&self) -> impl Iterator<Item = &str> {
-        self.proxy_hosts
-            .iter()
-            .map(String::as_str)
-            .chain(self.colocate_key.as_deref())
+        self.colocate_key.as_deref().into_iter()
     }
 }
 
@@ -113,7 +108,6 @@ pub fn expand(
     file: &StackFile,
     egress_networks: &BTreeSet<String>,
     port_gated_networks: &BTreeSet<String>,
-    colocate_proxy_hosts: bool,
 ) -> Vec<Desired> {
     let mut out = Vec::new();
 
@@ -138,16 +132,6 @@ pub fn expand(
                 warn!(%stack, service = %service_name, asked, max = MAX_REPLICAS, "replica count is above the maximum, clamping");
             }
             asked.min(MAX_REPLICAS)
-        };
-
-        let proxy_hosts: BTreeSet<String> = if colocate_proxy_hosts {
-            service
-                .x_clouduler
-                .as_ref()
-                .map(|x| x.proxy.iter().map(|r| r.host.clone()).collect())
-                .unwrap_or_default()
-        } else {
-            BTreeSet::new()
         };
 
         for index in 0..replicas {
@@ -187,7 +171,6 @@ pub fn expand(
                             .collect()
                     })
                     .unwrap_or_default(),
-                proxy_hosts: proxy_hosts.clone(),
                 colocate_key: file.colocate_group(service_name),
                 memory_bytes: service.memory_limit_bytes(),
                 gpu_needs: GpuNeeds::of(service),
@@ -222,7 +205,7 @@ services:
     image: nginx
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert_eq!(desired[0].id, InstanceId::new("site", "web", 0));
         assert!(!desired[0].global);
@@ -239,7 +222,7 @@ services:
       replicas: 3
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 3);
         assert_eq!(
             desired.iter().map(|d| d.id.index).collect::<Vec<_>>(),
@@ -255,7 +238,7 @@ services:
             replicas: Some(4_000_000_000),
             ..Default::default()
         });
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), MAX_REPLICAS as usize);
     }
 
@@ -270,7 +253,7 @@ services:
       mode: global
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert!(desired[0].global);
     }
@@ -287,7 +270,7 @@ services:
       - "bulk/backups:/backups:ro"
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(
             desired[0].drives,
             ["bulk".to_string(), "fast".to_string()].into()
@@ -306,7 +289,7 @@ services:
     networks: [wan]
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired[0].networks, ["wan".to_string()].into());
     }
 
@@ -329,7 +312,7 @@ services:
 "#,
         );
         let port_gated_networks = ["wan".to_string()].into();
-        let desired = expand("site", &file, &BTreeSet::new(), &port_gated_networks, false);
+        let desired = expand("site", &file, &BTreeSet::new(), &port_gated_networks);
         assert_eq!(
             desired[0].bound_ports,
             [("wan".to_string(), PortProtocol::Tcp, 25)].into()
@@ -337,7 +320,7 @@ services:
 
         // Not in `port_gated_networks` (e.g. a private network) means no port
         // constraint, since only a public router forwards anything in.
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert!(desired[0].bound_ports.is_empty());
     }
 
@@ -356,7 +339,7 @@ services:
       node: n2
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired[0].constraints, vec!["node.role == manager"]);
         assert_eq!(desired[0].pinned_node.as_deref(), Some("n2"));
     }
@@ -380,16 +363,10 @@ services:
     }
 
     #[test]
-    fn proxy_hosts_are_populated_only_when_colocation_is_requested() {
+    fn services_sharing_a_proxy_host_are_not_anchored() {
         let file = proxy_stack();
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
-        assert!(desired[0].proxy_hosts.is_empty());
-
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), true);
-        assert_eq!(
-            desired[0].proxy_hosts,
-            ["app.example.com".to_string()].into()
-        );
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(desired[0].anchor_keys().count(), 0);
     }
 
     #[test]
@@ -405,7 +382,7 @@ services:
     image: x
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         let a = desired.iter().find(|d| d.id.service == "a").unwrap();
         let b = desired.iter().find(|d| d.id.service == "b").unwrap();
         assert!(a.colocate_key.is_some());

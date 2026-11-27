@@ -403,12 +403,10 @@ pub(super) async fn pending_placements(
     cluster_state: &cl_raft::ClusterState,
 ) -> Vec<InstanceSummary> {
     let config = state.cluster_config.read().await;
-    let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
     let desired = cl_sched::desired_instances(
         cluster_state,
         &config.egress_networks(),
         &config.port_gated_networks(),
-        colocate_proxy_hosts,
     );
     let served_drives = config.served_drives();
     let everywhere_networks = config.everywhere_networks();

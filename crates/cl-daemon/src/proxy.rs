@@ -1235,8 +1235,11 @@ async fn run_dns_reconcile(
 ///
 /// `DnsPublishMode::OwningNode`: a stack route's hostname only names the node(s)
 /// running that service's containers (`placement::service_nodes`), so clients go
-/// straight there. Static backends and redirects have no container and keep
-/// naming every node.
+/// straight there. When several services publish the same hostname on a network
+/// (different path prefixes, possibly on different nodes), only the owner of the
+/// shortest path prefix is named (`shortest_path_owner`); that node's proxy relays
+/// the other paths to the nodes running them. Static backends and redirects have
+/// no container and keep naming every node.
 ///
 /// The web ui hostname is not here: writes only work on the leader
 /// (`redirect_non_leader` in `cl_api::server`), so a follower could only 503.
@@ -1249,6 +1252,9 @@ pub fn desired_dns_hosts(
     let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
 
+    // Owning-node candidates per (host, network): (path prefix length, stack, service, owners).
+    let mut route_owners: BTreeMap<(String, String), Vec<PathOwner>> = BTreeMap::new();
+
     for placement in crate::placement::service_placements(state, cfg) {
         let owners = crate::placement::service_nodes(state, &placement.stack, &placement.service);
         let healthy = healthy_nodes(state, &placement.stack, &placement.service);
@@ -1260,7 +1266,16 @@ pub fn desired_dns_hosts(
             let nodes = if cfg.is_managed_network(&entry.network) {
                 healthy.clone()
             } else if owning_node_only {
-                owners.clone()
+                route_owners
+                    .entry((entry.host.clone(), entry.network.clone()))
+                    .or_default()
+                    .push((
+                        entry.path_prefix.as_deref().map_or(0, str::len),
+                        placement.stack.clone(),
+                        placement.service.clone(),
+                        owners.clone(),
+                    ));
+                BTreeSet::new()
             } else {
                 all_nodes.clone()
             };
@@ -1284,6 +1299,10 @@ pub fn desired_dns_hosts(
                 .or_default()
                 .extend(nodes);
         }
+    }
+    for (key, candidates) in route_owners {
+        let nodes = shortest_path_owner(candidates);
+        hosts.entry(key).or_default().extend(nodes);
     }
     for entry in StaticRouteStore::load(state).routes {
         let nodes = if cfg.is_managed_network(&entry.network) {
@@ -1330,6 +1349,23 @@ pub fn desired_dns_hosts(
         }
     }
     hosts
+}
+
+/// A service publishing a hostname: (path prefix length, stack, service, nodes running it).
+type PathOwner = (usize, String, String, BTreeSet<String>);
+
+/// Of the services publishing one hostname, the nodes of the one whose route has the
+/// shortest path prefix (no prefix counts as length 0, so `/` beats `/api`). Ties go to
+/// the lowest (stack, service). Only services with a running instance compete, so a
+/// stopped catch-all hands the name to the next shortest route.
+fn shortest_path_owner(mut candidates: Vec<PathOwner>) -> BTreeSet<String> {
+    candidates.retain(|(_, _, _, owners)| !owners.is_empty());
+    candidates.sort_by(|a, b| (a.0, &a.1, &a.2).cmp(&(b.0, &b.1, &b.2)));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, _, _, owners)| owners)
+        .unwrap_or_default()
 }
 
 /// The nodes holding a healthy container of `stack`/`service`: wanted
@@ -2799,6 +2835,44 @@ services:
                 .all(|r| r.content == "203.0.113.5" || r.content == "2001:db8::5"),
             "{blog:?}"
         );
+    }
+
+    fn candidate(
+        path_len: usize,
+        service: &str,
+        nodes: &[&str],
+    ) -> (usize, String, String, BTreeSet<String>) {
+        (
+            path_len,
+            "s".into(),
+            service.into(),
+            nodes.iter().map(|n| n.to_string()).collect(),
+        )
+    }
+
+    /// Under `OwningNode`, a hostname shared by services on different nodes
+    /// names only the owner of the shortest path prefix.
+    #[test]
+    fn the_shortest_path_prefix_owns_a_shared_hostname() {
+        let nodes = shortest_path_owner(vec![
+            candidate("/api".len(), "api", &["n2"]),
+            candidate(0, "root", &["n1"]),
+            candidate("/".len(), "slash", &["n3"]),
+        ]);
+        assert_eq!(nodes, BTreeSet::from(["n1".to_string()]));
+    }
+
+    /// Equal prefix lengths break on stack then service name, and a service
+    /// with nothing running does not compete.
+    #[test]
+    fn a_path_prefix_tie_is_broken_by_service_name_and_stopped_services_skip() {
+        let nodes = shortest_path_owner(vec![
+            candidate(4, "b", &["n1"]),
+            candidate(4, "a", &["n2"]),
+            candidate(0, "stopped", &[]),
+        ]);
+        assert_eq!(nodes, BTreeSet::from(["n2".to_string()]));
+        assert!(shortest_path_owner(vec![candidate(0, "x", &[])]).is_empty());
     }
 
     /// A static route is not backed by a container, so `OwningNode` mode

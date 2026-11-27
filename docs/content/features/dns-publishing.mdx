@@ -76,17 +76,13 @@ The token has no CLI command; set it in the UI.
 | Mode | Records published for a route | Trade-off |
 |---|---|---|
 | `all-nodes` (default) | Every node that serves the route gets an A or AAAA record, whether or not it runs the container. | Simple and resilient: any node can proxy the request to wherever the container is. More records, and traffic takes an extra hop through the cluster network. |
-| `owning-node` | Only the nodes that actually run the container. Stale records are deleted. | Clients connect straight to the node that runs the service. Requires the co-location rule below. |
+| `owning-node` | Only the nodes that actually run the container. Stale records are deleted. | Clients connect straight to the node that runs the service. For a shared hostname, see below. |
 
-### The co-location constraint
+### Hostnames shared by several services
 
-With `owning-node`, all services that share a proxy hostname must run on the **same node**, so there is one clear owner. The scheduler enforces this. If it cannot place a service on the same node as the others it shares a host with, placement fails with:
+Several services can publish the same hostname on one network with different `path_prefix` values, and the scheduler places them independently (they may run on different nodes). Every node's proxy holds the routes of all of them, picks the longest matching path prefix, and relays the request to the node running that container, through the same relay and with the same network gating, `allowed` lists and authentication as any other request.
 
-```text
-must share a node with {keys} already placed on {anchors}
-```
-
-Pins, constraints, drives or capacity that rule out that node make the stack unplaceable. See [Placement](/docs/features/placement). Switch back to `all-nodes` if you want services with a shared hostname to spread across nodes.
+With `owning-node`, DNS for the hostname names only the nodes running the service whose route has the **shortest path prefix** (a route with no `path_prefix` counts as length 0, so `/` wins over `/api`). Ties go to the lowest stack name, then service name. A service with no running instance does not compete, so the name moves to the next shortest route while it is down. Requests for the other paths arrive at that node and are relayed from there. Static routes and redirects keep publishing on every node.
 
 Switching modes is safe: records that are no longer wanted are deleted first on the next reconcile pass (every 60 seconds, leader only). Switching to `owning-node` deletes the records of nodes that do not run the service; switching back creates them again.
 
@@ -131,7 +127,7 @@ The server answers according to the network the client is on. A client on a subn
 ## Options
 
 <OptionTable rows={[
-  {"key": "proxy.dns_publish", "type": "enum", "default": "all-nodes", "reload": "live", "description": "all-nodes: every node's address is published for every proxied hostname. owning-node: only the nodes running the containers are published, stale records are deleted and the scheduler co-locates containers that share a hostname.", "quirks": "No UI control; edit the file. See DNS publishing."},
+  {"key": "proxy.dns_publish", "type": "enum", "default": "all-nodes", "reload": "live", "description": "all-nodes: every node's address is published for every proxied hostname. owning-node: only the nodes running the containers are published (for a hostname shared by several services, only the nodes of the service whose route has the shortest path prefix), stale records are deleted.", "quirks": "No UI control; edit the file. See DNS publishing."},
   {"key": "proxy.dns_server.enabled", "type": "bool", "default": "false", "reload": "live", "description": "Turns on the cluster DNS server that answers by the client's network.", "quirks": "Re-read every 5 seconds."},
   {"key": "proxy.dns_server.networks", "type": "list of network names", "default": "[] (every subnetted network the node has an address on, and every container network with proxy: true)", "reload": "live", "description": "Networks to listen on, at the node's address on each (a container network: its segment address). A public network is served only when listed.", "quirks": "Errors: no network named NAME; NAME has no node address to listen on (also a container network without proxy: true)."},
   {"key": "proxy.dns_server.port", "type": "port", "default": "53", "reload": "live", "description": "UDP and TCP port of the cluster DNS server. Below 1024 needs root.", "quirks": "Must not be 0."},
@@ -151,7 +147,6 @@ The server answers according to the network the client is on. A client on a subn
 | `cloudflare api error CODE: MESSAGE` | Cloudflare rejected a record. | Read the code; several failures are summarised as `N records failed to apply: ...`. |
 | `this node holds no cluster key` when saving a token | The node you are using has no cluster key. | Use a node that holds the key. |
 | Old records remain | They were not created by Clouduler, or the tag is missing. | Delete them in Cloudflare yourself. |
-| Placement fails with `must share a node with ...` | `owning-node` co-location. | Free the anchor node or switch to `all-nodes`. |
 | A name resolves to the wrong place | Another record (CNAME or hand-made) conflicts. | Remove or fix the foreign record, then press **Reconcile DNS**. |
 
 ## Quirks and gotchas
@@ -184,7 +179,7 @@ DNS and certificate work runs on the raft leader. After a leader change, expect 
 </Quirk>
 
 <Quirk title="Switching dns_publish mode" severity="warn">
-Switching to `owning-node` changes placement rules and deletes records for nodes that no longer own a service. Change it while nothing is mid-failover.
+Switching to `owning-node` deletes records for nodes that no longer own a service. Change it while nothing is mid-failover.
 </Quirk>
 
 ## Related

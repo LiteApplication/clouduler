@@ -344,7 +344,6 @@ mod tests {
             egress_network: None,
             networks: Default::default(),
             bound_ports: Default::default(),
-            proxy_hosts: Default::default(),
             colocate_key: None,
             memory_bytes,
             gpu_needs: Default::default(),
@@ -445,7 +444,7 @@ mod tests {
 
         let mut items: Vec<_> = (0..3).map(|i| desired("web", i)).collect();
         for item in &mut items {
-            item.proxy_hosts = ["app.example.com".to_string()].into();
+            item.colocate_key = Some("colocate:app.example.com".to_string());
         }
 
         assert!(plan(

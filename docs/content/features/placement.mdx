@@ -160,7 +160,7 @@ Networks narrow the choice of nodes, so adding a network to a service can move i
 - A service on a **public** network needs a node that has a public address on it.
 - An `x-clouduler.expose` port on a **public** or **wireguard** network only schedules on nodes whose router forwards that port, declared as `open_ports` in the node's address. A node that sets `open_all: true` on that address counts every port and protocol as open. An unmanaged **private** network works the same way as soon as any node declares `open_ports` or `open_all` on it (`lan: { ip: 192.168.1.5, open_ports: [{ port: 25 }] }`); until then it is not gated.
 - **nat** networks are available on every node and never narrow the choice.
-- With `proxy.dns_publish: owning-node`, all containers behind one proxy hostname are pinned to one node.
+- Services that share a proxy hostname (different `path_prefix` values) are placed independently. Every node's proxy relays to wherever each route's container runs.
 
 See [Networking](/docs/features/networking) for the kinds and how to declare them.
 
@@ -201,7 +201,7 @@ If there is no record of a volume yet, any node that implements the drive qualif
 ## Moving things
 
 - Drain a node (`clouduler node set-availability NAME drain`, or the node page) to keep what it runs but place nothing new on it.
-- `clouduler rebalance` moves instances to even out load (live memory and CPU, falling back to declared memory limits), but never moves pinned instances, ones published on a proxy hostname, ones already migrating, or ones with nowhere else to go.
+- `clouduler rebalance` moves instances to even out load (live memory and CPU, falling back to declared memory limits), but never moves pinned instances, ones in a colocate group, ones already migrating, or ones with nowhere else to go.
 - If a node fails, the scheduler places its instances elsewhere. See [Failover](/docs/features/failover).
 - A service that keeps getting killed is moved to another node instead of restarting forever in the same place.
 
@@ -221,7 +221,7 @@ Stacks are stored separately from `cluster.yaml`. Removing a drive or network fr
 
 Rows that every node passes are folded behind a toggle labelled `N constraint(s) met on all M servers`; the table then shows the remaining rows with each node marked Eligible, Blocked or Picked.
 
-The rebalancer never moves instances that are pinned, global, anchor/colocate members, on the proxy host, or mid-migration.
+The rebalancer never moves instances that are pinned, global, colocate members, on the proxy host, or mid-migration.
 
 ## Related
 

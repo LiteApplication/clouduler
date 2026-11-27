@@ -480,13 +480,8 @@ async fn fetch_summary(
 /// placeable every run, so `unplaceable` alone would report healthy). Mirrors
 /// `cl-api`'s `pending_placements`, against this node's own config copy.
 fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)> {
-    let colocate_proxy_hosts = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-    let desired = cl_sched::desired_instances(
-        state,
-        &cfg.egress_networks(),
-        &cfg.port_gated_networks(),
-        colocate_proxy_hosts,
-    );
+    let desired =
+        cl_sched::desired_instances(state, &cfg.egress_networks(), &cfg.port_gated_networks());
     let served_drives = cfg.served_drives();
 
     let outcome = cl_sched::place(state, &desired, &served_drives, &cfg.everywhere_networks());

@@ -909,7 +909,6 @@ mod tests {
             egress_network: None,
             networks: BTreeSet::new(),
             bound_ports: BTreeSet::new(),
-            proxy_hosts: BTreeSet::new(),
             colocate_key: None,
             memory_bytes: None,
             gpu_needs: Default::default(),
@@ -1642,23 +1641,6 @@ mod tests {
         assert!(placed(&outcome.decisions, "web", 0).is_some());
     }
 
-    /// Two services publishing the same proxied hostname must land on the
-    /// same node - a hostname can only point at one place once DNS answers
-    /// with the owning node's address alone.
-    #[test]
-    fn instances_sharing_a_proxy_host_are_colocated() {
-        let state = cluster();
-        let mut main = desired("web", 0);
-        main.proxy_hosts = ["app.example.com".to_string()].into();
-        let mut admin = desired("admin", 0);
-        admin.proxy_hosts = ["app.example.com".to_string()].into();
-
-        let decisions = place(&state, &[main, admin], &no_served(), &no_everywhere()).decisions;
-        let main_node = placed(&decisions, "web", 0).expect("web placed");
-        let admin_node = placed(&decisions, "admin", 0).expect("admin placed");
-        assert_eq!(main_node, admin_node);
-    }
-
     /// When initial placement occurs for a colocation group, sibling constraints
     /// (such as drives/volumes) must constrain every member of the group, so that
     /// an unconstrained member scheduled first does not pick a node that cannot
@@ -1682,11 +1664,11 @@ mod tests {
 
         // Dashboard has no drive requirements and comes first in `desired`.
         let mut dashboard = desired("dashboard", 0);
-        dashboard.proxy_hosts = ["mem0.example.com".to_string()].into();
+        dashboard.colocate_key = Some("colocate:mem0.example.com".to_string());
 
         // API requires drive "bulk" which only n1 implements.
         let mut api = desired("api", 0);
-        api.proxy_hosts = ["mem0.example.com".to_string()].into();
+        api.colocate_key = Some("colocate:mem0.example.com".to_string());
         api.drives = ["bulk".to_string()].into();
 
         let outcome = place(&state, &[dashboard, api], &no_served(), &no_everywhere());
@@ -1731,9 +1713,9 @@ mod tests {
         });
 
         let mut main = desired("web", 0);
-        main.proxy_hosts = ["app.example.com".to_string()].into();
+        main.colocate_key = Some("colocate:app.example.com".to_string());
         let mut admin = desired("admin", 0);
-        admin.proxy_hosts = ["app.example.com".to_string()].into();
+        admin.colocate_key = Some("colocate:app.example.com".to_string());
 
         let decisions = place(&state, &[main, admin], &no_served(), &no_everywhere()).decisions;
         assert_eq!(placed(&decisions, "admin", 0).as_deref(), Some("n3"));
@@ -1761,9 +1743,9 @@ mod tests {
         });
 
         let mut main = desired("web", 0);
-        main.proxy_hosts = ["app.example.com".to_string()].into();
+        main.colocate_key = Some("colocate:app.example.com".to_string());
         let mut admin = desired("admin", 0);
-        admin.proxy_hosts = ["app.example.com".to_string()].into();
+        admin.colocate_key = Some("colocate:app.example.com".to_string());
 
         let outcome = place(&state, &[main, admin], &no_served(), &no_everywhere());
         assert!(
@@ -1792,7 +1774,7 @@ mod tests {
         });
 
         let mut item = desired("web", 0);
-        item.proxy_hosts = ["share.example.com".to_string()].into();
+        item.colocate_key = Some("colocate:share.example.com".to_string());
         item.networks = ["public".to_string()].into();
 
         let outcome = place(&state, &[item], &no_served(), &no_everywhere());
@@ -1811,10 +1793,10 @@ mod tests {
     fn a_conflicting_constraint_makes_the_colocated_instance_unplaceable() {
         let state = cluster();
         let mut main = desired("web", 0);
-        main.proxy_hosts = ["app.example.com".to_string()].into();
+        main.colocate_key = Some("colocate:app.example.com".to_string());
         main.constraints = vec!["node.hostname == n1".into()];
         let mut admin = desired("admin", 0);
-        admin.proxy_hosts = ["app.example.com".to_string()].into();
+        admin.colocate_key = Some("colocate:app.example.com".to_string());
         admin.constraints = vec!["node.hostname == n2".into()];
 
         let outcome = place(&state, &[main, admin], &no_served(), &no_everywhere());

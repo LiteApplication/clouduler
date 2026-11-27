@@ -18,14 +18,8 @@ use cl_raft::client::client_for;
 pub async fn run(cfg: &ClusterConfig, via: Option<&str>, yes: bool) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
-
-    let colocate_proxy_hosts = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-    let desired = cl_sched::desired_instances(
-        &state,
-        &cfg.egress_networks(),
-        &cfg.port_gated_networks(),
-        colocate_proxy_hosts,
-    );
+    let desired =
+        cl_sched::desired_instances(&state, &cfg.egress_networks(), &cfg.port_gated_networks());
     let served_drives = cfg.served_drives();
 
     let live = match fetch_live_usage(cfg, via).await {

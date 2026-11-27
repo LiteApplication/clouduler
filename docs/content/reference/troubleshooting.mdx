@@ -186,7 +186,7 @@ Details: [Proxy and TLS](/docs/features/proxy-and-tls), [Cloudflare API token gu
 |---|---|
 | `cloudflare api error CODE: MESSAGE` or `N records failed to apply: ...` | Cloudflare refused a record. Read the code in the message. |
 | No records after a leader change | DNS and certificate work run only on the raft leader. Expect a short pause. |
-| Records missing after switching `proxy.dns_publish` to `owning-node` | The switch changes placement rules and deletes records for nodes that no longer own a service. Change it while nothing is mid-failover. |
+| Records missing after switching `proxy.dns_publish` to `owning-node` | The switch deletes records for nodes that no longer own a service. Change it while nothing is mid-failover. |
 | `vault.lan.example.com` appears in public DNS pointing at a 192.168.x.x address | `publish_dns` defaults to true on internal and private networks. Set `publish_dns: false` on them. |
 | Names or addresses wrong | A bare IP on a public network is an error (`a public network takes an ipv4, ipv6 and/or domain block`), as is a map with only `open_ports` (`set at least one of ipv4, ipv6 or domain`). |
 

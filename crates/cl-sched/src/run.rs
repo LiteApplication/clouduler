@@ -184,13 +184,8 @@ impl Scheduler {
 
     async fn schedule(&self, state: &ClusterState) -> crate::Result<()> {
         let live = self.live_config(state);
-        let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-        let desired = desired_instances(
-            state,
-            &live.egress_networks(),
-            &live.port_gated_networks(),
-            colocate_proxy_hosts,
-        );
+        let desired =
+            desired_instances(state, &live.egress_networks(), &live.port_gated_networks());
         let desired = with_container_routers(desired, state, &live);
 
         let outcome = place::place(
@@ -750,20 +745,15 @@ impl Scheduler {
         }
 
         let live = self.live_config(state);
-        let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-        let desired = desired_instances(
-            state,
-            &live.egress_networks(),
-            &live.port_gated_networks(),
-            colocate_proxy_hosts,
-        );
+        let desired =
+            desired_instances(state, &live.egress_networks(), &live.port_gated_networks());
         let desired = with_container_routers(desired, state, &live);
         let Some(item) = desired.iter().find(|d| &d.id == id) else {
             return false;
         };
 
         if item.global || item.pinned_node.is_some() || item.anchor_keys().next().is_some() {
-            warn!(instance = %id, "keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place");
+            warn!(instance = %id, "keeps restarting here but cannot be safely moved (pinned, global, or colocated), restarting in place");
             return false;
         }
 
@@ -1543,7 +1533,6 @@ pub fn desired_instances(
     state: &ClusterState,
     egress_networks: &BTreeSet<String>,
     port_gated_networks: &BTreeSet<String>,
-    colocate_proxy_hosts: bool,
 ) -> Vec<Desired> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
@@ -1556,7 +1545,6 @@ pub fn desired_instances(
                 &file,
                 egress_networks,
                 port_gated_networks,
-                colocate_proxy_hosts,
             )),
             // A stored stack that no longer parses must not stop other stacks scheduling.
             Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
@@ -1647,7 +1635,7 @@ fn everywhere_networks(state: &ClusterState) -> BTreeSet<String> {
 
 /// Every request the leader would submit for a state, without submitting (for tests).
 pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
-    let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new(), false);
+    let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new());
 
     let outcome = place::place(
         state,
@@ -2550,7 +2538,7 @@ mod container_router_tests {
                 at: 0,
             });
         }
-        let desired = desired_instances(&state, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = desired_instances(&state, &BTreeSet::new(), &BTreeSet::new());
         let desired = with_container_routers(desired, &state, &cfg);
         let router = desired
             .iter()

@@ -281,7 +281,7 @@ services:
 
 <OptionTable rows={[
   {"key": "web.network", "type": "name", "reload": "live", "required": true, "description": "Network the dashboard hostname resolves through. Must have a domain."},
-  {"key": "proxy.dns_publish", "type": "all-nodes or owning-node", "default": "all-nodes", "reload": "live", "description": "all-nodes publishes every node's address for each proxied hostname. owning-node publishes only nodes running the containers and pins all containers sharing a hostname to one node.", "quirks": "No UI control: set it in cluster.yaml."},
+  {"key": "proxy.dns_publish", "type": "all-nodes or owning-node", "default": "all-nodes", "reload": "live", "description": "all-nodes publishes every node's address for each proxied hostname. owning-node publishes only nodes running the containers (for a hostname shared by several services, only the nodes of the service whose route has the shortest path prefix).", "quirks": "No UI control: set it in cluster.yaml."},
   {"key": "proxy.dns_server.enabled", "type": "bool", "default": "false", "reload": "live", "description": "Run a cluster DNS server on each node's address, answering by the client's network."},
   {"key": "proxy.dns_server.networks", "type": "list of names", "default": "every subnetted network the node is on, and every container network with proxy: true", "reload": "live", "description": "Networks the DNS server answers for. A public network is only served if listed."},
   {"key": "proxy.dns_server.port", "type": "u16", "default": "53", "reload": "restart", "description": "Port the DNS server listens on."},
