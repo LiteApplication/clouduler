@@ -221,6 +221,24 @@ describe('destination form', () => {
     expect(validateForm({ ...f, auth: '', url: '', original: 'mx' }, ['mx'], true, true)).toEqual({});
     expect(secretEdits(f)).toEqual({ url: 'https://matrix.example.org', auth: 'syt_x' });
   });
+  it('validates and sends a matrix username and password', () => {
+    const f = { ...newForm('matrix'), name: 'mx', url: 'https://matrix.example.org', room: '!abc:example.org', authMode: 'password' as const };
+    expect(validateForm(f, [], false).auth).toBeTruthy();
+    expect(validateForm({ ...f, loginUser: 'bot' }, [], false).auth).toBeTruthy();
+    expect(validateForm({ ...f, loginPassword: 'pw' }, [], false).auth).toBeTruthy();
+    const ok = { ...f, loginUser: ' @bot:example.org ', loginPassword: 'pw' };
+    expect(validateForm(ok, [], false)).toEqual({});
+    // Only the login goes out, never a token alongside it, and the password is not trimmed.
+    expect(secretEdits({ ...ok, auth: 'ignored', loginPassword: ' pw ' })).toEqual({
+      url: 'https://matrix.example.org',
+      login: { username: '@bot:example.org', password: ' pw ' },
+    });
+    // Editing with everything blank keeps the saved token.
+    expect(validateForm({ ...f, url: '', original: 'mx' }, ['mx'], true, true)).toEqual({});
+    expect(secretEdits({ ...f, url: '', original: 'mx' })).toBeNull();
+    // The destination itself never carries credentials.
+    expect(JSON.stringify(formToDestination(ok))).not.toMatch(/bot|pw/);
+  });
   it('only sends secrets that were typed', () => {
     const f = { ...newForm('webhook'), name: 'h' };
     expect(secretEdits(f)).toBeNull();

@@ -272,6 +272,10 @@ export interface DestForm {
   url: string;
   auth: string;
   clearAuth: boolean;
+  /** Matrix: how the bot authenticates. A password is used once to log in and is never stored. */
+  authMode: 'token' | 'password';
+  loginUser: string;
+  loginPassword: string;
   /** Matrix room ID or alias. */
   room: string;
   matrixStyle: MatrixStyle;
@@ -304,6 +308,9 @@ export function newForm(kind: DestKind): DestForm {
     url: '',
     auth: '',
     clearAuth: false,
+    authMode: 'token',
+    loginUser: '',
+    loginPassword: '',
     room: '',
     matrixStyle: 'full',
     style: 'embed',
@@ -401,7 +408,12 @@ export function validateForm(f: DestForm, taken: string[], savedUrl: boolean, sa
     else if (url && f.kind === 'discord' && !DISCORD_URL.test(url)) e.url = 'That does not look like a Discord webhook URL.';
     else if (url && (f.kind === 'webhook' || f.kind === 'matrix') && !/^https?:\/\/[^\s]+$/.test(url)) e.url = 'The URL must start with http:// or https://.';
     if (f.kind === 'matrix') {
-      if (!f.auth.trim() && !(f.original && savedAuth)) e.auth = 'Paste the access token.';
+      if (f.authMode === 'password') {
+        const user = f.loginUser.trim();
+        const keep = !!(f.original && savedAuth);
+        if ((user || f.loginPassword) && !(user && f.loginPassword)) e.auth = 'Enter both the username and the password.';
+        else if (!user && !keep) e.auth = 'Enter the username and password.';
+      } else if (!f.auth.trim() && !(f.original && savedAuth)) e.auth = 'Paste the access token.';
       const room = f.room.trim();
       if (!MATRIX_ROOM_RE.test(room) || room.length > 255) e.room = 'Use a room ID (!abc:example.org, or !abc on newer room versions) or an alias (#ops:example.org).';
     }
@@ -417,13 +429,22 @@ export function validateForm(f: DestForm, taken: string[], savedUrl: boolean, sa
   return e;
 }
 
+export interface SecretEdits {
+  url?: string;
+  auth?: string | null;
+  /** Matrix only: the server logs in once, stores the token and forgets these. */
+  login?: { username: string; password: string };
+}
+
 /** The secret edits a form implies: blank keeps what is saved. */
-export function secretEdits(f: DestForm): { url?: string; auth?: string | null } | null {
-  const out: { url?: string; auth?: string | null } = {};
+export function secretEdits(f: DestForm): SecretEdits | null {
+  const out: SecretEdits = {};
   if (f.kind !== 'email' && f.url.trim()) out.url = f.url.trim();
   if (f.kind === 'webhook' || f.kind === 'matrix') {
     if (f.clearAuth && f.kind === 'webhook') out.auth = null;
-    else if (f.auth.trim()) out.auth = f.auth.trim();
+    else if (f.kind === 'matrix' && f.authMode === 'password') {
+      if (f.loginUser.trim() && f.loginPassword) out.login = { username: f.loginUser.trim(), password: f.loginPassword };
+    } else if (f.auth.trim()) out.auth = f.auth.trim();
   }
   return Object.keys(out).length ? out : null;
 }

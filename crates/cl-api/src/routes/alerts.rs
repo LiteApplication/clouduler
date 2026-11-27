@@ -338,8 +338,19 @@ where
     Option::<String>::deserialize(d).map(Some)
 }
 
+/// A Matrix username and password, used once to obtain an access token and then dropped. Never stored,
+/// logged or echoed: no Debug, no Serialize, and it is never put in an error message.
+#[derive(Deserialize)]
+struct LoginIn {
+    username: String,
+    password: String,
+}
+
 #[derive(Deserialize, Default)]
 struct SecretsIn {
+    /// Matrix only, instead of `auth`: log in with these and store only the resulting token.
+    #[serde(default)]
+    login: Option<LoginIn>,
     #[serde(default, deserialize_with = "double_option")]
     url: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -372,6 +383,71 @@ fn clean(v: &Option<Option<String>>) -> Result<Option<Option<String>>, ApiError>
     }
 }
 
+/// The client for talking to a homeserver from this node: the system's trust roots, not the peer client.
+fn login_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(format!("clouduler/{}", cl_config::version()))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Log in and return the token. The error is safe to show: no password, token or URL.
+async fn login_token(
+    http: &reqwest::Client,
+    homeserver: &str,
+    login: &LoginIn,
+) -> Result<String, ApiError> {
+    if login.username.trim().is_empty() || login.password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "enter both the username and the password, or an access token".into(),
+        ));
+    }
+    if !settings::http_url_ok(homeserver) {
+        return Err(ApiError::BadRequest(
+            "the homeserver URL must be an http or https URL".into(),
+        ));
+    }
+    cl_alert::deliver::matrix_login(http, homeserver, &login.username, &login.password)
+        .await
+        .map_err(|e| {
+            ApiError::BadRequest(format!(
+                "could not log in to the homeserver: {}",
+                crate::alerts::send::scrub_urls(&e.message)
+            ))
+        })
+}
+
+/// Turn each Matrix `login` into a token in `auth_in`, so only the token is ever sealed. A destination
+/// that gives both a token and a login, or a login for a non-Matrix kind, is refused before any request.
+async fn apply_logins(
+    http: &reqwest::Client,
+    st: &cl_raft::ClusterState,
+    key: &cl_secret::ClusterKey,
+    logins: &BTreeMap<String, LoginIn>,
+    url_in: &BTreeMap<String, Option<String>>,
+    auth_in: &mut BTreeMap<String, Option<String>>,
+) -> Result<(), ApiError> {
+    for (name, l) in logins {
+        let homeserver = match url_in.get(name) {
+            Some(Some(u)) => u.clone(),
+            Some(None) => return Err(ApiError::BadRequest(format!("secrets.{name}.url: a homeserver URL is required"))),
+            None => crate::alerts::send::open(st, key, &url_secret(name))
+                .ok()
+                .flatten()
+                .ok_or_else(|| ApiError::BadRequest(format!("secrets.{name}.url: a homeserver URL is required")))?,
+        };
+        let token = login_token(http, &homeserver, l)
+            .await
+            .map_err(|e| match e {
+                ApiError::BadRequest(m) => ApiError::BadRequest(format!("secrets.{name}.login: {m}")),
+                o => o,
+            })?;
+        auth_in.insert(name.clone(), Some(token));
+    }
+    Ok(())
+}
+
 async fn put_settings(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -382,11 +458,25 @@ async fn put_settings(
 
     let mut url_in: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut auth_in: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for (name, s) in &body.secrets {
-        if !new.destinations.iter().any(|d| &d.name == name) {
+    let mut login_in: BTreeMap<String, LoginIn> = BTreeMap::new();
+    for (name, s) in body.secrets {
+        let Some(dest) = new.destinations.iter().find(|d| d.name == name) else {
             return Err(ApiError::BadRequest(format!(
                 "secrets.{name}: no destination with this name"
             )));
+        };
+        if let Some(l) = s.login {
+            if !matches!(dest.kind, DestinationKind::Matrix(_)) {
+                return Err(ApiError::BadRequest(format!(
+                    "secrets.{name}.login: only a Matrix destination can log in"
+                )));
+            }
+            if s.auth.is_some() {
+                return Err(ApiError::BadRequest(format!(
+                    "secrets.{name}: give an access token or a username and password, not both"
+                )));
+            }
+            login_in.insert(name.clone(), l);
         }
         if let Some(v) = clean(&s.url)? {
             url_in.insert(name.clone(), v);
@@ -401,7 +491,7 @@ async fn put_settings(
     };
     let has_auth = |name: &str| match auth_in.get(name) {
         Some(v) => v.is_some(),
-        None => st.secrets.contains_key(&auth_secret(name)),
+        None => login_in.contains_key(name) || st.secrets.contains_key(&auth_secret(name)),
     };
     let new_url = |name: &str| url_in.get(name).cloned().flatten();
     if let Err((field, msg)) = settings::validate(&new, &has_url, &has_auth, &new_url) {
@@ -415,6 +505,16 @@ async fn put_settings(
         .await
         .clone()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
+    apply_logins(
+        &login_client(),
+        &st,
+        &key,
+        &login_in,
+        &url_in,
+        &mut auth_in,
+    )
+    .await?;
+    drop(login_in);
     let put_secret = |name: String, value: String| {
         let sealed = Sealed::seal(&key, &name, value.as_bytes()).map_err(ApiError::internal)?;
         Ok::<_, ApiError>(ClusterRequest::PutSecret {
@@ -639,6 +739,30 @@ async fn test(
     if matches!(dest.kind, DestinationKind::Email { .. }) && smtp.is_none() {
         return Ok(failed("set up the email server first"));
     }
+    // A username and password log in for this test only: the token is not saved, and the device is logged out after.
+    let mut test_session: Option<(reqwest::Client, String, String)> = None;
+    if let Some(l) = body.secrets.as_ref().and_then(|s| s.login.as_ref()) {
+        if !matches!(dest.kind, DestinationKind::Matrix(_)) {
+            return Err(ApiError::BadRequest(
+                "only a Matrix destination can log in".into(),
+            ));
+        }
+        if body.secrets.as_ref().is_some_and(|s| s.auth.is_some()) {
+            return Err(ApiError::BadRequest(
+                "give an access token or a username and password, not both".into(),
+            ));
+        }
+        let homeserver = secrets.url.clone().unwrap_or_default();
+        let http = login_client();
+        match login_token(&http, &homeserver, l).await {
+            Ok(token) => {
+                secrets.auth = Some(token.clone());
+                test_session = Some((http, homeserver, token));
+            }
+            Err(ApiError::BadRequest(m)) => return Ok(failed(m)),
+            Err(e) => return Err(e),
+        }
+    }
 
     let ui = ui_url(&state, &saved).await;
     let n = Notification {
@@ -649,6 +773,9 @@ async fn test(
     let sender = Sender::new(state.cluster.clone(), state.key.clone());
     let result = sender.send_once(&dest, &secrets, smtp.as_ref(), &n).await;
     drop(secrets);
+    if let Some((http, homeserver, token)) = test_session {
+        cl_alert::deliver::matrix_logout(&http, &homeserver, &token).await;
+    }
 
     let (ok, error) = match result {
         Ok(()) => (true, None),
@@ -718,6 +845,179 @@ mod tests {
         assert_eq!(s.auth, Some(Some("x".into())));
         let s: SecretsIn = serde_json::from_str("{}").unwrap();
         assert_eq!(s.url, None);
+    }
+
+    /// One canned reply per connection; returns the raw requests.
+    async fn fake_homeserver(
+        replies: Vec<(&'static str, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let h = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, body) in replies {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0;
+                loop {
+                    let r = s.read(&mut buf[n..]).await.unwrap();
+                    n += r;
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(i) = text.find("\r\n\r\n") {
+                        let len = text[..i]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if n >= i + 4 + len || r == 0 {
+                            break;
+                        }
+                    } else if r == 0 {
+                        break;
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                s.write_all(reply.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        (url, h)
+    }
+
+    fn login(user: &str, pw: &str) -> BTreeMap<String, LoginIn> {
+        BTreeMap::from([(
+            "mx".to_string(),
+            LoginIn {
+                username: user.into(),
+                password: pw.into(),
+            },
+        )])
+    }
+
+    fn test_key() -> cl_secret::ClusterKey {
+        cl_secret::ClusterKey::generate()
+    }
+
+    #[test]
+    fn a_login_parses_and_is_distinct_from_a_token() {
+        let s: SecretsIn = serde_json::from_str(
+            r#"{"url":"https://m.example.org","login":{"username":"@bot:example.org","password":"pw"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.login.as_ref().unwrap().username, "@bot:example.org");
+        assert_eq!(s.auth, None);
+        let s: SecretsIn = serde_json::from_str("{}").unwrap();
+        assert!(s.login.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_becomes_only_a_token_in_the_secret_edits() {
+        let (url, h) = fake_homeserver(vec![(
+            "200 OK",
+            r#"{"access_token":"syt_the_token","device_id":"D"}"#.into(),
+        )])
+        .await;
+        let url_in = BTreeMap::from([("mx".to_string(), Some(url))]);
+        let mut auth_in = BTreeMap::new();
+        apply_logins(
+            &reqwest::Client::new(),
+            &cl_raft::ClusterState::default(),
+            &test_key(),
+            &login("@bot:example.org", "hunter2-pw"),
+            &url_in,
+            &mut auth_in,
+        )
+        .await
+        .unwrap();
+        assert_eq!(auth_in["mx"].as_deref(), Some("syt_the_token"));
+        // Nothing that would be written carries the username or password.
+        let written = format!("{auth_in:?}{url_in:?}");
+        assert!(!written.contains("hunter2-pw") && !written.contains("bot:example.org"));
+        let req = h.await.unwrap().remove(0);
+        assert!(req.starts_with("POST /_matrix/client/v3/login "));
+        assert!(req.contains("\"m.login.password\"") && req.contains("hunter2-pw"));
+    }
+
+    #[tokio::test]
+    async fn login_failures_are_validation_errors_without_secrets() {
+        let (url, _h) = fake_homeserver(vec![(
+            "403 Forbidden",
+            r#"{"errcode":"M_FORBIDDEN","error":"bad hunter2-pw for bot"}"#.into(),
+        )])
+        .await;
+        let url_in = BTreeMap::from([("mx".to_string(), Some(url.clone()))]);
+        let mut auth_in = BTreeMap::new();
+        let e = apply_logins(
+            &reqwest::Client::new(),
+            &cl_raft::ClusterState::default(),
+            &test_key(),
+            &login("bot", "hunter2-pw"),
+            &url_in,
+            &mut auth_in,
+        )
+        .await
+        .unwrap_err();
+        let ApiError::BadRequest(m) = e else {
+            panic!("expected a 400")
+        };
+        assert!(m.contains("the homeserver rejected the username or password"), "{m}");
+        assert!(!m.contains("hunter2-pw") && !m.contains(&url) && !m.contains("syt_"));
+        assert!(auth_in.is_empty());
+
+        // Unreachable homeserver: still a 400, still nothing leaked.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = format!("http://{}", l.local_addr().unwrap());
+        drop(l);
+        let url_in = BTreeMap::from([("mx".to_string(), Some(dead.clone()))]);
+        let e = apply_logins(
+            &reqwest::Client::new(),
+            &cl_raft::ClusterState::default(),
+            &test_key(),
+            &login("bot", "hunter2-pw"),
+            &url_in,
+            &mut auth_in,
+        )
+        .await
+        .unwrap_err();
+        let ApiError::BadRequest(m) = e else {
+            panic!("expected a 400")
+        };
+        assert!(m.contains("could not log in") && !m.contains("hunter2-pw") && !m.contains(&dead));
+        assert!(auth_in.is_empty());
+
+        // No homeserver URL given or saved.
+        let e = apply_logins(
+            &reqwest::Client::new(),
+            &cl_raft::ClusterState::default(),
+            &test_key(),
+            &login("bot", "pw"),
+            &BTreeMap::new(),
+            &mut auth_in,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, ApiError::BadRequest(m) if m.contains("homeserver URL is required")));
+        // A blank password is refused before any request.
+        let url_in = BTreeMap::from([("mx".to_string(), Some("http://127.0.0.1:9".to_string()))]);
+        let e = apply_logins(
+            &reqwest::Client::new(),
+            &cl_raft::ClusterState::default(),
+            &test_key(),
+            &login("bot", ""),
+            &url_in,
+            &mut auth_in,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, ApiError::BadRequest(m) if m.contains("both the username and the password")));
     }
 
     #[test]

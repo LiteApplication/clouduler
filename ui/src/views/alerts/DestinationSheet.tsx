@@ -137,7 +137,11 @@ export function DestinationSheet({
         ? { name: f.original! }
         : {
             destination: formToDestination({ ...f, name: f.name.trim() || 'test' }),
-            secrets: { ...(edits?.url ? { url: edits.url } : {}), ...(typeof edits?.auth === 'string' ? { auth: edits.auth } : {}) },
+            secrets: {
+              ...(edits?.url ? { url: edits.url } : {}),
+              ...(typeof edits?.auth === 'string' ? { auth: edits.auth } : {}),
+              ...(edits?.login ? { login: edits.login } : {}),
+            },
             ...(f.kind === 'email' && settings.settings.smtp ? { smtp: settings.settings.smtp } : {}),
           };
       setResult(await api.testAlert(req));
@@ -159,6 +163,8 @@ export function DestinationSheet({
       await api.putAlertSettings(
         saveBody(upsertDestination(settings.settings, f.original, dest), edits ? { [dest.name]: edits } : undefined),
       );
+      // The password was used once by the server; do not keep it around.
+      setF((x) => ({ ...x, loginUser: '', loginPassword: '', auth: '' }));
       await onSaved();
       toast(editing ? 'Destination saved' : 'Destination added');
       onClose();
@@ -280,17 +286,56 @@ export function DestinationSheet({
                 onReplace={() => setReplaceAuth(true)}
               />
             ) : (
-              <TextField
-                label="Access token"
-                type="password"
-                mono
-                placeholder="syt_…"
-                value={f.auth}
-                autoFocus={replaceAuth}
-                error={shown('auth')}
-                hint={(replaceAuth ? 'Leave blank to keep the saved one. ' : '') + 'The bot account access token. Stored sealed and never shown again.'}
-                onChange={(e) => set({ auth: e.target.value })}
-              />
+              <div className="col" style={{ gap: 8 }}>
+                <span className="cl-label">Sign in as the bot with</span>
+                <Segmented
+                  label="Matrix sign-in"
+                  value={f.authMode}
+                  options={[
+                    { value: 'token', label: 'Access token' },
+                    { value: 'password', label: 'Username & password' },
+                  ]}
+                  onChange={(authMode) => set({ authMode, auth: '', loginUser: '', loginPassword: '' })}
+                />
+                {f.authMode === 'token' ? (
+                  <TextField
+                    label="Access token"
+                    type="password"
+                    mono
+                    placeholder="syt_…"
+                    value={f.auth}
+                    autoFocus={replaceAuth}
+                    error={shown('auth')}
+                    hint={(replaceAuth ? 'Leave blank to keep the saved one. ' : '') + 'The bot account access token. Stored sealed and never shown again.'}
+                    onChange={(e) => set({ auth: e.target.value })}
+                  />
+                ) : (
+                  <>
+                    <TextField
+                      label="Username"
+                      mono
+                      placeholder="@bot:example.org"
+                      autoComplete="off"
+                      value={f.loginUser}
+                      autoFocus={replaceAuth}
+                      onChange={(e) => set({ loginUser: e.target.value })}
+                    />
+                    <TextField
+                      label="Password"
+                      type="password"
+                      mono
+                      autoComplete="new-password"
+                      value={f.loginPassword}
+                      error={shown('auth')}
+                      hint={
+                        (replaceAuth ? 'Leave both blank to keep the saved token. ' : '') +
+                        'Used once to log in. Only the resulting access token is stored (sealed); the username and password are never saved.'
+                      }
+                      onChange={(e) => set({ loginPassword: e.target.value })}
+                    />
+                  </>
+                )}
+              </div>
             )}
           </>
         )}

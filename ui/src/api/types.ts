@@ -1462,7 +1462,7 @@ export interface AlertSettingsResponse {
 /** Secret edits: absent keeps, null deletes, a string replaces. */
 export interface AlertSettingsUpdate {
   settings: AlertSettings;
-  secrets?: Record<string, { url?: string | null; auth?: string | null }>;
+  secrets?: Record<string, { url?: string | null; auth?: string | null; login?: { username: string; password: string } }>;
   smtp_password?: string | null;
 }
 
@@ -1470,7 +1470,7 @@ export type AlertTestRequest =
   | { name: string }
   | {
       destination: AlertDestination;
-      secrets: { url?: string; auth?: string };
+      secrets: { url?: string; auth?: string; login?: { username: string; password: string } };
       smtp?: AlertSmtp;
       smtp_password?: string;
     };

@@ -314,8 +314,8 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/alerts` | user | none | `{active, recent, counts}` | `recent` has at most 300 entries. |
 | GET | `/api/alerts/catalog` | user | none | `[CatalogEntry]` | |
 | GET | `/api/alerts/settings` | user | none | `{settings, secrets: {dest: {url, auth_set}}, smtp_password, health}` | URLs masked to scheme and host. |
-| PUT | `/api/alerts/settings` | admin | `{settings, secrets?, smtp_password?}` | SettingsView | A key left out keeps the value, null deletes, a string replaces. A masked URL keeps the stored one. 409 on a concurrent edit. |
-| POST | `/api/alerts/test` | admin | `{name}` or `{destination, secrets, smtp?, smtp_password?}` | `{ok, error?}` | One attempt, 10 s limit. Giving both fails with `give either name or destination`. |
+| PUT | `/api/alerts/settings` | admin | `{settings, secrets?, smtp_password?}` | SettingsView | A key left out keeps the value, null deletes, a string replaces. A masked URL keeps the stored one. A Matrix destination may instead give `secrets.<name>.login: {username, password}`: the server logs in, stores only the token and discards both; a failed login is a 400. 409 on a concurrent edit. |
+| POST | `/api/alerts/test` | admin | `{name}` or `{destination, secrets, smtp?, smtp_password?}` | `{ok, error?}` | One attempt, 10 s limit. For Matrix, `secrets.login` logs in for this test only (nothing stored, logged out after). Giving both fails with `give either name or destination`. |
 
 See [Alerts](/docs/features/alerts).
 

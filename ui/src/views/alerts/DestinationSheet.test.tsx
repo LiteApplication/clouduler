@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../api/client';
 import type { AlertDestination, AlertSettingsResponse } from '../../api/types';
 import { ToastProvider } from '../../ds';
-import { formFrom } from '../../lib/alerts';
+import { formFrom, newForm } from '../../lib/alerts';
 import { DestinationSheet } from './DestinationSheet';
 
 const dest = { name: 'pager', kind: 'webhook', severities: ['critical'], categories: [] } as unknown as AlertDestination;
@@ -48,5 +48,31 @@ describe('DestinationSheet sealed values', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenCalled());
     expect(put.mock.calls[0][0].secrets).toEqual({ pager: { auth: null } });
+  });
+
+  it('sends a matrix username and password as a login, never as a token', async () => {
+    const put = vi.spyOn(api, 'putAlertSettings').mockResolvedValue(undefined as never);
+    const empty = { destinations: [] } as unknown as AlertSettingsResponse['settings'];
+    render(
+      <ToastProvider>
+        <DestinationSheet
+          initial={{ ...newForm('matrix'), name: 'mx', url: 'https://matrix.example.org', room: '!abc:example.org' }}
+          settings={{ settings: empty, secrets: {}, smtp_password: false, health: {} } as unknown as AlertSettingsResponse}
+          onClose={() => {}}
+          onSaved={async () => {}}
+          onOpenSmtp={() => {}}
+        />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Username & password' }));
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: '@bot:example.org' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'hunter2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add destination' }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    const body = put.mock.calls[0][0];
+    expect(body.secrets).toEqual({
+      mx: { url: 'https://matrix.example.org', login: { username: '@bot:example.org', password: 'hunter2' } },
+    });
+    expect(JSON.stringify(body.settings)).not.toMatch(/hunter2|@bot/);
   });
 });

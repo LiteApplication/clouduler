@@ -17,7 +17,10 @@ mod webhook;
 
 pub use discord::messages as discord_messages;
 pub use email::{render as render_email, Rendered};
-pub use matrix::{message as matrix_message, Message as MatrixMessage};
+pub use matrix::{
+    login as matrix_login, logout as matrix_logout, message as matrix_message,
+    Message as MatrixMessage,
+};
 pub use webhook::payload as webhook_payload;
 
 /// Every attempt gives up after this long.

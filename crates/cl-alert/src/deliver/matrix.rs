@@ -382,6 +382,121 @@ async fn resolve_alias(
         })
 }
 
+/// What a rejected login means, never quoting the homeserver's text (it may echo the username).
+fn explain_login(status: u16, body: &str) -> String {
+    let code = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["errcode"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    match (status, code.as_str()) {
+        (_, "M_USER_DEACTIVATED") => "the homeserver says this account is deactivated".into(),
+        (_, "M_UNRECOGNIZED") | (405, _) => {
+            "the homeserver does not offer password login; use an access token instead".into()
+        }
+        (400 | 401 | 403, _) => "the homeserver rejected the username or password".into(),
+        (404, _) => {
+            "the homeserver was not found (HTTP 404); check the homeserver URL".into()
+        }
+        (429, _) => "the homeserver is rate limiting logins".into(),
+        _ => format!("the homeserver answered HTTP {status} to the login"),
+    }
+}
+
+/// One login attempt. The username and password only go into the request body.
+async fn login_once(
+    http: &reqwest::Client,
+    homeserver: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, DeliveryError> {
+    let resp = http
+        .post(api(homeserver, "login"))
+        .timeout(TIMEOUT)
+        .header(USER_AGENT, format!("clouduler/{}", cl_config::version()))
+        .json(&json!({
+            "type": "m.login.password",
+            "identifier": { "type": "m.id.user", "user": username.trim() },
+            "password": password,
+            "initial_device_display_name": "Clouduler alerts",
+        }))
+        .send()
+        .await
+        .map_err(transport_error)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let header_wait = retry_after(resp.headers());
+        let body = resp.text().await.unwrap_or_default();
+        let code = status.as_u16();
+        let wait = header_wait.or_else(|| {
+            serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v["retry_after_ms"].as_f64())
+                .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                .map(|ms| Duration::from_secs_f64((ms / 1000.0).min(3600.0)))
+        });
+        return Err(DeliveryError {
+            message: explain_login(code, &body),
+            retryable: code == 429 || code == 408 || status.is_server_error(),
+            retry_after: wait,
+        });
+    }
+    let v: Value = resp.json().await.map_err(|_| DeliveryError {
+        message: "the homeserver sent an unreadable answer to the login".into(),
+        retryable: false,
+        retry_after: None,
+    })?;
+    v["access_token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| DeliveryError {
+            message: "the homeserver did not return an access token".into(),
+            retryable: false,
+            retry_after: None,
+        })
+}
+
+/// Log in with a username and password and return the access token. Retries
+/// a 429, 408, 5xx or transport failure twice, waiting what the homeserver asked
+/// (at most 5 seconds), because the caller is a person waiting on a Save button.
+/// The error message never holds the password, the token or the URL.
+pub async fn login(
+    http: &reqwest::Client,
+    homeserver: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, DeliveryError> {
+    let mut attempt = 0u32;
+    loop {
+        match login_once(http, homeserver, username, password).await {
+            Ok(t) => return Ok(t),
+            Err(e) if e.retryable && attempt < 2 => {
+                attempt += 1;
+                let wait = e
+                    .retry_after
+                    .unwrap_or(Duration::from_millis(500 * u64::from(attempt)))
+                    .min(Duration::from_secs(5));
+                tokio::time::sleep(wait).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Best effort: drop the device a test login created. Failures are ignored.
+pub async fn logout(http: &reqwest::Client, homeserver: &str, token: &str) {
+    let Ok(auth) = bearer(token) else { return };
+    let _ = http
+        .post(api(homeserver, "logout"))
+        .timeout(TIMEOUT)
+        .header(USER_AGENT, format!("clouduler/{}", cl_config::version()))
+        .header(AUTHORIZATION, auth)
+        .json(&json!({}))
+        .send()
+        .await;
+}
+
 pub async fn send(
     http: &reqwest::Client,
     homeserver: &str,
@@ -546,6 +661,139 @@ mod tests {
         let o: MatrixOptions =
             serde_json::from_str(r#"{"room":"!r:example.org","style":"short"}"#).unwrap();
         assert_eq!(o.style, MatrixStyle::Short);
+    }
+
+    /// Serves one canned response per connection, in order, and returns the raw requests.
+    async fn serve_seq(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let h = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for response in responses {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0;
+                loop {
+                    let r = s.read(&mut buf[n..]).await.unwrap();
+                    n += r;
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(i) = text.find("\r\n\r\n") {
+                        let len = text[..i]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if n >= i + 4 + len || r == 0 {
+                            break;
+                        }
+                    } else if r == 0 {
+                        break;
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                s.write_all(response.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        (url, h)
+    }
+
+    fn reply(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn login_ok() -> String {
+        reply(
+            "200 OK",
+            r#"{"access_token":"syt_tok_123","user_id":"@bot:x","device_id":"D"}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn login_posts_the_password_request_and_returns_the_token() {
+        let (url, h) = serve_seq(vec![login_ok()]).await;
+        let t = login(&reqwest::Client::new(), &format!("{url}/"), " @bot:x ", "pw-secret")
+            .await
+            .unwrap();
+        assert_eq!(t, "syt_tok_123");
+        let req = h.await.unwrap().remove(0);
+        assert!(req.starts_with("POST /_matrix/client/v3/login "));
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["type"], "m.login.password");
+        assert_eq!(body["identifier"]["type"], "m.id.user");
+        assert_eq!(body["identifier"]["user"], "@bot:x");
+        assert_eq!(body["password"], "pw-secret");
+        assert_eq!(body["initial_device_display_name"], "Clouduler alerts");
+        assert!(!req.to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn login_failures_are_clear_and_leak_nothing() {
+        let forbidden = reply(
+            "403 Forbidden",
+            r#"{"errcode":"M_FORBIDDEN","error":"Invalid username or password pw-secret"}"#,
+        );
+        let (url, _h) = serve_seq(vec![forbidden]).await;
+        let e = login(&reqwest::Client::new(), &url, "bot", "pw-secret")
+            .await
+            .unwrap_err();
+        assert_eq!(e.message, "the homeserver rejected the username or password");
+        assert!(!e.retryable);
+        assert!(!e.message.contains("pw-secret") && !e.message.contains("127.0.0.1"));
+
+        let no_token = reply("200 OK", "{}");
+        let (url, _h) = serve_seq(vec![no_token]).await;
+        let e = login(&reqwest::Client::new(), &url, "bot", "pw").await.unwrap_err();
+        assert!(e.message.contains("did not return an access token"));
+
+        // Nothing listens here: the error names no host, port or password.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = format!("http://{}", l.local_addr().unwrap());
+        drop(l);
+        let e = login(&reqwest::Client::new(), &dead, "bot", "pw-secret")
+            .await
+            .unwrap_err();
+        assert!(e.message.starts_with("request failed"));
+        assert!(!e.message.contains("pw-secret") && !e.message.contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn login_retries_a_rate_limit_then_succeeds() {
+        let limited = reply(
+            "429 Too Many Requests",
+            r#"{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":10,"error":"x"}"#,
+        );
+        let (url, h) = serve_seq(vec![limited, login_ok()]).await;
+        let t = login(&reqwest::Client::new(), &url, "bot", "pw").await.unwrap();
+        assert_eq!(t, "syt_tok_123");
+        assert_eq!(h.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn logout_sends_the_bearer_token() {
+        let (url, h) = serve_seq(vec![reply("200 OK", "{}")]).await;
+        logout(&reqwest::Client::new(), &url, "syt_tok_123").await;
+        let req = h.await.unwrap().remove(0);
+        assert!(req.starts_with("POST /_matrix/client/v3/logout "));
+        assert!(req.to_ascii_lowercase().contains("authorization: bearer syt_tok_123"));
+    }
+
+    #[test]
+    fn login_errors_name_the_cause() {
+        assert!(explain_login(403, "").contains("username or password"));
+        assert!(explain_login(401, "").contains("username or password"));
+        assert!(explain_login(404, "").contains("not found"));
+        assert!(explain_login(400, r#"{"errcode":"M_UNRECOGNIZED"}"#).contains("does not offer"));
+        assert!(explain_login(500, "").contains("HTTP 500"));
     }
 
     #[test]
