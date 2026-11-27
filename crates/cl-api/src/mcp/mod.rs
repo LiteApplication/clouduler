@@ -136,27 +136,7 @@ pub(crate) async fn forward_to_leader(state: &AppState, request: Request) -> Res
             req = req.header(name, v);
         }
     }
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return ApiError::Unavailable(format!("could not reach the leader: {e}"))
-                .into_response()
-        }
-    };
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let mut out = Response::new(Body::from_stream(resp.bytes_stream()));
-    *out.status_mut() = status;
-    for (name, value) in &headers {
-        if matches!(
-            *name,
-            header::TRANSFER_ENCODING | header::CONNECTION | header::CONTENT_LENGTH
-        ) {
-            continue;
-        }
-        out.headers_mut().append(name.clone(), value.clone());
-    }
-    out
+    crate::server::send_to_leader(req).await
 }
 
 #[derive(Clone)]

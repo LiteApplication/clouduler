@@ -529,6 +529,31 @@ fn explain(status: u16, body: &str) -> String {
     }
 }
 
+/// Turns a failed (non-success) Discord webhook response into a delivery error, honouring both
+/// the `Retry-After` header and the JSON `retry_after` body field.
+async fn rate_limit_error(resp: reqwest::Response) -> DeliveryError {
+    let status = resp.status();
+    let header_wait = retry_after(resp.headers());
+    let body = resp.text().await.unwrap_or_default();
+    let wait = header_wait.or_else(|| {
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v["retry_after"].as_f64())
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| Duration::from_secs_f64(s.min(3600.0)))
+    });
+    let code = status.as_u16();
+    DeliveryError {
+        message: if code == 429 {
+            "Discord is rate limiting this webhook".to_string()
+        } else {
+            explain(code, &body)
+        },
+        retryable: code == 429 || code == 408 || status.is_server_error(),
+        retry_after: wait,
+    }
+}
+
 pub async fn send(
     http: &reqwest::Client,
     url: &str,
@@ -568,25 +593,7 @@ pub async fn send(
             }
             // If the original message was deleted (404), fall back to posting a new message
             if status.as_u16() != 404 {
-                let header_wait = retry_after(resp.headers());
-                let body = resp.text().await.unwrap_or_default();
-                let wait = header_wait.or_else(|| {
-                    serde_json::from_str::<Value>(&body)
-                        .ok()
-                        .and_then(|v| v["retry_after"].as_f64())
-                        .filter(|s| s.is_finite() && *s >= 0.0)
-                        .map(|s| Duration::from_secs_f64(s.min(3600.0)))
-                });
-                let code = status.as_u16();
-                return Err(DeliveryError {
-                    message: if code == 429 {
-                        "Discord is rate limiting this webhook".to_string()
-                    } else {
-                        explain(code, &body)
-                    },
-                    retryable: code == 429 || code == 408 || status.is_server_error(),
-                    retry_after: wait,
-                });
+                return Err(rate_limit_error(resp).await);
             }
         }
 
@@ -618,25 +625,7 @@ pub async fn send(
             }
             continue;
         }
-        let header_wait = retry_after(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        let wait = header_wait.or_else(|| {
-            serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v["retry_after"].as_f64())
-                .filter(|s| s.is_finite() && *s >= 0.0)
-                .map(|s| Duration::from_secs_f64(s.min(3600.0)))
-        });
-        let code = status.as_u16();
-        return Err(DeliveryError {
-            message: if code == 429 {
-                "Discord is rate limiting this webhook".to_string()
-            } else {
-                explain(code, &body)
-            },
-            retryable: code == 429 || code == 408 || status.is_server_error(),
-            retry_after: wait,
-        });
+        return Err(rate_limit_error(resp).await);
     }
     Ok(returned_id)
 }

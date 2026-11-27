@@ -98,6 +98,30 @@ pub struct IssuedCertificate {
     pub not_after: i64,
 }
 
+/// Polls a fully-authorized order to ready, finalizes it and fetches the certificate chain.
+async fn finish_order(mut order: instant_acme::Order) -> Result<IssuedCertificate> {
+    let status = order
+        .poll_ready(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
+    if status != OrderStatus::Ready {
+        return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
+    }
+
+    let key_pem = order.finalize().await.map_err(acme_err)?;
+    let chain_pem = order
+        .poll_certificate(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
+    let not_after = leaf_not_after(&chain_pem)?;
+
+    Ok(IssuedCertificate {
+        chain_pem,
+        key_pem,
+        not_after,
+    })
+}
+
 /// Every challenge record created is cleared at the end, success or not, so a
 /// failed order never leaves stray TXT records behind.
 pub async fn issue_certificate(
@@ -124,26 +148,7 @@ pub async fn issue_certificate(
     }
     setup?;
 
-    let status = order
-        .poll_ready(&RetryPolicy::default())
-        .await
-        .map_err(acme_err)?;
-    if status != OrderStatus::Ready {
-        return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
-    }
-
-    let key_pem = order.finalize().await.map_err(acme_err)?;
-    let chain_pem = order
-        .poll_certificate(&RetryPolicy::default())
-        .await
-        .map_err(acme_err)?;
-    let not_after = leaf_not_after(&chain_pem)?;
-
-    Ok(IssuedCertificate {
-        chain_pem,
-        key_pem,
-        not_after,
-    })
+    finish_order(order).await
 }
 
 async fn complete_authorizations(
@@ -214,26 +219,7 @@ pub async fn issue_certificate_http01(
     }
     setup?;
 
-    let status = order
-        .poll_ready(&RetryPolicy::default())
-        .await
-        .map_err(acme_err)?;
-    if status != OrderStatus::Ready {
-        return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
-    }
-
-    let key_pem = order.finalize().await.map_err(acme_err)?;
-    let chain_pem = order
-        .poll_certificate(&RetryPolicy::default())
-        .await
-        .map_err(acme_err)?;
-    let not_after = leaf_not_after(&chain_pem)?;
-
-    Ok(IssuedCertificate {
-        chain_pem,
-        key_pem,
-        not_after,
-    })
+    finish_order(order).await
 }
 
 async fn complete_authorizations_http01(
