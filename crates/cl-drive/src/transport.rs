@@ -778,17 +778,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                         path: target.clone(),
                         source,
                     })?;
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io {
-                            path: target.clone(),
-                            source,
-                        })?;
-                    std::os::unix::fs::chown(&target, Some(uid), Some(gid)).map_err(|source| {
-                        DriveError::Io {
-                            path: target,
-                            source,
-                        }
-                    })
+                    chmod_chown(&target, mode, uid, gid)
                 })
                 .await?;
             }
@@ -803,30 +793,14 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 off_runtime("restamping a directory", move || {
                     // `set_permissions` and `chown` follow a final symlink.
                     reject_symlink(&root, &target, &path)?;
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io {
-                            path: target.clone(),
-                            source,
-                        })?;
-                    std::os::unix::fs::chown(&target, Some(uid), Some(gid)).map_err(|source| {
-                        DriveError::Io {
-                            path: target,
-                            source,
-                        }
-                    })
+                    chmod_chown(&target, mode, uid, gid)
                 })
                 .await?;
             }
             Some(Message::SetRootMeta { mode, uid, gid }) => {
                 let root = root.clone();
                 off_runtime("restamping the volume root", move || {
-                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io {
-                            path: root.clone(),
-                            source,
-                        })?;
-                    std::os::unix::fs::chown(&root, Some(uid), Some(gid))
-                        .map_err(|source| DriveError::Io { path: root, source })
+                    chmod_chown(&root, mode, uid, gid)
                 })
                 .await?;
             }
@@ -894,6 +868,33 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     Ok(())
 }
 
+/// Reads the peer's `Ready` answer to a manifest request.
+async fn expect_ready(conn: &mut Connection) -> Result<Manifest> {
+    match recv(conn).await.map_err(io_err)? {
+        Some(Message::Ready(manifest)) => Ok(manifest),
+        Some(other) => Err(DriveError::Transfer {
+            message: format!("expected ready, got {other:?}"),
+        }),
+        None => Err(DriveError::Transfer {
+            message: "peer closed before ready".into(),
+        }),
+    }
+}
+
+/// Sets `path`'s mode and owner, following a final symlink (callers reject those first).
+fn chmod_chown(path: &Path, mode: u32, uid: u32, gid: u32) -> Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
+        DriveError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|source| DriveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// Ask a peer for its manifest without starting a sync (migration verification).
 pub async fn request_manifest(
     peer: SocketAddr,
@@ -911,15 +912,7 @@ pub async fn request_manifest(
     )
     .await
     .map_err(io_err)?;
-    match recv(&mut conn).await.map_err(io_err)? {
-        Some(Message::Ready(manifest)) => Ok(manifest),
-        Some(other) => Err(DriveError::Transfer {
-            message: format!("expected ready, got {other:?}"),
-        }),
-        None => Err(DriveError::Transfer {
-            message: "peer closed before ready".into(),
-        }),
-    }
+    expect_ready(&mut conn).await
 }
 
 /// Like `request_manifest`, but the peer hashes only `hash_paths`.
@@ -939,15 +932,7 @@ pub async fn request_partial_manifest(
     )
     .await
     .map_err(io_err)?;
-    match recv(&mut conn).await.map_err(io_err)? {
-        Some(Message::Ready(manifest)) => Ok(manifest),
-        Some(other) => Err(DriveError::Transfer {
-            message: format!("expected ready, got {other:?}"),
-        }),
-        None => Err(DriveError::Transfer {
-            message: "peer closed before ready".into(),
-        }),
-    }
+    expect_ready(&mut conn).await
 }
 
 /// Best-effort unlink of a temp file: a missing file is the normal case, anything
