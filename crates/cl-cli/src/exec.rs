@@ -4,7 +4,7 @@
 
 use std::io::IsTerminal;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
 use futures::{SinkExt, StreamExt};
@@ -15,8 +15,48 @@ use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
-use crate::logs::resolve_target;
-use cl_raft::client::client_for;
+use crate::logs::{load_key, node_base_url, resolve_single};
+use cl_raft::Assignment;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+/// Opens the signed websocket to `path` on the node running `assignment`;
+/// `what` names the session in error messages.
+pub(crate) async fn connect_ws(
+    cfg: &ClusterConfig,
+    key: &ClusterKey,
+    assignment: &Assignment,
+    path: &str,
+    what: &str,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    let base = node_base_url(cfg, assignment)?;
+    let ws_base = base.replacen("https://", "wss://", 1);
+
+    let uri: Uri = format!("{ws_base}{path}")
+        .parse()
+        .with_context(|| format!("building the {what} url for {}", assignment.node))?;
+    let request = cl_update::internal_client::auth_headers(key, "GET", path, b"")
+        .into_iter()
+        .fold(ClientRequestBuilder::new(uri), |request, (name, value)| {
+            request.with_header(name, value)
+        });
+
+    let tls_config = insecure_tls_config();
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(Connector::Rustls(tls_config)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "connecting to {} for {}'s {what} session",
+            assignment.node, assignment.instance
+        )
+    })?;
+    Ok(ws_stream)
+}
 
 /// With no command, try `bash` and fall back to `sh` inside the container: many
 /// images (e.g. `alpine`) lack `bash`, and the server rejects an empty `cmd`.
@@ -38,39 +78,10 @@ pub async fn run(
     user: Option<String>,
     via: Option<&str>,
 ) -> Result<()> {
-    let state = client_for(cfg, via)?
-        .state()
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
-    let mut assignments = resolve_target(&state, target)?;
-    if assignments.len() > 1 {
-        let ids = assignments
-            .iter()
-            .map(|a| a.instance.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "{target} has {} running instances; name one directly: {ids}",
-            assignments.len()
-        );
-    }
-    let assignment = assignments.remove(0);
+    let assignment = resolve_single(cfg, target, via).await?;
     let cmd = default_shell_command(cmd);
 
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the node running this",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-
-    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
-        anyhow!(
-            "node {} has no address on the internal network",
-            assignment.node
-        )
-    })?;
-    let ws_base = base.replacen("https://", "wss://", 1);
+    let key = load_key(cfg, "the node running this")?;
 
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let qs = serde_urlencoded::to_string(ExecQuery {
@@ -80,29 +91,7 @@ pub async fn run(
     })?;
     let path = format!("/api/instances/internal/{}/exec?{qs}", assignment.instance);
 
-    let uri: Uri = format!("{ws_base}{path}")
-        .parse()
-        .with_context(|| format!("building the exec url for {}", assignment.node))?;
-    let request = cl_update::internal_client::auth_headers(&key, "GET", &path, b"")
-        .into_iter()
-        .fold(ClientRequestBuilder::new(uri), |request, (name, value)| {
-            request.with_header(name, value)
-        });
-
-    let tls_config = insecure_tls_config();
-    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-        request,
-        None,
-        false,
-        Some(Connector::Rustls(tls_config)),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "connecting to {} for {}'s exec session",
-            assignment.node, assignment.instance
-        )
-    })?;
+    let ws_stream = connect_ws(cfg, &key, &assignment, &path, "exec").await?;
 
     let raw_terminal = tty.then(RawTerminal::enable).transpose()?;
     let result = bridge(ws_stream).await;

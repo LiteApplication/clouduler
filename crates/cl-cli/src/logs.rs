@@ -22,28 +22,109 @@ pub struct LogsArgs {
     pub tail: u32,
 }
 
+/// Resolves `target` to its instances and builds what every per-node log
+/// request needs: the cluster key and an http client.
+async fn prepare(
+    cfg: &ClusterConfig,
+    target: &str,
+    via: Option<&str>,
+) -> Result<(Vec<Assignment>, Arc<ClusterKey>, reqwest::Client)> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let instances = resolve_target(&state, target)?;
+    let key = Arc::new(load_key(cfg, "the node(s) running this")?);
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("building the http client")?;
+    Ok((instances, key, http))
+}
+
+/// Loads this node's cluster key; `to` completes "to authenticate to ...".
+pub fn load_key(cfg: &ClusterConfig, to: &str) -> Result<ClusterKey> {
+    ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to {to}",
+            cfg.secrets.key_file.display()
+        )
+    })
+}
+
+/// Internal-network base url of the node running `assignment`.
+pub fn node_base_url(cfg: &ClusterConfig, assignment: &Assignment) -> Result<String> {
+    cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
+        anyhow!(
+            "node {} has no address on the internal network",
+            assignment.node
+        )
+    })
+}
+
+/// Resolves `target` to exactly one instance (`exec` and `capture` need one).
+pub async fn resolve_single(
+    cfg: &ClusterConfig,
+    target: &str,
+    via: Option<&str>,
+) -> Result<Assignment> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut assignments = resolve_target(&state, target)?;
+    if assignments.len() > 1 {
+        let ids = assignments
+            .iter()
+            .map(|a| a.instance.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "{target} has {} running instances; name one directly: {ids}",
+            assignments.len()
+        );
+    }
+    Ok(assignments.remove(0))
+}
+
+/// Opens the signed log stream of one instance on its node.
+async fn open_log_stream(
+    cfg: &ClusterConfig,
+    http: &reqwest::Client,
+    key: &ClusterKey,
+    assignment: &Assignment,
+    follow: bool,
+    tail: u32,
+) -> Result<reqwest::Response> {
+    let base = node_base_url(cfg, assignment)?;
+    let path = format!(
+        "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
+        assignment.instance
+    );
+
+    let resp =
+        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "asking {} for {}'s logs",
+                    assignment.node, assignment.instance
+                )
+            })?;
+    if !resp.status().is_success() {
+        bail!("{} answered {}", assignment.node, resp.status());
+    }
+    Ok(resp)
+}
+
 pub async fn run(
     cfg: &ClusterConfig,
     target: &str,
     args: LogsArgs,
     via: Option<&str>,
 ) -> Result<()> {
-    let state = client_for(cfg, via)?
-        .state()
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
-    let instances = resolve_target(&state, target)?;
-
-    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the node(s) running this",
-            cfg.secrets.key_file.display()
-        )
-    })?);
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let (instances, key, http) = prepare(cfg, target, via).await?;
 
     // Only label lines by instance once there is more than one stream to tell
     // apart, so a single container's logs read exactly like `docker logs`.
@@ -82,22 +163,7 @@ pub async fn merged(
     args: LogsArgs,
     via: Option<&str>,
 ) -> Result<()> {
-    let state = client_for(cfg, via)?
-        .state()
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
-    let instances = resolve_target(&state, target)?;
-
-    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the node(s) running this",
-            cfg.secrets.key_file.display()
-        )
-    })?);
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let (instances, key, http) = prepare(cfg, target, via).await?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     for assignment in instances {
@@ -198,30 +264,7 @@ async fn fetch_events(
     tail: u32,
     tx: tokio::sync::mpsc::UnboundedSender<MergedEvent>,
 ) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
-        anyhow!(
-            "node {} has no address on the internal network",
-            assignment.node
-        )
-    })?;
-    let path = format!(
-        "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
-        assignment.instance
-    );
-
-    let resp =
-        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
-            .send()
-            .await
-            .with_context(|| {
-                format!(
-                    "asking {} for {}'s logs",
-                    assignment.node, assignment.instance
-                )
-            })?;
-    if !resp.status().is_success() {
-        bail!("{} answered {}", assignment.node, resp.status());
-    }
+    let resp = open_log_stream(cfg, http, key, assignment, follow, tail).await?;
 
     let instance = assignment.instance.to_string();
     let mut stream = resp.bytes_stream();
@@ -307,30 +350,7 @@ async fn stream_one(
     tail: u32,
     label: bool,
 ) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
-        anyhow!(
-            "node {} has no address on the internal network",
-            assignment.node
-        )
-    })?;
-    let path = format!(
-        "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
-        assignment.instance
-    );
-
-    let resp =
-        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
-            .send()
-            .await
-            .with_context(|| {
-                format!(
-                    "asking {} for {}'s logs",
-                    assignment.node, assignment.instance
-                )
-            })?;
-    if !resp.status().is_success() {
-        bail!("{} answered {}", assignment.node, resp.status());
-    }
+    let resp = open_log_stream(cfg, http, key, assignment, follow, tail).await?;
 
     let prefix = label.then(|| assignment.instance.to_string());
     print_events(resp, prefix.as_deref()).await
