@@ -86,7 +86,7 @@ pub async fn deliver(
                 retryable: false,
                 retry_after: None,
             })?;
-            matrix::send(http, url, token, opts, n).await.map(|()| None)
+            matrix::send(http, url, token, opts, n, edit_message_id).await
         }
         DestinationKind::Email { to } => email::send(smtp, secrets.smtp_password.as_deref(), to, n)
             .await
@@ -238,6 +238,7 @@ mod tests {
             &dest(DestinationKind::Matrix(MatrixOptions {
                 room: "!abc:example.org".into(),
                 style: Default::default(),
+                edit_resolved: false,
             })),
             &secrets,
             None,
@@ -267,6 +268,7 @@ mod tests {
         let kind = DestinationKind::Matrix(MatrixOptions {
             room: "!abc:example.org".into(),
             style: Default::default(),
+            edit_resolved: false,
         });
         let e = deliver(
             &reqwest::Client::new(),

@@ -378,6 +378,7 @@ mod tests {
         s2.destinations[0].kind = DestinationKind::Matrix(cl_alert::MatrixOptions {
             room: "nope".into(),
             style: Default::default(),
+            edit_resolved: false,
         });
         assert_eq!(
             validate(&s2, &yes, &yes, &url).unwrap_err().0,

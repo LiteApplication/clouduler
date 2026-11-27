@@ -25,7 +25,7 @@ const SAMPLES: Record<Sample, { emoji: string; word: string; title: string; deta
   },
 };
 
-export function MatrixPreview({ style, cluster = 'homelab' }: { style: MatrixStyle; cluster?: string }) {
+export function MatrixPreview({ style }: { style: MatrixStyle }) {
   const [sample, setSample] = useState<Sample>('critical');
   const s = SAMPLES[sample];
   return (
@@ -45,11 +45,12 @@ export function MatrixPreview({ style, cluster = 'homelab' }: { style: MatrixSty
             <span>
               {s.emoji} <b>{s.word}</b> {s.title}
             </span>
-            <span>{s.detail}</span>
-            <em>{s.where}{sample === 'critical' ? ' · x3' : ''}</em>
-            {s.code && <pre className="code" style={{ margin: 0 }}>{s.code}</pre>}
+            <blockquote className="col" style={{ gap: 4, margin: 0, paddingLeft: 10, borderLeft: '3px solid var(--line)' }}>
+              <span>{s.detail}</span>
+              <em>{s.where}{sample === 'critical' ? ' · x3' : ''}</em>
+              {s.code && <pre className="code" style={{ margin: 0 }}>{s.code}</pre>}
+            </blockquote>
             <span>Open in Clouduler</span>
-            <small>{cluster}</small>
           </>
         )}
       </div>

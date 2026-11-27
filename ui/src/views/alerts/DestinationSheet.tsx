@@ -278,6 +278,12 @@ export function DestinationSheet({
               />
               <MatrixPreview style={f.matrixStyle} />
             </div>
+            <Toggle
+              label="Edit resolved messages"
+              description="Update the original alert message in-place when resolved instead of sending a new message. If it was deleted, a new message is posted."
+              checked={f.edit_resolved}
+              onChange={(edit_resolved) => set({ edit_resolved })}
+            />
             {saved?.auth_set && !replaceAuth ? (
               <SealedValue
                 label="Access token"

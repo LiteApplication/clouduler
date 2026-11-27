@@ -348,6 +348,7 @@ export function formFrom(d: AlertDestination): DestForm {
   } else if (d.kind === 'matrix') {
     f.room = d.room;
     f.matrixStyle = d.style ?? 'full';
+    f.edit_resolved = d.edit_resolved ?? false;
   } else if (d.kind === 'email') {
     f.to = d.to.join('\n');
   }
@@ -382,7 +383,7 @@ export function formToDestination(f: DestForm): AlertDestination {
       ...(f.avatarUrl.trim() ? { avatar_url: f.avatarUrl.trim() } : {}),
     };
   }
-  if (f.kind === 'matrix') return { ...base, kind: 'matrix', room: f.room.trim(), style: f.matrixStyle };
+  if (f.kind === 'matrix') return { ...base, kind: 'matrix', room: f.room.trim(), style: f.matrixStyle, edit_resolved: f.edit_resolved };
   if (f.kind === 'email') return { ...base, kind: 'email', to: splitList(f.to) };
   return { ...base, kind: 'webhook' };
 }

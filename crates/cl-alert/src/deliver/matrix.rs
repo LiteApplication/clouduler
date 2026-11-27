@@ -42,6 +42,20 @@ impl Message {
     }
 }
 
+impl Message {
+    /// An `m.replace` edit of the event `event_id`; clients show the new content in its place.
+    pub fn edit_payload(&self, event_id: &str) -> Value {
+        json!({
+            "msgtype": "m.text",
+            "body": format!("* {}", self.body),
+            "format": "org.matrix.custom.html",
+            "formatted_body": format!("* {}", self.formatted_body),
+            "m.new_content": self.payload(),
+            "m.relates_to": { "rel_type": "m.replace", "event_id": event_id },
+        })
+    }
+}
+
 fn emoji(m: &AlertMessage) -> &'static str {
     if m.phase == Phase::Resolved {
         return "\u{2705}";
@@ -97,7 +111,7 @@ fn short_alert(m: &AlertMessage) -> Message {
     }
 }
 
-fn alert_message(n: &Notification, m: &AlertMessage) -> Message {
+fn alert_message(m: &AlertMessage) -> Message {
     let mut text = format!("{} {} {}", emoji(m), word(m), m.title);
     let mut html = format!(
         "{} <strong>{}</strong> {}",
@@ -105,10 +119,13 @@ fn alert_message(n: &Notification, m: &AlertMessage) -> Message {
         word(m),
         escape(&m.title)
     );
+    // The details sit in a quote under the title: the detail, the facts and the log excerpt.
+    let mut quoted: Vec<String> = Vec::new();
+    let mut quote_html = String::new();
     if !m.detail.is_empty() {
         let d = truncate(&m.detail, DETAIL_MAX);
-        text.push_str(&format!("\n{d}"));
-        html.push_str(&format!("<br>{}", escape(&d).replace('\n', "<br>")));
+        quote_html.push_str(&escape(&d).replace('\n', "<br>"));
+        quoted.push(d);
     }
     let mut facts = where_facts(m);
     if m.count > 1 {
@@ -119,13 +136,22 @@ fn alert_message(n: &Notification, m: &AlertMessage) -> Message {
     }
     if !facts.is_empty() {
         let line = facts.join(" \u{b7} ");
-        text.push_str(&format!("\n{line}"));
-        html.push_str(&format!("<br><em>{}</em>", escape(&line)));
+        if !quote_html.is_empty() {
+            quote_html.push_str("<br>");
+        }
+        quote_html.push_str(&format!("<em>{}</em>", escape(&line)));
+        quoted.push(line);
     }
     if !m.excerpt.is_empty() {
         let ex = truncate(&m.excerpt.join("\n"), EXCERPT_MAX);
-        text.push_str(&format!("\n{ex}"));
-        html.push_str(&format!("<pre><code>{}</code></pre>", escape(&ex)));
+        quote_html.push_str(&format!("<pre><code>{}</code></pre>", escape(&ex)));
+        quoted.push(ex);
+    }
+    if !quoted.is_empty() {
+        for line in quoted.join("\n").lines() {
+            text.push_str(&format!("\n> {line}"));
+        }
+        html.push_str(&format!("<blockquote>{quote_html}</blockquote>"));
     }
     for l in m.links.iter().filter(|l| is_http(&l.url)) {
         text.push_str(&format!("\n{}: {}", l.label, l.url.trim()));
@@ -135,16 +161,10 @@ fn alert_message(n: &Notification, m: &AlertMessage) -> Message {
             escape(&l.label)
         ));
     }
-    footer(n, &mut text, &mut html);
     Message {
         body: truncate(&text, BODY_MAX),
         formatted_body: html,
     }
-}
-
-fn footer(n: &Notification, text: &mut String, html: &mut String) {
-    text.push_str(&format!("\n\u{2014} {}", n.cluster));
-    html.push_str(&format!("<br><sub>{}</sub>", escape(&n.cluster)));
 }
 
 fn short_test(n: &Notification) -> Message {
@@ -231,7 +251,7 @@ pub fn message(n: &Notification, style: MatrixStyle) -> Message {
     match (&n.body, style) {
         (Body::Test, MatrixStyle::Full) => test_message(n),
         (Body::Test, MatrixStyle::Short) => short_test(n),
-        (Body::Alert(m), MatrixStyle::Full) => alert_message(n, m),
+        (Body::Alert(m), MatrixStyle::Full) => alert_message(m),
         (Body::Alert(m), MatrixStyle::Short) => short_alert(m),
         (Body::Digest { alerts }, _) => digest_message(n, alerts),
     }
@@ -497,13 +517,17 @@ pub async fn logout(http: &reqwest::Client, homeserver: &str, token: &str) {
         .await;
 }
 
+/// Sends `n` and returns the new event's ID. A resolved alert is an edit of
+/// `edit_message_id` when `edit_resolved` is on; if the homeserver refuses the edit
+/// (the event is gone, or not ours to edit) a new message is posted instead.
 pub async fn send(
     http: &reqwest::Client,
     homeserver: &str,
     token: &str,
     opts: &MatrixOptions,
     n: &Notification,
-) -> Result<(), DeliveryError> {
+    edit_message_id: Option<&str>,
+) -> Result<Option<String>, DeliveryError> {
     let auth = bearer(token)?;
     let room = opts.room.trim();
     let room_id = if room.starts_with('#') {
@@ -511,25 +535,42 @@ pub async fn send(
     } else {
         room.to_string()
     };
-    let url = api(
-        homeserver,
-        &format!(
-            "rooms/{}/send/m.room.message/{}",
-            encode_segment(&room_id),
-            txn_id()
-        ),
-    );
-    let resp = http
-        .put(url)
-        .timeout(TIMEOUT)
-        .header(USER_AGENT, format!("clouduler/{}", cl_config::version()))
-        .header(AUTHORIZATION, auth)
-        .json(&message(n, opts.style).payload())
-        .send()
-        .await
-        .map_err(transport_error)?;
+    let put = |payload: Value| {
+        let url = api(
+            homeserver,
+            &format!(
+                "rooms/{}/send/m.room.message/{}",
+                encode_segment(&room_id),
+                txn_id()
+            ),
+        );
+        http.put(url)
+            .timeout(TIMEOUT)
+            .header(USER_AGENT, format!("clouduler/{}", cl_config::version()))
+            .header(AUTHORIZATION, auth.clone())
+            .json(&payload)
+            .send()
+    };
+    let msg = message(n, opts.style);
+    let is_resolved = matches!(&n.body, Body::Alert(m) if m.phase == Phase::Resolved);
+    if let Some(id) = edit_message_id.filter(|_| opts.edit_resolved && is_resolved) {
+        let resp = put(msg.edit_payload(id)).await.map_err(transport_error)?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(Some(id.to_string()));
+        }
+        if status.as_u16() == 429 || status.as_u16() == 408 || status.is_server_error() {
+            return Err(failure(resp).await);
+        }
+    }
+    let resp = put(msg.payload()).await.map_err(transport_error)?;
     if resp.status().is_success() {
-        return Ok(());
+        let id = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["event_id"].as_str().map(str::to_string));
+        return Ok(id);
     }
     Err(failure(resp).await)
 }
@@ -584,6 +625,88 @@ mod tests {
         assert!(!html.contains("<b>x"));
         assert!(html.contains("<a href=\"https://cloud.test/stacks/media\">Open in Clouduler</a>"));
         assert!(html.contains("<pre><code>panic: out of memory</code></pre>"));
+    }
+
+    #[test]
+    fn details_are_quoted_and_the_cluster_is_left_out() {
+        let m = message_full(&notification(Body::Alert(alert(
+            Severity::Critical,
+            Phase::Opened,
+        ))));
+        assert!(m.body.starts_with("\u{1F534} CRITICAL media-radarr-1 keeps crashing\n> Restarted 3 times"));
+        assert!(m.body.contains("\n> stack media"));
+        assert!(m.body.contains("\n> panic: out of memory"));
+        assert!(!m.body.contains("piosny") && !m.formatted_body.contains("piosny"));
+        assert!(!m.formatted_body.contains("<sub>"));
+        let h = &m.formatted_body;
+        let (q0, q1) = (h.find("<blockquote>").unwrap(), h.find("</blockquote>").unwrap());
+        assert!(h.find("<strong>CRITICAL</strong>").unwrap() < q0);
+        assert!(h[q0..q1].contains("Restarted 3 times") && h[q0..q1].contains("<pre><code>"));
+        assert!(h.find("Open in Clouduler").unwrap() > q1);
+    }
+
+    #[test]
+    fn edit_payload_replaces_the_original_event() {
+        let m = message_full(&notification(Body::Alert(alert(
+            Severity::Critical,
+            Phase::Resolved,
+        ))));
+        let p = m.edit_payload("$orig");
+        assert_eq!(p["m.relates_to"]["rel_type"], "m.replace");
+        assert_eq!(p["m.relates_to"]["event_id"], "$orig");
+        assert_eq!(p["m.new_content"]["body"], m.body);
+        assert_eq!(p["body"], format!("* {}", m.body));
+    }
+
+    fn opts_edit(edit_resolved: bool) -> MatrixOptions {
+        MatrixOptions {
+            room: "!r:example.org".into(),
+            style: MatrixStyle::Full,
+            edit_resolved,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_returns_the_event_id_and_edits_a_resolved_alert() {
+        let (url, h) = serve_seq(vec![reply("200 OK", r#"{"event_id":"$new"}"#)]).await;
+        let opened = notification(Body::Alert(alert(Severity::Critical, Phase::Opened)));
+        let id = send(&reqwest::Client::new(), &url, "t", &opts_edit(true), &opened, None)
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("$new"));
+        drop(h);
+
+        let (url, h) = serve_seq(vec![reply("200 OK", r#"{"event_id":"$edit"}"#)]).await;
+        let resolved = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
+        let id = send(&reqwest::Client::new(), &url, "t", &opts_edit(true), &resolved, Some("$orig"))
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("$orig"));
+        let req = h.await.unwrap().remove(0);
+        assert!(req.contains("\"m.replace\"") && req.contains("$orig"));
+
+        // Off: a resolved alert is a new message.
+        let (url, h) = serve_seq(vec![reply("200 OK", r#"{"event_id":"$fresh"}"#)]).await;
+        let id = send(&reqwest::Client::new(), &url, "t", &opts_edit(false), &resolved, Some("$orig"))
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("$fresh"));
+        assert!(!h.await.unwrap().remove(0).contains("m.replace"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_edit_falls_back_to_a_new_message() {
+        let (url, h) = serve_seq(vec![
+            reply("404 Not Found", r#"{"errcode":"M_NOT_FOUND","error":"gone"}"#),
+            reply("200 OK", r#"{"event_id":"$fresh"}"#),
+        ])
+        .await;
+        let resolved = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
+        let id = send(&reqwest::Client::new(), &url, "t", &opts_edit(true), &resolved, Some("$orig"))
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("$fresh"));
+        assert_eq!(h.await.unwrap().len(), 2);
     }
 
     #[test]
@@ -658,6 +781,7 @@ mod tests {
     fn style_defaults_to_full_for_old_settings() {
         let o: MatrixOptions = serde_json::from_str(r#"{"room":"!r:example.org"}"#).unwrap();
         assert_eq!(o.style, MatrixStyle::Full);
+        assert!(!o.edit_resolved);
         let o: MatrixOptions =
             serde_json::from_str(r#"{"room":"!r:example.org","style":"short"}"#).unwrap();
         assert_eq!(o.style, MatrixStyle::Short);

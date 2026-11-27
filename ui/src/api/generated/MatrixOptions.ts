@@ -5,4 +5,9 @@ export type MatrixOptions = {
 /**
  * Room ID (`!abc:example.org`) or alias (`#ops:example.org`) messages go to.
  */
-room: string, style: MatrixStyle, };
+room: string, style: MatrixStyle, 
+/**
+ * When an alert resolves, edit the original alert message in-place
+ * instead of sending a new message.
+ */
+edit_resolved: boolean, };

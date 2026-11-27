@@ -1406,6 +1406,7 @@ export interface MatrixDestination extends AlertDestinationBase {
   /** Room ID (`!abc:example.org`) or alias (`#ops:example.org`). */
   room: string;
   style: MatrixStyle;
+  edit_resolved?: boolean;
 }
 export type AlertDestination = DiscordDestination | WebhookDestination | MatrixDestination | EmailDestination;
 

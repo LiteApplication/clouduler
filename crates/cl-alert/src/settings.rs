@@ -162,6 +162,10 @@ pub struct MatrixOptions {
     pub room: String,
     #[serde(default)]
     pub style: MatrixStyle,
+    /// When an alert resolves, edit the original alert message in-place
+    /// instead of sending a new message.
+    #[serde(default)]
+    pub edit_resolved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
