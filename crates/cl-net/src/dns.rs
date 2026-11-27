@@ -236,6 +236,22 @@ impl OverrideZone {
     }
 }
 
+/// Binds `bind_addr` over udp and serves `catalog` until the server stops.
+pub(crate) async fn serve_udp(catalog: Catalog, bind_addr: SocketAddr) -> Result<()> {
+    let mut server = Server::new(catalog);
+    let socket = tokio::net::UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|source| NetError::Io {
+            context: format!("dns bind {bind_addr}"),
+            source,
+        })?;
+    server.register_socket(socket);
+    server
+        .block_until_done()
+        .await
+        .map_err(|e| NetError::Dns(e.to_string()))
+}
+
 /// Like `build_authority`, rooted at `.` with absolute record names.
 fn build_overrides(records: &[ZoneRecord]) -> Result<Overrides> {
     let root = Name::root();
@@ -560,18 +576,7 @@ impl InternalDns {
             vec![self.overrides.clone() as Arc<dyn ZoneHandler>, forwarder],
         );
 
-        let mut server = Server::new(catalog);
-        let socket = tokio::net::UdpSocket::bind(bind_addr)
-            .await
-            .map_err(|source| NetError::Io {
-                context: format!("dns bind {bind_addr}"),
-                source,
-            })?;
-        server.register_socket(socket);
-        server
-            .block_until_done()
-            .await
-            .map_err(|e| NetError::Dns(e.to_string()))
+        serve_udp(catalog, bind_addr).await
     }
 }
 

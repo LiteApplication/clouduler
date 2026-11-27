@@ -49,33 +49,10 @@ pub(crate) async fn stage_release_ui<F: ReleaseFetcher>(
     data_dir: &Path,
     version: &str,
 ) -> Result<(), String> {
-    let mut candidates = Vec::new();
-    if let Ok(pinned) = release::pinned_source(release_url, &format!("v{version}")) {
-        candidates.push(pinned);
-    }
-    candidates.push(release_url.to_string());
-
-    let mut last_error = String::new();
-    let mut found = None;
-    for source in &candidates {
-        match fetcher.resolve(source).await {
-            Ok(resolved) => match resolved.manifest.as_ref() {
-                Some(m) if m.backend.version == version => {
-                    found = Some(resolved);
-                    break;
-                }
-                Some(m) => {
-                    last_error = format!(
-                        "release {} is backend {}, not {version}",
-                        resolved.tag, m.backend.version
-                    )
-                }
-                None => last_error = format!("release {} has no manifest.json", resolved.tag),
-            },
-            Err(e) => last_error = e,
-        }
-    }
-    let resolved = found.ok_or(last_error)?;
+    let resolved = release::resolve_backend_release(release_url, version, |s| async move {
+        fetcher.resolve(&s).await
+    })
+    .await?;
     let (Some(manifest), Some(asset)) = (resolved.manifest.as_ref(), resolved.ui.as_ref()) else {
         return Err(format!("release {} has no ui asset", resolved.tag));
     };

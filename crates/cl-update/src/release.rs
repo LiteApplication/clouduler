@@ -297,6 +297,43 @@ pub async fn validate_pinned<'a>(
 }
 
 /// Resolve `source` to its release and the assets published per architecture.
+/// Finds the release whose backend is `version`: the pinned tag `v<version>` first, then
+/// whatever `release_url` points at. `resolve` fetches one source (the caller picks the
+/// token / test double); the last failure is reported when none matches.
+pub async fn resolve_backend_release<F, Fut>(
+    release_url: &str,
+    version: &str,
+    mut resolve: F,
+) -> Result<ResolvedRelease, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<ResolvedRelease, String>>,
+{
+    let mut candidates = Vec::new();
+    if let Ok(pinned) = pinned_source(release_url, &format!("v{version}")) {
+        candidates.push(pinned);
+    }
+    candidates.push(release_url.to_string());
+
+    let mut last_error = String::new();
+    for source in candidates {
+        match resolve(source).await {
+            Ok(resolved) => match resolved.manifest.as_ref() {
+                Some(m) if m.backend.version == version => return Ok(resolved),
+                Some(m) => {
+                    last_error = format!(
+                        "release {} is backend {}, not {version}",
+                        resolved.tag, m.backend.version
+                    )
+                }
+                None => last_error = format!("release {} has no manifest.json", resolved.tag),
+            },
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
 pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
     tokio::time::timeout(RESOLVE_TIMEOUT, resolve_inner(source, token))
         .await
