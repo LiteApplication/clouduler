@@ -10,7 +10,7 @@ use cl_update::internal_client;
 use cl_update::plan::{NodePhase, UpdateRunState};
 use serde::{Deserialize, Serialize};
 
-use crate::update_cli::pick_node;
+use crate::node_channel::pick_node;
 
 const UI_PATH: &str = "/api/self-update/internal/ui";
 const RUN_PATH: &str = "/api/self-update/internal/run";

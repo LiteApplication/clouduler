@@ -9,6 +9,7 @@ use cl_raft::state::Request;
 use cl_secret::{ClusterKey, Sealed};
 use tracing::debug;
 
+use crate::node_channel::NodeChannel;
 use cl_raft::client::client_for;
 
 /// Where a secret's new value comes from.
@@ -175,38 +176,13 @@ async fn restart_users(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Re
         skipped: Vec<Skipped>,
     }
 
-    let node = crate::update_cli::pick_node(cfg, via)?;
-    let base = cl_update::peers::base_url(cfg, node)
-        .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {}",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
+    let channel = NodeChannel::open(cfg, via, None)?;
     let path = "/api/secrets/internal/restart";
     let body = serde_json::to_vec(&serde_json::json!({ "name": name }))?;
-    let resp = cl_update::internal_client::authenticate(
-        http.post(format!("{base}{path}")),
-        &key,
-        "POST",
-        path,
-        &body,
-    )
-    .header(reqwest::header::CONTENT_TYPE, "application/json")
-    .body(body)
-    .send()
-    .await
-    .with_context(|| format!("asking {node}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("{node} answered {status}: {body}");
-    }
+    let resp = channel
+        .send(reqwest::Method::POST, path, Some(body))
+        .await?;
+    let resp = channel.ensure_success(resp).await?;
     let started: Started = resp.json().await.context("decoding the daemon's answer")?;
     if started.restarting.is_empty() {
         println!("nothing to restart");

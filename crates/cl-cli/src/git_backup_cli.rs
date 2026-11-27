@@ -2,51 +2,15 @@
 //! `docs/git-backup.md`), e.g. triggering a pull immediately. Uses the same HMAC
 //! node-to-node channel as `clouduler logs`/`exec`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use cl_config::ClusterConfig;
-use cl_secret::ClusterKey;
-use cl_update::internal_client;
 
-fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
-    match via {
-        Some(name) => {
-            cfg.node(name)
-                .ok_or_else(|| anyhow!("no node named {name} in the config"))?;
-            Ok(name)
-        }
-        None => cfg
-            .managers()
-            .next()
-            .map(|(name, _)| name.as_str())
-            .ok_or_else(|| anyhow!("config has no manager to talk to")),
-    }
-}
+use crate::node_channel::NodeChannel;
 
 async fn trigger(cfg: &ClusterConfig, via: Option<&str>, path: &str) -> Result<()> {
-    let node = pick_node(cfg, via)?;
-    let base = cl_update::peers::base_url(cfg, node)
-        .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to {node}",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
-
-    let resp =
-        internal_client::authenticate(http.post(format!("{base}{path}")), &key, "POST", path, b"")
-            .send()
-            .await
-            .with_context(|| format!("asking {node}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{node} answered {status}: {body}");
-    }
+    let channel = NodeChannel::open(cfg, via, None)?;
+    let resp = channel.send(reqwest::Method::POST, path, None).await?;
+    channel.ensure_success(resp).await?;
     Ok(())
 }
 
@@ -56,30 +20,9 @@ async fn call(
     method: reqwest::Method,
     path: &str,
 ) -> Result<String> {
-    let node = pick_node(cfg, via)?;
-    let base = cl_update::peers::base_url(cfg, node)
-        .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to {node}",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .context("building the http client")?;
-    let resp = internal_client::authenticate(
-        http.request(method.clone(), format!("{base}{path}")),
-        &key,
-        method.as_str(),
-        path,
-        b"",
-    )
-    .send()
-    .await
-    .with_context(|| format!("asking {node}"))?;
+    let channel = NodeChannel::open(cfg, via, Some(std::time::Duration::from_secs(300)))?;
+    let node = channel.node;
+    let resp = channel.send(method, path, None).await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
