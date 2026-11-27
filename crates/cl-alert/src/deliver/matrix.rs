@@ -157,10 +157,7 @@ fn short_test(n: &Notification) -> Message {
         formatted_body: format!(
             "{} <strong>Clouduler test message</strong> \u{2014} {}",
             emoji_test(),
-            escape(&format!(
-                "alerts for cluster {} will arrive here.",
-                n.cluster
-            ))
+            escape(&format!("alerts for cluster {} will arrive here.", n.cluster))
         ),
         body: line,
     }

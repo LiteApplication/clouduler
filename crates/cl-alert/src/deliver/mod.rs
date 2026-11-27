@@ -83,7 +83,9 @@ pub async fn deliver(
                 retryable: false,
                 retry_after: None,
             })?;
-            matrix::send(http, url, token, opts, n).await.map(|()| None)
+            matrix::send(http, url, token, opts, n)
+                .await
+                .map(|()| None)
         }
         DestinationKind::Email { to } => email::send(smtp, secrets.smtp_password.as_deref(), to, n)
             .await
