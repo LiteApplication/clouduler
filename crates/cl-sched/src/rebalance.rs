@@ -296,7 +296,7 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cl_raft::state::{Availability, NodeState, Request, Role};
+    use cl_raft::state::{NodeState, Request, Role};
 
     fn node(name: &str) -> NodeState {
         sized_node(name, 0)
@@ -304,27 +304,13 @@ mod tests {
 
     fn sized_node(name: &str, memory_total_bytes: u64) -> NodeState {
         NodeState {
-            name: name.to_string(),
-            id: uuid::Uuid::new_v4(),
-            role: Role::Manager,
-            rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
-            drives: Default::default(),
-            availability: Availability::Active,
-            labels: Default::default(),
-            last_resort: false,
-            egress_networks: Default::default(),
-            networks: Default::default(),
-            open_ports: Default::default(),
-            open_all_ports: Default::default(),
-            arch: Default::default(),
-            binary_hash: Default::default(),
-            ui_hash: Default::default(),
-            started_at: Default::default(),
-            node_pubkey: Default::default(),
             memory_total_bytes,
-            gpus: Default::default(),
-            images: Default::default(),
-            version: Default::default(),
+            ..NodeState::new(
+                name,
+                uuid::Uuid::new_v4(),
+                Role::Manager,
+                "10.10.0.1:7373".parse().expect("addr"),
+            )
         }
     }
 

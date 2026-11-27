@@ -64,32 +64,17 @@ pub(super) fn sample_alert(id: &str, state: AlertState, last_at: i64) -> AlertRe
 }
 
 pub(super) fn node(name: &str, drives: &[&str]) -> NodeState {
-    NodeState {
-        name: name.to_string(),
-        id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()),
-        role: Role::Manager,
-        rpc_addr: "10.10.0.1:7373".parse().unwrap(),
-        drives: drives
-            .iter()
-            .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
-            .collect(),
-        availability: Availability::Active,
-        labels: Default::default(),
-        last_resort: false,
-        egress_networks: Default::default(),
-        networks: Default::default(),
-        open_ports: Default::default(),
-        open_all_ports: Default::default(),
-        arch: Default::default(),
-        binary_hash: Default::default(),
-        ui_hash: Default::default(),
-        started_at: Default::default(),
-        node_pubkey: Default::default(),
-        memory_total_bytes: Default::default(),
-        gpus: Default::default(),
-        images: Default::default(),
-        version: Default::default(),
-    }
+    let mut node = NodeState::new(
+        name,
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()),
+        Role::Manager,
+        "10.10.0.1:7373".parse().unwrap(),
+    );
+    node.drives = drives
+        .iter()
+        .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
+        .collect();
+    node
 }
 
 pub(super) fn cluster() -> ClusterState {

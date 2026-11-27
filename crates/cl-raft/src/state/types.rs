@@ -87,6 +87,34 @@ pub struct NodeState {
 }
 
 impl NodeState {
+    /// An active node with no drives, labels, networks or self-reported data;
+    /// callers fill in what they need with struct update or field assignment.
+    pub fn new(name: impl Into<String>, id: uuid::Uuid, role: Role, rpc_addr: SocketAddr) -> Self {
+        Self {
+            name: name.into(),
+            id,
+            role,
+            rpc_addr,
+            drives: Default::default(),
+            availability: Availability::Active,
+            labels: Default::default(),
+            last_resort: false,
+            egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
+            open_all_ports: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
+            ui_hash: Default::default(),
+            started_at: Default::default(),
+            node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
+            gpus: Default::default(),
+            images: Default::default(),
+            version: Default::default(),
+        }
+    }
+
     /// Whether this node holds `image`, matched on `digest` when given.
     pub fn holds_image(&self, image: &str, digest: Option<&str>) -> bool {
         match digest {

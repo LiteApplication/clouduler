@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::port::Protocol;
-use super::StackFile;
+use super::{Service, StackFile};
 use crate::cluster::{qualify, ClusterConfig};
 
 /// A raw `x-clouduler.expose` entry, carried through so the ui can check it
@@ -88,6 +88,21 @@ pub struct StackRequirements {
     pub host_devices: Vec<String>,
 }
 
+/// Config and secret sources a service mounts, including the ones its terraform
+/// block reads.
+fn add_object_sources(r: &mut StackRequirements, svc: &Service) {
+    r.configs
+        .extend(svc.configs.iter().map(|c| c.source.clone()));
+    r.secrets
+        .extend(svc.secrets.iter().map(|s| s.source.clone()));
+    if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
+        r.configs
+            .extend(tf.configs.iter().map(|c| c.source.clone()));
+        r.secrets
+            .extend(tf.secrets.iter().map(|s| s.source.clone()));
+    }
+}
+
 fn named_volume(drive: &str, volume: Option<&str>) -> Option<String> {
     volume.filter(|v| *v != ".").map(|v| format!("{drive}/{v}"))
 }
@@ -104,16 +119,7 @@ impl StackFile {
                     r.volumes.extend(named_volume(drive, vol.volume.as_deref()));
                 }
             }
-            r.configs
-                .extend(svc.configs.iter().map(|c| c.source.clone()));
-            r.secrets
-                .extend(svc.secrets.iter().map(|s| s.source.clone()));
-            if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
-                r.configs
-                    .extend(tf.configs.iter().map(|c| c.source.clone()));
-                r.secrets
-                    .extend(tf.secrets.iter().map(|s| s.source.clone()));
-            }
+            add_object_sources(&mut r, svc);
         }
 
         for (name, cfg) in &self.configs {
@@ -153,16 +159,7 @@ impl StackFile {
                     r.whole_drive_mounts.insert(drive.clone());
                 }
             }
-            r.configs
-                .extend(svc.configs.iter().map(|c| c.source.clone()));
-            r.secrets
-                .extend(svc.secrets.iter().map(|s| s.source.clone()));
-            if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
-                r.configs
-                    .extend(tf.configs.iter().map(|c| c.source.clone()));
-                r.secrets
-                    .extend(tf.secrets.iter().map(|s| s.source.clone()));
-            }
+            add_object_sources(&mut r, svc);
             r.pinned_node = self.effective_node(name);
             if let Some(constraints) = svc.deploy.as_ref().and_then(|d| d.placement.as_ref()) {
                 r.placement_constraints = constraints.constraints.clone();

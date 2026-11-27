@@ -447,6 +447,24 @@ mod tests {
         super::build(instance, service, materialized, placement, digest, revision).unwrap()
     }
 
+    /// Build instance `site.web.0` of `service` with no objects, default
+    /// placement and no pinned digest.
+    fn build_plain(service: &Service, revision: u64) -> ContainerSpec {
+        build(
+            &instance(),
+            service,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
+            },
+            Placement::default(),
+            None,
+            revision,
+        )
+    }
+
     #[test]
     fn a_refused_volume_fails_the_build_instead_of_dropping_the_mount() {
         let s = service(
@@ -507,19 +525,7 @@ mod tests {
     #[test]
     fn a_minimal_service_builds() {
         let s = service("services:\n  web:\n    image: nginx\n");
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         assert_eq!(spec.name, "site_web_0");
         assert_eq!(spec.image, "nginx");
@@ -830,19 +836,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         let mount = spec
             .mounts
@@ -858,19 +852,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    x-clouduler:\n      docker_socket:\n        target: /run/docker.sock\n        read_only: true\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         let mount = spec
             .mounts
@@ -885,19 +867,7 @@ mod tests {
         let s = service(
             "services:\n  scan:\n    image: grype\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n        mode: clouduler\n        read_only: true\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         let mount = spec
             .mounts
@@ -915,19 +885,7 @@ mod tests {
     #[test]
     fn no_docker_socket_mount_without_the_extension() {
         let s = service("services:\n  web:\n    image: nginx\n");
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         assert!(spec
             .mounts
@@ -970,19 +928,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    hostname: custom-host\n    read_only: true\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
         assert_eq!(spec.hostname.as_deref(), Some("custom-host"));
         assert!(spec.read_only);
     }
@@ -992,19 +938,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    entrypoint: /init --flag 'a b'\n    working_dir: /srv\n    cap_add: [NET_ADMIN]\n    cap_drop: [MKNOD]\n    sysctls:\n      net.ipv4.ip_forward: \"1\"\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
         assert_eq!(
             spec.entrypoint,
             Some(vec!["/init".into(), "--flag".into(), "a b".into()])
@@ -1021,19 +955,7 @@ mod tests {
     #[test]
     fn user_carries_over() {
         let s = service("services:\n  web:\n    image: nginx\n    user: \"1000:1000\"\n");
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
         assert_eq!(spec.user.as_deref(), Some("1000:1000"));
     }
 
@@ -1042,19 +964,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    volumes:\n      - type: tmpfs\n        target: /cache\n        tmpfs:\n          size: 64m\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
         assert!(spec.mounts.is_empty());
         assert_eq!(spec.tmpfs.len(), 1);
         assert_eq!(spec.tmpfs[0].container_path, "/cache");
@@ -1066,19 +976,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    volumes:\n      - \"fast/data:/data\"\n      - \"bulk/backup:/backup:ro\"\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         assert_eq!(spec.mounts.len(), 2);
         assert_eq!(spec.mounts[0].host_path, "/srv/fast/data");
@@ -1093,19 +991,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    environment:\n      TZ: UTC\n    labels:\n      team: infra\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            3,
-        );
+        let spec = build_plain(&s, 3);
 
         assert!(spec.env.contains(&("TZ".to_string(), "UTC".to_string())));
         assert_eq!(spec.labels["team"], "infra");
@@ -1156,19 +1042,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    deploy:\n      resources:\n        limits:\n          cpus: \"1.5\"\n          memory: 512M\n",
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         assert_eq!(spec.resources.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(spec.resources.nano_cpus, Some(1_500_000_000));
@@ -1197,19 +1071,7 @@ services:
               capabilities: [[gpu], [compute]]
 "#,
         );
-        let spec = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        );
+        let spec = build_plain(&s, 1);
 
         assert_eq!(spec.devices.len(), 2);
         assert_eq!(spec.devices[0].host_path, "/dev/dri");
@@ -1235,63 +1097,17 @@ services:
     #[test]
     fn restart_policies_map_across() {
         let s = service("services:\n  web:\n    image: nginx\n    restart: always\n");
-        assert_eq!(
-            build(
-                &instance(),
-                &s,
-                Materialization {
-                    objects: &[],
-                    env: &[],
-                    drive_roots: &roots(),
-                    docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-                },
-                Placement::default(),
-                None,
-                1,
-            )
-            .restart_policy,
-            RestartPolicy::Always
-        );
+        assert_eq!(build_plain(&s, 1).restart_policy, RestartPolicy::Always);
 
         let s = service("services:\n  web:\n    image: nginx\n");
-        assert_eq!(
-            build(
-                &instance(),
-                &s,
-                Materialization {
-                    objects: &[],
-                    env: &[],
-                    drive_roots: &roots(),
-                    docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-                },
-                Placement::default(),
-                None,
-                1,
-            )
-            .restart_policy,
-            RestartPolicy::No
-        );
+        assert_eq!(build_plain(&s, 1).restart_policy, RestartPolicy::No);
     }
 
     #[test]
     fn a_disabled_healthcheck_produces_none() {
         let s =
             service("services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n");
-        assert!(build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        )
-        .healthcheck
-        .is_none());
+        assert!(build_plain(&s, 1).healthcheck.is_none());
     }
 
     #[test]
@@ -1299,21 +1115,7 @@ services:
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      test: curl -f localhost\n      retries: 3\n",
         );
-        let check = build(
-            &instance(),
-            &s,
-            Materialization {
-                objects: &[],
-                env: &[],
-                drive_roots: &roots(),
-                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
-            },
-            Placement::default(),
-            None,
-            1,
-        )
-        .healthcheck
-        .expect("healthcheck");
+        let check = build_plain(&s, 1).healthcheck.expect("healthcheck");
         assert_eq!(check.test[0], "CMD-SHELL");
         assert_eq!(check.retries, Some(3));
     }
