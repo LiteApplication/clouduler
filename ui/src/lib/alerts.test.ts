@@ -203,6 +203,24 @@ describe('destination form', () => {
     expect(validateForm({ ...newForm('email'), name: 'm', to: 'nope' }, [], false).to).toMatch(/nope/);
     expect(validateForm({ ...newForm('email'), name: 'm', to: '' }, [], false).to).toBeTruthy();
   });
+  it('round-trips and validates a matrix destination', () => {
+    const f = { ...newForm('matrix'), name: 'mx', url: 'https://matrix.example.org', auth: 'syt_x', room: ' !abc:example.org ' };
+    expect(formToDestination(f)).toMatchObject({ kind: 'matrix', room: '!abc:example.org' });
+    expect(formFrom(formToDestination(f) as AlertDestination).room).toBe('!abc:example.org');
+    expect(formToDestination(f)).toMatchObject({ style: 'full' });
+    const short = formFrom(formToDestination({ ...f, matrixStyle: 'short' }) as AlertDestination);
+    expect(short.matrixStyle).toBe('short');
+    // A destination saved before styles existed has none.
+    expect(formFrom({ ...(formToDestination(f) as object), style: undefined } as unknown as AlertDestination).matrixStyle).toBe('full');
+    expect(validateForm(f, [], false)).toEqual({});
+    expect(validateForm({ ...f, room: '#ops:example.org' }, [], false)).toEqual({});
+    expect(validateForm({ ...f, room: 'ops' }, [], false).room).toBeTruthy();
+    expect(validateForm({ ...f, url: 'ftp://x' }, [], false).url).toBeTruthy();
+    expect(validateForm({ ...f, auth: '' }, [], false).auth).toBeTruthy();
+    // Editing keeps the saved token when the field stays blank.
+    expect(validateForm({ ...f, auth: '', url: '', original: 'mx' }, ['mx'], true, true)).toEqual({});
+    expect(secretEdits(f)).toEqual({ url: 'https://matrix.example.org', auth: 'syt_x' });
+  });
   it('only sends secrets that were typed', () => {
     const f = { ...newForm('webhook'), name: 'h' };
     expect(secretEdits(f)).toBeNull();

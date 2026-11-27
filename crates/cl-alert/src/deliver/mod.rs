@@ -9,6 +9,7 @@ use crate::settings::{Destination, DestinationKind, SmtpSettings};
 
 mod discord;
 mod email;
+mod matrix;
 #[cfg(test)]
 mod testutil;
 mod util;
@@ -16,6 +17,7 @@ mod webhook;
 
 pub use discord::messages as discord_messages;
 pub use email::{render as render_email, Rendered};
+pub use matrix::{message as matrix_message, Message as MatrixMessage};
 pub use webhook::payload as webhook_payload;
 
 /// Every attempt gives up after this long.
@@ -25,9 +27,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// the call and dropped right after.
 #[derive(Default)]
 pub struct DestinationSecrets {
-    /// Webhook / discord URL.
+    /// Webhook / discord URL, or the Matrix homeserver URL.
     pub url: Option<String>,
-    /// Generic webhook `Authorization` header value.
+    /// Generic webhook `Authorization` header value, or the Matrix access token.
     pub auth: Option<String>,
     /// SMTP password for an email destination.
     pub smtp_password: Option<String>,
@@ -70,6 +72,21 @@ pub async fn deliver(
             let url = secrets.url.as_deref().ok_or_else(missing_url)?;
             discord::send(http, url, opts, n, edit_message_id).await
         }
+        DestinationKind::Matrix(opts) => {
+            let url = secrets.url.as_deref().ok_or_else(|| DeliveryError {
+                message: "the destination has no homeserver URL".into(),
+                retryable: false,
+                retry_after: None,
+            })?;
+            let token = secrets.auth.as_deref().ok_or_else(|| DeliveryError {
+                message: "the destination has no access token".into(),
+                retryable: false,
+                retry_after: None,
+            })?;
+            matrix::send(http, url, token, opts, n)
+                .await
+                .map(|()| None)
+        }
         DestinationKind::Email { to } => email::send(smtp, secrets.smtp_password.as_deref(), to, n)
             .await
             .map(|()| None),
@@ -80,7 +97,7 @@ pub async fn deliver(
 mod tests {
     use super::testutil::*;
     use super::*;
-    use crate::settings::{Destination, DiscordOptions};
+    use crate::settings::{Destination, DiscordOptions, MatrixOptions};
     use std::collections::BTreeSet;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -199,6 +216,87 @@ mod tests {
             "{}",
             &req[..60]
         );
+    }
+
+    #[tokio::test]
+    async fn matrix_puts_an_html_message_with_a_bearer_token() {
+        let (url, h) = serve(
+            "HTTP/1.1 200 OK\r\ncontent-length: 17\r\n\r\n{\"event_id\":\"$e\"}",
+            1,
+        )
+        .await;
+        let base = url.trim_end_matches("/hook/token-123").to_string();
+        let secrets = DestinationSecrets {
+            url: Some(base),
+            auth: Some("syt_s3cret".into()),
+            ..Default::default()
+        };
+        let n = notification(Body::Test);
+        deliver(
+            &reqwest::Client::new(),
+            &dest(DestinationKind::Matrix(MatrixOptions {
+                room: "!abc:example.org".into(),
+                style: Default::default(),
+            })),
+            &secrets,
+            None,
+            &n,
+            None,
+        )
+        .await
+        .unwrap();
+        let req = h.await.unwrap().remove(0);
+        let lower = req.to_ascii_lowercase();
+        assert!(
+            req.starts_with(
+                "PUT /_matrix/client/v3/rooms/%21abc%3Aexample.org/send/m.room.message/clouduler-"
+            ),
+            "{}",
+            &req[..100]
+        );
+        assert!(lower.contains("authorization: bearer syt_s3cret"));
+        assert!(req.contains("\"msgtype\":\"m.text\""));
+        assert!(req.contains("org.matrix.custom.html"));
+    }
+
+    #[tokio::test]
+    async fn matrix_needs_a_token_and_hides_it_in_errors() {
+        let (url, _h) = serve("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: 44\r\n\r\n{\"errcode\":\"M_UNKNOWN_TOKEN\",\"error\":\"bad\"}  ", 1).await;
+        let base = url.trim_end_matches("/hook/token-123").to_string();
+        let kind = DestinationKind::Matrix(MatrixOptions {
+            room: "!abc:example.org".into(),
+            style: Default::default(),
+        });
+        let e = deliver(
+            &reqwest::Client::new(),
+            &dest(kind.clone()),
+            &DestinationSecrets {
+                url: Some(base.clone()),
+                ..Default::default()
+            },
+            None,
+            &notification(Body::Test),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(!e.retryable);
+        let e = deliver(
+            &reqwest::Client::new(),
+            &dest(kind),
+            &DestinationSecrets {
+                url: Some(base),
+                auth: Some("syt_s3cret".into()),
+                ..Default::default()
+            },
+            None,
+            &notification(Body::Test),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(!e.retryable);
+        assert!(!e.message.contains("syt_s3cret"));
     }
 
     #[tokio::test]

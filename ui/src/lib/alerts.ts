@@ -14,6 +14,7 @@ import type {
   DiscordNotify,
   DiscordNotifyLevels,
   DiscordStyle,
+  MatrixStyle,
 } from '../api/types';
 
 export const SEVERITIES: AlertSeverity[] = ['critical', 'warning', 'info'];
@@ -139,7 +140,7 @@ export function joinList(xs: string[]): string {
 
 const capitalize = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
-export const KIND_LABEL = { discord: 'Discord', webhook: 'Generic', email: 'Email' } as const;
+export const KIND_LABEL = { discord: 'Discord', matrix: 'Matrix', webhook: 'Generic', email: 'Email' } as const;
 
 /** Who hears about each severity, derived from the saved destinations. */
 export function routingSummary(settings: AlertSettings): Record<AlertSeverity, string[]> {
@@ -271,6 +272,9 @@ export interface DestForm {
   url: string;
   auth: string;
   clearAuth: boolean;
+  /** Matrix room ID or alias. */
+  room: string;
+  matrixStyle: MatrixStyle;
   style: DiscordStyle;
   mention: string;
   notify: DiscordNotifyLevels;
@@ -300,6 +304,8 @@ export function newForm(kind: DestKind): DestForm {
     url: '',
     auth: '',
     clearAuth: false,
+    room: '',
+    matrixStyle: 'full',
     style: 'embed',
     mention: '',
     notify: { ...DEFAULT_NOTIFY },
@@ -332,6 +338,9 @@ export function formFrom(d: AlertDestination): DestForm {
     f.edit_resolved = d.edit_resolved ?? false;
     f.username = d.username ?? '';
     f.avatarUrl = d.avatar_url ?? '';
+  } else if (d.kind === 'matrix') {
+    f.room = d.room;
+    f.matrixStyle = d.style ?? 'full';
   } else if (d.kind === 'email') {
     f.to = d.to.join('\n');
   }
@@ -366,6 +375,7 @@ export function formToDestination(f: DestForm): AlertDestination {
       ...(f.avatarUrl.trim() ? { avatar_url: f.avatarUrl.trim() } : {}),
     };
   }
+  if (f.kind === 'matrix') return { ...base, kind: 'matrix', room: f.room.trim(), style: f.matrixStyle };
   if (f.kind === 'email') return { ...base, kind: 'email', to: splitList(f.to) };
   return { ...base, kind: 'webhook' };
 }
@@ -373,21 +383,28 @@ export function formToDestination(f: DestForm): AlertDestination {
 const NAME_RE = /^[a-z0-9-]{1,40}$/;
 const DISCORD_URL = /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+/;
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+/** A room ID (`!abc:example.org`) or alias (`#ops:example.org`). */
+const MATRIX_ROOM_RE = /^[!#][^\s:]+:[^\s]+$/;
 const MENTION_RE = /^(@everyone|@here|<@&?!?\d+>)$/;
 
-export type FormErrors = Partial<Record<'name' | 'url' | 'to' | 'mention' | 'severities', string>>;
+export type FormErrors = Partial<Record<'name' | 'url' | 'auth' | 'room' | 'to' | 'mention' | 'severities', string>>;
 
 /** Client-side checks that mirror the server's, for instant feedback. `taken` are the other destinations' names. */
-export function validateForm(f: DestForm, taken: string[], savedUrl: boolean): FormErrors {
+export function validateForm(f: DestForm, taken: string[], savedUrl: boolean, savedAuth = false): FormErrors {
   const e: FormErrors = {};
   const name = f.name.trim();
   if (!NAME_RE.test(name)) e.name = 'Use 1 to 40 lowercase letters, digits or dashes.';
   else if (taken.includes(name) && name !== f.original) e.name = 'Another destination already has this name.';
   if (f.kind !== 'email') {
     const url = f.url.trim();
-    if (!url && !(f.original && savedUrl)) e.url = 'Paste the webhook URL.';
+    if (!url && !(f.original && savedUrl)) e.url = f.kind === 'matrix' ? 'Enter the homeserver URL.' : 'Paste the webhook URL.';
     else if (url && f.kind === 'discord' && !DISCORD_URL.test(url)) e.url = 'That does not look like a Discord webhook URL.';
-    else if (url && f.kind === 'webhook' && !/^https?:\/\/[^\s]+$/.test(url)) e.url = 'The URL must start with http:// or https://.';
+    else if (url && (f.kind === 'webhook' || f.kind === 'matrix') && !/^https?:\/\/[^\s]+$/.test(url)) e.url = 'The URL must start with http:// or https://.';
+    if (f.kind === 'matrix') {
+      if (!f.auth.trim() && !(f.original && savedAuth)) e.auth = 'Paste the access token.';
+      const room = f.room.trim();
+      if (!MATRIX_ROOM_RE.test(room) || room.length > 255) e.room = 'Use a room ID (!abc:example.org) or an alias (#ops:example.org).';
+    }
   } else {
     const to = splitList(f.to);
     if (to.length === 0) e.to = 'Add at least one recipient.';
@@ -404,8 +421,8 @@ export function validateForm(f: DestForm, taken: string[], savedUrl: boolean): F
 export function secretEdits(f: DestForm): { url?: string; auth?: string | null } | null {
   const out: { url?: string; auth?: string | null } = {};
   if (f.kind !== 'email' && f.url.trim()) out.url = f.url.trim();
-  if (f.kind === 'webhook') {
-    if (f.clearAuth) out.auth = null;
+  if (f.kind === 'webhook' || f.kind === 'matrix') {
+    if (f.clearAuth && f.kind === 'webhook') out.auth = null;
     else if (f.auth.trim()) out.auth = f.auth.trim();
   }
   return Object.keys(out).length ? out : null;

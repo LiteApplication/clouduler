@@ -270,6 +270,16 @@ pub fn unseal_for(
                 return Err("the destination has no URL".into());
             }
         }
+        DestinationKind::Matrix(_) => {
+            out.url = open(state, key, &url_secret(&dest.name))?;
+            out.auth = open(state, key, &auth_secret(&dest.name))?;
+            if out.url.is_none() {
+                return Err("the destination has no homeserver URL".into());
+            }
+            if out.auth.is_none() {
+                return Err("the destination has no access token".into());
+            }
+        }
         DestinationKind::Email { .. } => {
             if settings.smtp.as_ref().is_some_and(|s| s.username.is_some()) {
                 out.smtp_password = open(state, key, SMTP_PASSWORD_SECRET)?;

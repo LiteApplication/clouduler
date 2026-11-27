@@ -17,6 +17,7 @@ import {
   type DestKind,
 } from '../../lib/alerts';
 import { DiscordPreview } from './DiscordPreview';
+import { MatrixPreview } from './MatrixPreview';
 import { Segmented } from './Segmented';
 import { TestResult } from './TestResult';
 
@@ -28,6 +29,7 @@ const NOTIFY: { value: DiscordNotify; label: string }[] = [
 ];
 
 const KIND_HINT: Record<DestKind, string> = {
+  matrix: 'Posts an HTML message to a Matrix room, with a bot account access token.',
   discord: 'Posts a formatted message to a Discord channel. Critical alerts are red, warnings amber, info grey.',
   webhook: 'Sends a JSON POST to any URL, for ntfy, Gotify, Home Assistant or your own service.',
   email: 'Sends a themed email through the shared email server below.',
@@ -98,13 +100,15 @@ export function DestinationSheet({
   const [replaceUrl, setReplaceUrl] = useState(false);
   const [replaceAuth, setReplaceAuth] = useState(false);
   const taken = settings.settings.destinations.map((d) => d.name);
-  const errors = useMemo(() => validateForm(f, taken, !!savedUrl), [f, taken, savedUrl]);
+  const savedAuth = !!saved?.auth_set;
+  const errors = useMemo(() => validateForm(f, taken, !!savedUrl, savedAuth), [f, taken, savedUrl, savedAuth]);
   const valid = Object.keys(errors).length === 0;
   const set = (p: Partial<DestForm>) => {
     setF((x) => ({ ...x, ...p }));
     setResult(null);
   };
   const shown = <K extends keyof typeof errors>(k: K) => (touched ? errors[k] : undefined);
+  const urlLabel = f.kind === 'discord' ? 'Webhook URL' : f.kind === 'matrix' ? 'Homeserver URL' : 'URL';
   const smtpMissing = f.kind === 'email' && !settings.settings.smtp;
 
   const switchKind = (kind: DestKind) => {
@@ -121,13 +125,14 @@ export function DestinationSheet({
   const test = async () => {
     setTouched(true);
     // A test needs a name only for the saved path; the others are checked by the server.
-    const needs = errors.url || errors.to || errors.mention;
+    const needs = errors.url || errors.auth || errors.room || errors.to || errors.mention;
     if (needs) return;
     setTesting(true);
     setResult(null);
     try {
       const edits = secretEdits(f);
-      const keepSaved = editing && f.kind !== 'email' && !edits?.url;
+      // A Matrix test always goes by value: the room may have been edited, and the server reuses the stored token for the stored homeserver only.
+      const keepSaved = editing && f.kind !== 'email' && f.kind !== 'matrix' && !edits?.url;
       const req: AlertTestRequest = keepSaved
         ? { name: f.original! }
         : {
@@ -190,7 +195,7 @@ export function DestinationSheet({
         <div className="col" style={{ gap: 8 }}>
           <span className="cl-label">Type</span>
           <div className="chips" role="group" aria-label="Destination type">
-            {(['discord', 'webhook', 'email'] as DestKind[]).map((k) => (
+            {(['discord', 'matrix', 'webhook', 'email'] as DestKind[]).map((k) => (
               <Chip key={k} label={KIND_LABEL[k]} selected={f.kind === k} disabled={editing && f.kind !== k} onClick={() => switchKind(k)} />
             ))}
           </div>
@@ -211,29 +216,84 @@ export function DestinationSheet({
         {f.kind !== 'email' &&
           (savedUrl && !replaceUrl ? (
             <SealedValue
-              label={f.kind === 'discord' ? 'Webhook URL' : 'URL'}
+              label={urlLabel}
               shown={savedUrl}
               hint="Stored sealed. Only the domain is ever shown."
               onReplace={() => setReplaceUrl(true)}
             />
           ) : (
             <TextField
-              label={f.kind === 'discord' ? 'Webhook URL' : 'URL'}
+              label={urlLabel}
               type="password"
               mono
               value={f.url}
               autoFocus={replaceUrl}
-              placeholder={f.kind === 'discord' ? 'https://discord.com/api/webhooks/…' : 'https://ntfy.lab.example/clouduler'}
+              placeholder={
+                f.kind === 'discord'
+                  ? 'https://discord.com/api/webhooks/…'
+                  : f.kind === 'matrix'
+                    ? 'https://matrix.example.org'
+                    : 'https://ntfy.lab.example/clouduler'
+              }
               error={shown('url')}
               hint={
                 (replaceUrl ? 'Leave blank to keep the saved one. ' : '') +
                 (f.kind === 'discord'
                   ? 'In Discord: channel settings, Integrations, Webhooks, Copy webhook URL. Stored sealed and never shown again.'
-                  : 'Clouduler POSTs here from the leader node. Stored sealed and never shown again.')
+                  : f.kind === 'matrix'
+                    ? 'Base URL of your homeserver. Clouduler calls it from the leader node. Stored sealed; only the domain is shown.'
+                    : 'Clouduler POSTs here from the leader node. Stored sealed and never shown again.')
               }
               onChange={(e) => set({ url: e.target.value })}
             />
           ))}
+
+        {f.kind === 'matrix' && (
+          <>
+            <TextField
+              label="Room"
+              mono
+              placeholder="!abc123:example.org"
+              value={f.room}
+              error={shown('room')}
+              hint="A room ID (!abc:example.org) or an alias (#ops:example.org). The bot user must already have joined the room."
+              onChange={(e) => set({ room: e.target.value })}
+            />
+            <div className="col" style={{ gap: 8 }}>
+              <span className="cl-label">Message style</span>
+              <Segmented
+                label="Message style"
+                value={f.matrixStyle}
+                options={[
+                  { value: 'full', label: 'Full' },
+                  { value: 'short', label: 'Short' },
+                ]}
+                onChange={(matrixStyle) => set({ matrixStyle })}
+              />
+              <MatrixPreview style={f.matrixStyle} />
+            </div>
+            {saved?.auth_set && !replaceAuth ? (
+              <SealedValue
+                label="Access token"
+                shown="Configured"
+                hint="Stored sealed and never shown again. Sent only to the saved homeserver."
+                onReplace={() => setReplaceAuth(true)}
+              />
+            ) : (
+              <TextField
+                label="Access token"
+                type="password"
+                mono
+                placeholder="syt_…"
+                value={f.auth}
+                autoFocus={replaceAuth}
+                error={shown('auth')}
+                hint={(replaceAuth ? 'Leave blank to keep the saved one. ' : '') + 'The bot account access token. Stored sealed and never shown again.'}
+                onChange={(e) => set({ auth: e.target.value })}
+              />
+            )}
+          </>
+        )}
 
         {f.kind === 'discord' && (
           <>

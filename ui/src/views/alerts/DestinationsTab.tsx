@@ -122,7 +122,7 @@ export function DestinationsTab({
               <div key={d.name} className={`panel al-dest${d.enabled ? '' : ' al-dest--off'}`}>
                 <div className="panel__h">
                   <h3 className="h3">{d.name}</h3>
-                  <Tag tone={d.kind === 'discord' ? 'brand' : d.kind === 'email' ? 'ok' : 'pop'}>{kindLabel(d)}</Tag>
+                  <Tag tone={d.kind === 'discord' || d.kind === 'matrix' ? 'brand' : d.kind === 'email' ? 'ok' : 'pop'}>{kindLabel(d)}</Tag>
                 </div>
                 <StatusBadge status={st.status} label={st.label} />
                 <KV
@@ -130,6 +130,7 @@ export function DestinationsTab({
                     ...(d.kind === 'email'
                       ? ([['To', d.to.join(', ')]] as [string, string][])
                       : ([['Address', maskedUrl || 'Missing']] as [string, string][])),
+                    ...(d.kind === 'matrix' ? ([['Room', d.room]] as [string, string][]) : []),
                     ['Receives', destinationReceives(d)],
                     ['Last send', lastSend(h)],
                   ]}
@@ -158,7 +159,7 @@ export function DestinationsTab({
             title="Only the in-app feed so far"
             action={isAdmin ? <Button variant="primary" icon="plus" onClick={() => setEditing(newForm('discord'))}>Add a destination</Button> : undefined}
           >
-            Add a Discord channel, a webhook for ntfy or Home Assistant, or an email address to be told when something breaks.
+            Add a Discord channel, a Matrix room, a webhook for ntfy or Home Assistant, or an email address to be told when something breaks.
           </EmptyState>
         )}
       </section>

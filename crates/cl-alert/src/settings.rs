@@ -14,13 +14,15 @@ pub const SETTINGS_CONFIG: &str = "_clouduler_alerts";
 pub const SMTP_PASSWORD_SECRET: &str = "_clouduler_alert_smtp_password";
 const SECRET_PREFIX: &str = "_clouduler_alert_";
 
-/// Sealed webhook URL of a webhook or discord destination. A discord URL
-/// carries its token, so the whole URL is the secret.
+/// Sealed URL of a webhook, discord or matrix destination. A discord URL
+/// carries its token, so the whole URL is the secret; for matrix it is the
+/// homeserver URL.
 pub fn url_secret(destination: &str) -> String {
     format!("{SECRET_PREFIX}{destination}_url")
 }
 
-/// Sealed `Authorization` header value of a generic webhook destination.
+/// Sealed `Authorization` header value of a generic webhook destination, or
+/// the access token of a matrix destination.
 pub fn auth_secret(destination: &str) -> String {
     format!("{SECRET_PREFIX}{destination}_auth")
 }
@@ -146,8 +148,31 @@ pub enum DestinationKind {
     Webhook,
     /// Discord channel webhook. URL in [`url_secret`].
     Discord(DiscordOptions),
+    /// Matrix room. Homeserver URL in [`url_secret`], access token in [`auth_secret`].
+    Matrix(MatrixOptions),
     /// Email through [`AlertSettings::smtp`].
     Email { to: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(deny_unknown_fields)]
+pub struct MatrixOptions {
+    /// Room ID (`!abc:example.org`) or alias (`#ops:example.org`) messages go to.
+    pub room: String,
+    #[serde(default)]
+    pub style: MatrixStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixStyle {
+    /// Title, detail, facts, log excerpt, links and a cluster footer.
+    #[default]
+    Full,
+    /// One plain line: severity and title, plus stack, instance and node.
+    Short,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -392,10 +417,14 @@ mod tests {
                 {"name": "hook", "kind": "webhook", "severities": ["critical"]},
                 {"name": "disc", "kind": "discord", "style": "short", "mention": "@here", "severities": ["critical", "warning"]},
                 {"name": "mail", "kind": "email", "to": ["a@b.example"]},
+                {"name": "mx", "kind": "matrix", "room": "!r:example.org"},
             ]
         });
         let s: AlertSettings = serde_json::from_value(json).expect("parse");
-        assert_eq!(s.destinations.len(), 3);
+        assert_eq!(s.destinations.len(), 4);
+        assert!(
+            matches!(&s.destinations[3].kind, DestinationKind::Matrix(o) if o.room == "!r:example.org")
+        );
         assert!(matches!(s.destinations[0].kind, DestinationKind::Webhook));
         assert!(matches!(
             s.destinations[1].kind,

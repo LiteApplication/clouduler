@@ -32,7 +32,7 @@ Each of these has a solution, but the solutions are separate tools you have to l
 - **Automatic HTTPS.** The [built-in proxy](/docs/features/proxy-and-tls) routes hostnames to containers and gets Let's Encrypt certificates for you. [DNS records](/docs/features/dns-publishing) can be published through Cloudflare.
 - **Failover.** If a machine disappears, its containers are started on the others and the dead machine stops its own copies first, so a volume is never written twice. See [Failover](/docs/features/failover).
 - **Backups.** Scheduled [restic backups](/docs/features/backups) of drives to an SSH server, S3 or a local path on a node (a mounted NAS works), and a [git export](/docs/features/git-backup) of your configuration.
-- **Alerts.** [Discord, webhook or email](/docs/features/alerts) when a node goes offline, a disk fills up or a container crash-loops.
+- **Alerts.** [Discord, Matrix, webhook or email](/docs/features/alerts) when a node goes offline, a disk fills up or a container crash-loops.
 - **AI access, if you want it.** An [MCP server](/docs/features/mcp) lets an assistant such as Claude Code inspect and debug the cluster, with secrets redacted.
 
 ## What it is not

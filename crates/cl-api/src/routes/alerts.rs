@@ -399,8 +399,12 @@ async fn put_settings(
         Some(v) => v.is_some(),
         None => st.secrets.contains_key(&url_secret(name)),
     };
+    let has_auth = |name: &str| match auth_in.get(name) {
+        Some(v) => v.is_some(),
+        None => st.secrets.contains_key(&auth_secret(name)),
+    };
     let new_url = |name: &str| url_in.get(name).cloned().flatten();
-    if let Err((field, msg)) = settings::validate(&new, &has_url, &new_url) {
+    if let Err((field, msg)) = settings::validate(&new, &has_url, &has_auth, &new_url) {
         return Err(ApiError::BadRequest(format!("{field}: {msg}")));
     }
     let smtp_password = clean(&body.smtp_password)?;
@@ -454,7 +458,11 @@ async fn put_settings(
                 removes.insert(auth_secret(&d.name));
             }
             Some(n) => {
-                if !matches!(n.kind, DestinationKind::Webhook) && !auth_in.contains_key(&n.name) {
+                if !matches!(
+                    n.kind,
+                    DestinationKind::Webhook | DestinationKind::Matrix(_)
+                ) && !auth_in.contains_key(&n.name)
+                {
                     removes.insert(auth_secret(&n.name));
                 }
                 if matches!(n.kind, DestinationKind::Email { .. }) {
@@ -619,7 +627,7 @@ async fn test(
     if let Some(url) = &secrets.url {
         let ok = match dest.kind {
             DestinationKind::Discord(_) => settings::discord_url_ok(url),
-            DestinationKind::Webhook => settings::http_url_ok(url),
+            DestinationKind::Webhook | DestinationKind::Matrix(_) => settings::http_url_ok(url),
             DestinationKind::Email { .. } => true,
         };
         if !ok {

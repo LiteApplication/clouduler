@@ -31,6 +31,7 @@ import type { DesiredState } from './generated/DesiredState';
 import type { DiscordNotify } from './generated/DiscordNotify';
 import type { DiscordNotifyLevels } from './generated/DiscordNotifyLevels';
 import type { DiscordStyle } from './generated/DiscordStyle';
+import type { MatrixStyle } from './generated/MatrixStyle';
 import type { DnsPublishMode } from './generated/DnsPublishMode';
 import type { DnsServerConfig } from './generated/DnsServerConfig';
 import type { DriveMode } from './generated/DriveMode';
@@ -100,6 +101,7 @@ export type {
   DiscordNotify,
   DiscordNotifyLevels,
   DiscordStyle,
+  MatrixStyle,
   DnsPublishMode,
   DnsServerConfig,
   DriveMode,
@@ -1399,7 +1401,13 @@ export interface EmailDestination extends AlertDestinationBase {
   kind: 'email';
   to: string[];
 }
-export type AlertDestination = DiscordDestination | WebhookDestination | EmailDestination;
+export interface MatrixDestination extends AlertDestinationBase {
+  kind: 'matrix';
+  /** Room ID (`!abc:example.org`) or alias (`#ops:example.org`). */
+  room: string;
+  style: MatrixStyle;
+}
+export type AlertDestination = DiscordDestination | WebhookDestination | MatrixDestination | EmailDestination;
 
 export interface AlertSmtp {
   host: string;

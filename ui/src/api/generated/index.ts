@@ -68,6 +68,8 @@ export type { InterfaceAddress } from './InterfaceAddress';
 export type { LinkSample } from './LinkSample';
 export type { LinkState } from './LinkState';
 export type { ManagedOpenPort } from './ManagedOpenPort';
+export type { MatrixOptions } from './MatrixOptions';
+export type { MatrixStyle } from './MatrixStyle';
 export type { McpClient } from './McpClient';
 export type { McpConfig } from './McpConfig';
 export type { McpGrant } from './McpGrant';

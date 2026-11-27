@@ -97,6 +97,18 @@ pub fn http_url_ok(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A room ID (`!opaque:server`) or alias (`#name:server`).
+pub fn matrix_room_ok(room: &str) -> bool {
+    let Some((local, server)) = room.split_once(':') else {
+        return false;
+    };
+    (local.starts_with('!') || local.starts_with('#'))
+        && local.len() > 1
+        && !server.is_empty()
+        && room.len() <= 255
+        && !room.contains(char::is_whitespace)
+}
+
 pub fn mention_ok(m: &str) -> bool {
     if m == "@here" || m == "@everyone" {
         return true;
@@ -143,10 +155,11 @@ fn hhmm_ok(s: &str) -> bool {
         && m.parse::<u8>().is_ok_and(|m| m < 60)
 }
 
-/// `has_url(name)` says whether a destination will have a URL secret.
+/// `has_url(name)` / `has_auth(name)` say whether a destination will have a URL / auth secret.
 pub fn validate(
     settings: &AlertSettings,
     has_url: &dyn Fn(&str) -> bool,
+    has_auth: &dyn Fn(&str) -> bool,
     url_to_check: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), (String, String)> {
     let err = |field: String, msg: &str| Err((field, msg.to_string()));
@@ -207,6 +220,28 @@ pub fn validate(
                             );
                         }
                     }
+                }
+            }
+            DestinationKind::Matrix(o) => {
+                if !has_url(&d.name) {
+                    return err(format!("{at}.url"), "a homeserver URL is required");
+                }
+                if !has_auth(&d.name) {
+                    return err(format!("{at}.auth"), "an access token is required");
+                }
+                if let Some(url) = url_to_check(&d.name) {
+                    if !http_url_ok(&url) {
+                        return err(
+                            format!("{at}.url"),
+                            "must be an http or https URL (https://matrix.example.org)",
+                        );
+                    }
+                }
+                if !matrix_room_ok(o.room.trim()) {
+                    return err(
+                        format!("{at}.room"),
+                        "use a room ID (!abc:example.org) or an alias (#ops:example.org)",
+                    );
                 }
             }
             DestinationKind::Email { to } => {
@@ -296,6 +331,50 @@ pub fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matrix_rooms() {
+        assert!(matrix_room_ok("!abc:example.org"));
+        assert!(matrix_room_ok("#ops:example.org"));
+        assert!(!matrix_room_ok("ops:example.org"));
+        assert!(!matrix_room_ok("#ops"));
+        assert!(!matrix_room_ok("#:example.org"));
+        assert!(!matrix_room_ok("#o ps:example.org"));
+    }
+
+    #[test]
+    fn matrix_needs_url_token_and_room() {
+        let s: AlertSettings = serde_json::from_value(serde_json::json!({
+            "destinations": [{"name": "mx", "kind": "matrix", "room": "!r:example.org"}]
+        }))
+        .unwrap();
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        let url = |_: &str| Some("https://matrix.example.org".to_string());
+        assert!(validate(&s, &yes, &yes, &url).is_ok());
+        assert_eq!(
+            validate(&s, &no, &yes, &url).unwrap_err().0,
+            "destinations[0].url"
+        );
+        assert_eq!(
+            validate(&s, &yes, &no, &url).unwrap_err().0,
+            "destinations[0].auth"
+        );
+        let bad = |_: &str| Some("ftp://x".to_string());
+        assert_eq!(
+            validate(&s, &yes, &yes, &bad).unwrap_err().0,
+            "destinations[0].url"
+        );
+        let mut s2 = s.clone();
+        s2.destinations[0].kind = DestinationKind::Matrix(cl_alert::MatrixOptions {
+            room: "nope".into(),
+            style: Default::default(),
+        });
+        assert_eq!(
+            validate(&s2, &yes, &yes, &url).unwrap_err().0,
+            "destinations[0].room"
+        );
+    }
 
     #[test]
     fn discord_urls() {

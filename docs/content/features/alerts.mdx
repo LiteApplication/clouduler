@@ -5,7 +5,7 @@ sidebar_position: 16
 
 # Alerts
 
-Alerts tell you when something in the cluster needs attention: a node went offline, a disk is nearly full, a container keeps crashing, a certificate is about to expire. They appear on the **Alerts** page and can also be sent to Discord, to any URL that accepts a JSON `POST` (a generic webhook), or by email.
+Alerts tell you when something in the cluster needs attention: a node went offline, a disk is nearly full, a container keeps crashing, a certificate is about to expire. They appear on the **Alerts** page and can also be sent to Discord, to a Matrix room, to any URL that accepts a JSON `POST` (a generic webhook), or by email.
 
 The cluster watches about 45 kinds of event ([catalog below](#events)). Each event has a severity (**Critical**, **Warning** or **Info**), and each destination chooses which severities it wants.
 
@@ -20,6 +20,7 @@ flowchart LR
   E -->|Critical, Warning| R{Routing}
   E -->|Info| G[Daily digest]
   R --> X[Discord]
+  R --> M[Matrix]
   R --> Y[Webhook]
   R --> Z[Email]
   G --> X
@@ -117,17 +118,18 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 
 ## Destinations
 
-A destination is a named place to send alerts. Three kinds exist.
+A destination is a named place to send alerts. Four kinds exist.
 
 | Kind | UI label | Sends |
 |---|---|---|
 | `discord` | Discord | A Discord webhook message: a rich embed or one plain line. See [Discord alerts](/docs/guides/discord-alerts). |
+| `matrix` | Matrix | An `m.text` message with an HTML body (`org.matrix.custom.html`) to a room, sent with `PUT <homeserver>/_matrix/client/v3/rooms/<room id>/send/m.room.message/<transaction id>` and an `Authorization: Bearer` access token. The room is a room ID (`!abc:example.org`) or an alias (`#ops:example.org`, resolved to an ID with the directory API on every send). The user the token belongs to must already be in the room. Retried on 408, 429 (honouring `retry_after_ms`) and 5xx; other 4xx responses are not retried. Messages carry the alert title, detail, stack, instance and node, a log excerpt (cut at 1500 characters) and the http(s) links; the digest is one list message. With `style: short` an alert is one plain line (emoji, severity word and title, then stack, instance and node when present) with no detail, excerpt, links or cluster footer, and the test message is one line; the digest is the same in both styles. |
 | `webhook` | Generic | A `POST` with a JSON body (`version` 1, `cluster`, `type` of `alert`, `digest` or `test`, the alert fields and `ui_url`). Headers: `X-Clouduler-Event`, `X-Clouduler-Severity`, `User-Agent: clouduler/<version>` and an optional `Authorization`. Retried on 408, 429 and 5xx; other 4xx responses are not retried. |
 | `email` | Email | A multipart text and HTML message through the SMTP server in `smtp`. See [Email through SMTP](/docs/guides/smtp). |
 
 Email subjects look like `[homelab] CRITICAL: <title>`, `[homelab] Resolved: <title>`, `[homelab] Escalated to <severity>: <title>`, `[homelab] Daily digest: N events` and `[homelab] Test message from Clouduler`.
 
-Webhook and Discord URLs are stored as sealed secrets (`_clouduler_alert_<name>_url`, and `_clouduler_alert_<name>_auth` for a generic webhook's Authorization value), never in the settings. The SMTP password is `_clouduler_alert_smtp_password`. After saving, the UI and API show a URL only as scheme and host (`https://discord.com/…`).
+Webhook and Discord URLs and Matrix homeserver URLs are stored as sealed secrets (`_clouduler_alert_<name>_url`, and `_clouduler_alert_<name>_auth` for a generic webhook's Authorization value or a Matrix access token), never in the settings. The Matrix room is not secret and is part of the settings. The SMTP password is `_clouduler_alert_smtp_password`. After saving, the UI and API show a URL only as scheme and host (`https://discord.com/…`).
 
 ## Tasks
 
@@ -136,7 +138,7 @@ Webhook and Discord URLs are stored as sealed secrets (`_clouduler_alert_<name>_
 <UiCli>
 <UiCli.Ui>
 
-Open **Alerts** (`/alerts`), then the **Destinations** tab, and click **Add destination** (admins only). Choose a type chip: **Discord**, **Generic** or **Email**. Enter a **Name** (it cannot be changed later), the **Webhook URL** (or **URL**, or **Recipients** for email), choose **Send these severities** (**Critical**, **Warning**, **Info, as a daily digest**), and click **Send test message**.
+Open **Alerts** (`/alerts`), then the **Destinations** tab, and click **Add destination** (admins only). Choose a type chip: **Discord**, **Matrix**, **Generic** or **Email**. Enter a **Name** (it cannot be changed later), the **Webhook URL** (or **Homeserver URL**, **Room**, **Message style** (**Full** or **Short**, with a preview) and **Access token** for Matrix, or **URL**, or **Recipients** for email), choose **Send these severities** (**Critical**, **Warning**, **Info, as a daily digest**), and click **Send test message**.
 
 For email, set up the server first in the SMTP panel on the same tab: **Host**, **Port**, **Security**, **Username**, **Password** and **From**, then use **Send a test email to**.
 
@@ -273,14 +275,16 @@ All settings apply live.
 <OptionTable rows={[
   {key: 'name', type: 'string', reload: 'live', required: true, description: '1 to 40 lowercase letters, digits or dashes; unique. Cannot be renamed in the UI.', quirks: 'Errors: use 1 to 40 lowercase letters, digits or dashes; another destination has this name'},
   {key: 'enabled', type: 'bool', default: 'true', reload: 'live', description: 'A disabled destination gets nothing.'},
-  {key: 'kind', type: 'webhook | discord | email', reload: 'live', required: true, description: 'Delivery method. The UI calls webhook "Generic".'},
+  {key: 'kind', type: 'webhook | discord | matrix | email', reload: 'live', required: true, description: 'Delivery method. The UI calls webhook "Generic".'},
   {key: 'severities', type: 'set', default: 'critical, warning', reload: 'live', description: 'Severities sent immediately. Needs at least one unless digest is on.'},
   {key: 'digest', type: 'bool', default: 'false', reload: 'live', description: 'Receive Info alerts as the daily digest.'},
   {key: 'categories', type: 'list', default: 'all', reload: 'live', description: 'Only alerts of these categories.', quirks: 'Error: unknown category'},
   {key: 'stacks', type: 'list', default: 'all', reload: 'live', description: 'Only alerts for these stacks.'},
-  {key: 'URL (secret)', type: 'URL', reload: 'live', required: true, description: 'Webhook or Discord URL, stored as _clouduler_alert_<name>_url and shown masked.', quirks: 'Errors: a URL is required; must be an http or https URL; not a Discord webhook URL (https://discord.com/api/webhooks/...)'},
-  {key: 'Authorization (secret)', type: 'string', reload: 'live', description: 'Generic webhook only. Value of the Authorization header, stored as _clouduler_alert_<name>_auth and sent as a sensitive header.'},
-  {key: 'style', type: 'embed | short', default: 'embed', reload: 'live', description: 'Discord: rich embed or one plain line.'},
+  {key: 'URL (secret)', type: 'URL', reload: 'live', required: true, description: 'Webhook or Discord URL, or Matrix homeserver URL, stored as _clouduler_alert_<name>_url and shown masked.', quirks: 'Errors: a URL is required (a homeserver URL is required for Matrix); must be an http or https URL; not a Discord webhook URL (https://discord.com/api/webhooks/...)'},
+  {key: 'Authorization (secret)', type: 'string', reload: 'live', description: 'Generic webhook: value of the Authorization header. Matrix: the access token (required; sent as `Bearer <token>`, and a leading `Bearer ` you paste is ignored). Stored as _clouduler_alert_<name>_auth and sent as a sensitive header.', quirks: 'Matrix error: an access token is required'},
+  {key: 'style (matrix)', type: 'full | short', default: 'full', reload: 'live', description: 'Matrix: full message, or one plain line per alert.'},
+  {key: 'room', type: 'string', reload: 'live', required: true, description: 'Matrix only: room ID (!abc:example.org) or alias (#ops:example.org).', quirks: 'Error: use a room ID (!abc:example.org) or an alias (#ops:example.org)'},
+  {key: 'style (discord)', type: 'embed | short', default: 'embed', reload: 'live', description: 'Discord: rich embed or one plain line.'},
   {key: 'mention', type: 'string', reload: 'live', description: 'Discord: text used for a Ping. One of <@&roleId>, <@userId>, <@!userId>, @here, @everyone (ids are digits only).', quirks: 'A Ping without a mention pings nobody. Normal and Silent messages never mention.'},
   {key: 'notify.critical', type: 'ping | normal | silent', default: 'ping', reload: 'live', description: 'Discord: how a critical alert announces itself.'},
   {key: 'notify.warning', type: 'ping | normal | silent', default: 'normal', reload: 'live', description: 'Discord: how a warning announces itself.'},
@@ -350,7 +354,7 @@ A resolved message goes only to destinations that received the opening. A destin
 </Quirk>
 
 <Quirk title="A masked URL means keep">
-When the UI sends back `https://discord.com/…` the stored secret is kept. To clear a secret use the Remove action; an empty value fails with `a secret value is empty`. Deleting a destination also deletes its URL and Authorization secrets.
+When the UI sends back `https://discord.com/…` the stored secret is kept. A stored webhook Authorization value or Matrix access token is only used by a test send when the URL is the saved one, so a test cannot carry it to another server. To clear a secret use the Remove action; an empty value fails with `a secret value is empty`. Deleting a destination also deletes its URL and Authorization secrets.
 </Quirk>
 
 <Quirk title="Two admins saving at once">
@@ -358,7 +362,7 @@ The second save fails with `the alert settings were changed by someone else, rel
 </Quirk>
 
 <Quirk title="Errors you may see from Discord">
-`Discord says the webhook does not exist (HTTP 404); it was probably deleted or the URL is wrong` (also for 401, not retried) and `Discord is rate limiting this webhook` (429, retried). Other messages: `the mail server refused the message: <reason>` (not retried), `could not send the email: <reason>` (retried), `the mail server did not answer in time`, `no email server is configured`, `the destination was removed`, `the destination was disabled`.
+`Discord says the webhook does not exist (HTTP 404); it was probably deleted or the URL is wrong` (also for 401, not retried) and `Discord is rate limiting this webhook` (429, retried). Matrix errors: `the homeserver rejected the access token (HTTP 401); it may be wrong or logged out`, `Matrix refused the message (HTTP 403): <reason>; is the user joined to the room?` (not retried), `the homeserver or room was not found (HTTP 404); check the homeserver URL and the room`, `the room alias does not exist on the homeserver` and `the homeserver is rate limiting this user` (429, retried). Other messages: `the mail server refused the message: <reason>` (not retried), `could not send the email: <reason>` (retried), `the mail server did not answer in time`, `no email server is configured`, `the destination was removed`, `the destination was disabled`.
 </Quirk>
 
 <Quirk title="Disk and memory alerts can linger" severity="info">

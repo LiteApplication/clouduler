@@ -229,6 +229,8 @@ Open **Alerts** (the destination status shows **Working** after a success) and u
 | An alert lingers after the value recovered | Disk and memory alerts use hysteresis. |
 | `Discord says the webhook does not exist (HTTP 404); it was probably deleted or the URL is wrong` | Recreate the webhook. Also shown for 401; not retried. |
 | `Discord is rate limiting this webhook` | HTTP 429, retried automatically. |
+| `the homeserver rejected the access token (HTTP 401); it may be wrong or logged out` | Paste a fresh Matrix access token. Not retried. |
+| `Matrix refused the message (HTTP 403)...` | The token's user has not joined the room. Not retried. |
 | Nobody is pinged on Discord | The mention is empty or the severity is not set to `ping`. Normal and Silent messages never mention. |
 | `the mail server refused the message: <reason>` | Wrong credentials or sender not allowed. Not retried. Check that **From** matches the account. |
 | `could not send the email: <reason>` | Connection or TLS problem. Retried. Check host, port and security pair up. |
