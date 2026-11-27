@@ -330,7 +330,18 @@ async fn reconcile_now(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn run_reconcile(state: &AppState, author: Option<(String, String)>) -> Result<(), ApiError> {
+/// Everything a git backup export or pull needs: config, a state snapshot, the cluster key and the deploy key.
+async fn load_backup_context(
+    state: &AppState,
+) -> Result<
+    (
+        cl_config::GitBackupConfig,
+        std::sync::Arc<cl_raft::ClusterState>,
+        std::sync::Arc<cl_secret::ClusterKey>,
+        String,
+    ),
+    ApiError,
+> {
     let backup_cfg = state
         .cluster_config
         .read()
@@ -353,6 +364,11 @@ async fn run_reconcile(state: &AppState, author: Option<(String, String)>) -> Re
                 "no git deploy key yet - it is generated after the first export".into(),
             )
         })?;
+    Ok((backup_cfg, cluster_state, key, private_key_pem))
+}
+
+async fn run_reconcile(state: &AppState, author: Option<(String, String)>) -> Result<(), ApiError> {
+    let (backup_cfg, cluster_state, key, private_key_pem) = load_backup_context(state).await?;
     let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)
         .map_err(|e| ApiError::Conflict(format!("invalid age recipient: {e}")))?;
 
@@ -466,28 +482,7 @@ enum PullOutcome {
 }
 
 async fn run_pull_outcome(state: &AppState) -> Result<PullOutcome, ApiError> {
-    let backup_cfg = state
-        .cluster_config
-        .read()
-        .await
-        .backup
-        .clone()
-        .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
-
-    let cluster_state = state.cluster.snapshot().await;
-    let key = {
-        let key_guard = state.key.read().await;
-        key_guard
-            .as_ref()
-            .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
-            .clone()
-    };
-    let private_key_pem =
-        cl_backup::deploy_key::load_private(&cluster_state, &key).ok_or_else(|| {
-            ApiError::Conflict(
-                "no git deploy key yet - it is generated after the first export".into(),
-            )
-        })?;
+    let (backup_cfg, cluster_state, _, private_key_pem) = load_backup_context(state).await?;
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
     let existing_stacks: BTreeSet<String> = cluster_state.stacks.keys().cloned().collect();
     let last_good_oid =
