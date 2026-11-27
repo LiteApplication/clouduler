@@ -106,29 +106,7 @@ impl Harness {
 }
 
 fn node_state(name: &str, addr: SocketAddr) -> NodeState {
-    NodeState {
-        name: name.to_string(),
-        id: test_id(name),
-        role: Role::Manager,
-        rpc_addr: addr,
-        drives: BTreeMap::new(),
-        availability: Availability::Active,
-        labels: Default::default(),
-        last_resort: false,
-        egress_networks: Default::default(),
-        networks: Default::default(),
-        open_ports: Default::default(),
-        open_all_ports: Default::default(),
-        arch: Default::default(),
-        binary_hash: Default::default(),
-        ui_hash: Default::default(),
-        started_at: Default::default(),
-        node_pubkey: Default::default(),
-        memory_total_bytes: Default::default(),
-        gpus: Default::default(),
-        images: Default::default(),
-        version: Default::default(),
-    }
+    NodeState::new(name, test_id(name), Role::Manager, addr)
 }
 
 #[tokio::test]

@@ -33,27 +33,13 @@ fn openraft_storage_suite() -> Result<(), StorageError> {
 
 fn node(name: &str) -> NodeState {
     NodeState {
-        name: name.to_string(),
-        id: uuid::Uuid::new_v4(),
-        role: Role::Manager,
-        rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
         drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
-        availability: Availability::Active,
-        labels: Default::default(),
-        last_resort: false,
-        egress_networks: Default::default(),
-        networks: Default::default(),
-        open_ports: Default::default(),
-        open_all_ports: Default::default(),
-        arch: Default::default(),
-        binary_hash: Default::default(),
-        ui_hash: Default::default(),
-        started_at: Default::default(),
-        node_pubkey: Default::default(),
-        memory_total_bytes: Default::default(),
-        gpus: Default::default(),
-        images: Default::default(),
-        version: Default::default(),
+        ..NodeState::new(
+            name,
+            uuid::Uuid::new_v4(),
+            Role::Manager,
+            "10.10.0.1:7373".parse().expect("addr"),
+        )
     }
 }
 

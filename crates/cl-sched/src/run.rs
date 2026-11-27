@@ -1820,7 +1820,7 @@ mod tests {
             12979125382987782001
         );
     }
-    use cl_raft::state::{Assignment, Availability, DesiredState, InstanceUpdate, NodeState, Role};
+    use cl_raft::state::{Assignment, DesiredState, InstanceUpdate, NodeState, Role};
 
     fn update(phase: UpdatePhase, at: i64) -> InstanceUpdate {
         InstanceUpdate {
@@ -1934,32 +1934,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn node(name: &str, drives: &[&str]) -> NodeState {
-        NodeState {
-            name: name.to_string(),
-            id: uuid::Uuid::new_v4(),
-            role: Role::Manager,
-            rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
-            drives: drives
-                .iter()
-                .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
-                .collect(),
-            availability: Availability::Active,
-            labels: Default::default(),
-            last_resort: false,
-            egress_networks: Default::default(),
-            networks: Default::default(),
-            open_ports: Default::default(),
-            open_all_ports: Default::default(),
-            arch: Default::default(),
-            binary_hash: Default::default(),
-            ui_hash: Default::default(),
-            started_at: Default::default(),
-            node_pubkey: Default::default(),
-            memory_total_bytes: Default::default(),
-            gpus: Default::default(),
-            images: Default::default(),
-            version: Default::default(),
-        }
+        let mut node = NodeState::new(
+            name,
+            uuid::Uuid::new_v4(),
+            Role::Manager,
+            "10.10.0.1:7373".parse().expect("addr"),
+        );
+        node.drives = drives
+            .iter()
+            .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
+            .collect();
+        node
     }
 
     const STACK: &str = r#"
@@ -2401,29 +2386,12 @@ web: { address: cloud, network: tailscale }
     }
 
     fn plain_node(name: &str) -> NodeState {
-        NodeState {
-            name: name.to_string(),
-            id: uuid::Uuid::new_v4(),
-            role: cl_raft::state::Role::Worker,
-            rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
-            drives: Default::default(),
-            availability: cl_raft::state::Availability::Active,
-            labels: Default::default(),
-            last_resort: false,
-            egress_networks: Default::default(),
-            networks: Default::default(),
-            open_ports: Default::default(),
-            open_all_ports: Default::default(),
-            arch: Default::default(),
-            binary_hash: Default::default(),
-            ui_hash: Default::default(),
-            started_at: Default::default(),
-            node_pubkey: Default::default(),
-            memory_total_bytes: Default::default(),
-            gpus: Default::default(),
-            images: Default::default(),
-            version: Default::default(),
-        }
+        NodeState::new(
+            name,
+            uuid::Uuid::new_v4(),
+            cl_raft::state::Role::Worker,
+            "10.10.0.1:7373".parse().expect("addr"),
+        )
     }
 
     #[test]
