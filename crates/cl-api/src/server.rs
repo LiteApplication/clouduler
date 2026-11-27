@@ -440,6 +440,11 @@ async fn relay_to_leader(state: &AppState, request: Request) -> Response {
         }
         req = req.header(name, value);
     }
+    send_to_leader(req).await
+}
+
+/// Sends a prepared leader request and streams its answer back, minus hop-by-hop headers.
+pub(crate) async fn send_to_leader(req: reqwest::RequestBuilder) -> Response {
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
