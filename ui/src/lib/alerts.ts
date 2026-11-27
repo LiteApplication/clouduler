@@ -383,8 +383,8 @@ export function formToDestination(f: DestForm): AlertDestination {
 const NAME_RE = /^[a-z0-9-]{1,40}$/;
 const DISCORD_URL = /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+/;
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
-/** A room ID (`!abc:example.org`) or alias (`#ops:example.org`). */
-const MATRIX_ROOM_RE = /^[!#][^\s:]+:[^\s]+$/;
+/** A room ID (`!abc:example.org`, or `!hash` with no server part) or alias (`#ops:example.org`). */
+const MATRIX_ROOM_RE = /^(?:![^\s:]+(?::[^\s]+)?|#[^\s:]+:[^\s]+)$/;
 const MENTION_RE = /^(@everyone|@here|<@&?!?\d+>)$/;
 
 export type FormErrors = Partial<Record<'name' | 'url' | 'auth' | 'room' | 'to' | 'mention' | 'severities', string>>;
@@ -403,7 +403,7 @@ export function validateForm(f: DestForm, taken: string[], savedUrl: boolean, sa
     if (f.kind === 'matrix') {
       if (!f.auth.trim() && !(f.original && savedAuth)) e.auth = 'Paste the access token.';
       const room = f.room.trim();
-      if (!MATRIX_ROOM_RE.test(room) || room.length > 255) e.room = 'Use a room ID (!abc:example.org) or an alias (#ops:example.org).';
+      if (!MATRIX_ROOM_RE.test(room) || room.length > 255) e.room = 'Use a room ID (!abc:example.org, or !abc on newer room versions) or an alias (#ops:example.org).';
     }
   } else {
     const to = splitList(f.to);

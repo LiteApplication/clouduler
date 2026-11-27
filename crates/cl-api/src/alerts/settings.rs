@@ -97,16 +97,22 @@ pub fn http_url_ok(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// A room ID (`!opaque:server`) or alias (`#name:server`).
+/// A room ID (`!opaque:server`, or just `!opaque` on room versions whose ID is
+/// a hash with no server part) or an alias (`#name:server`).
 pub fn matrix_room_ok(room: &str) -> bool {
-    let Some((local, server)) = room.split_once(':') else {
+    if room.len() > 255 || room.contains(char::is_whitespace) {
         return false;
-    };
-    (local.starts_with('!') || local.starts_with('#'))
-        && local.len() > 1
-        && !server.is_empty()
-        && room.len() <= 255
-        && !room.contains(char::is_whitespace)
+    }
+    if let Some(id) = room.strip_prefix('!') {
+        return match id.split_once(':') {
+            Some((local, server)) => !local.is_empty() && !server.is_empty(),
+            None => !id.is_empty(),
+        };
+    }
+    match room.strip_prefix('#').and_then(|a| a.split_once(':')) {
+        Some((local, server)) => !local.is_empty() && !server.is_empty(),
+        None => false,
+    }
 }
 
 pub fn mention_ok(m: &str) -> bool {
@@ -240,7 +246,7 @@ pub fn validate(
                 if !matrix_room_ok(o.room.trim()) {
                     return err(
                         format!("{at}.room"),
-                        "use a room ID (!abc:example.org) or an alias (#ops:example.org)",
+                        "use a room ID (!abc:example.org, or !abc on newer room versions) or an alias (#ops:example.org)",
                     );
                 }
             }
@@ -336,6 +342,9 @@ mod tests {
     fn matrix_rooms() {
         assert!(matrix_room_ok("!abc:example.org"));
         assert!(matrix_room_ok("#ops:example.org"));
+        assert!(matrix_room_ok("!Zq9x-hash_without_server"));
+        assert!(!matrix_room_ok("!"));
+        assert!(!matrix_room_ok("!abc:"));
         assert!(!matrix_room_ok("ops:example.org"));
         assert!(!matrix_room_ok("#ops"));
         assert!(!matrix_room_ok("#:example.org"));

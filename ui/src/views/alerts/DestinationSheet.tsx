@@ -256,7 +256,7 @@ export function DestinationSheet({
               placeholder="!abc123:example.org"
               value={f.room}
               error={shown('room')}
-              hint="A room ID (!abc:example.org) or an alias (#ops:example.org). The bot user must already have joined the room."
+              hint="A room ID (!abc:example.org, or just !abc on newer room versions) or an alias (#ops:example.org). The bot user must already have joined the room."
               onChange={(e) => set({ room: e.target.value })}
             />
             <div className="col" style={{ gap: 8 }}>
